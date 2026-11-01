@@ -1,0 +1,541 @@
+From 24680c9fceb6494d035c720c7ef69a44fb5c3f47 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 20:37:14 -0500
+Subject: [PATCH] Tab spacing, dark-mode OSD, theme colour wheel
+
+- Tabs on every page get room around them (padding 4x10 px, 10 px apart)
+  instead of running into each other.
+- The volume/Bluetooth OSD now looks like Dash's dialogs in each mode and
+  follows mode changes. It drew palette(window), which Dash leaves light,
+  so in dark mode it was a light panel with white text and icons.
+- Settings > Main > Color opens a colour wheel (the lighting plugins' wheel)
+  with a brightness slider and preview, instead of red/green/blue sliders.
+- The on-screen keyboard's backspace key reads "del": the font has no
+  backspace symbol.
+---
+ assets/stylesheets/dark.qss          |   3 +-
+ assets/stylesheets/light.qss         |   3 +-
+ include/app/widgets/color_picker.hpp |  42 +++------
+ include/app/widgets/color_wheel.hpp  |  43 +++++++++
+ include/app/widgets/osd.hpp          |   3 +
+ src/app/widgets/color_picker.cpp     |  75 ++++++++++-----
+ src/app/widgets/color_wheel.cpp      | 134 +++++++++++++++++++++++++++
+ src/app/widgets/osd.cpp              |  32 +++++--
+ src/app/widgets/text_entry.cpp       |   2 +-
+ 9 files changed, 273 insertions(+), 64 deletions(-)
+ create mode 100644 include/app/widgets/color_wheel.hpp
+ create mode 100644 src/app/widgets/color_wheel.cpp
+
+diff --git a/assets/stylesheets/dark.qss b/assets/stylesheets/dark.qss
+index 00c6586..042f628 100644
+--- a/assets/stylesheets/dark.qss
++++ b/assets/stylesheets/dark.qss
+@@ -23,9 +23,10 @@ QTabWidget::pane {
+ 
+ QTabBar::tab {
+     background-color: transparent;
++    margin-right: 10px;
+     color: rgba(255, 255, 255, 179);
+     margin-top: 2px;
+-    padding: 2px;
++    padding: 4px 10px;
+     border-bottom: 2px solid transparent;
+ }
+ 
+diff --git a/assets/stylesheets/light.qss b/assets/stylesheets/light.qss
+index 38bc1c8..5178422 100644
+--- a/assets/stylesheets/light.qss
++++ b/assets/stylesheets/light.qss
+@@ -23,9 +23,10 @@ QTabWidget::pane {
+ 
+ QTabBar::tab {
+     background-color: transparent;
++    margin-right: 10px;
+     color: rgba(0, 0, 0, 138);
+     margin-top: 2px;
+-    padding: 2px;
++    padding: 4px 10px;
+     border-bottom: 2px solid transparent;
+ }
+ 
+diff --git a/include/app/widgets/color_picker.hpp b/include/app/widgets/color_picker.hpp
+index 946f4bf..7a97e45 100644
+--- a/include/app/widgets/color_picker.hpp
++++ b/include/app/widgets/color_picker.hpp
+@@ -6,6 +6,10 @@
+ 
+ #include "app/widgets/dialog.hpp"
+ 
++class ColorWheel;
++
++// The theme colour: a swatch and its hex value; tapping it opens a pop-up
++// with a colour wheel (hue, saturation) and a brightness slider.
+ class ColorPicker : public QWidget {
+     Q_OBJECT
+ 
+@@ -15,48 +19,24 @@ class ColorPicker : public QWidget {
+     void update(QColor color);
+ 
+    private:
+-    QSlider *r_slider;
+-    QSlider *g_slider;
+-    QSlider *b_slider;
++    ColorWheel *wheel;
++    QSlider *brightness;
+ 
+     QFont font;
+     QFrame *color_hint;
++    QLabel *hex;
+     QPushButton *button;
+-    QPalette hint_palette;
+ 
+     double scale;
+ 
+-    inline void set_icon()
++    inline void set_icon(QColor color)
+     {
+         QPixmap block(this->button->iconSize());
+-        block.fill(this->color());
++        block.fill(color);
+         this->button->setIcon(block);
+     }
+-    inline QLayout *component_slider(QSlider *slider)
+-    {
+-        QHBoxLayout *layout = new QHBoxLayout();
+-        layout->setContentsMargins(0, 0, 0, 0);
+-
+-        slider->setProperty("neutral", true);
+-        slider->setTracking(false);
+-        slider->setRange(0, 255);
+-        slider->setFixedHeight(30 * this->scale);
+-
+-        QLabel *label = new QLabel(QString::number(slider->value()));
+-        label->setFont(this->font);
+-        label->setAlignment(Qt::AlignCenter);
+-        QObject::connect(slider, &QSlider::valueChanged, [this, label](int position) {
+-            label->setText(QString::number(position));
+-            this->hint_palette.setColor(QPalette::Window, this->color());
+-            this->color_hint->setPalette(this->hint_palette);
+-        });
+-
+-        layout->addWidget(slider, 4);
+-        layout->addWidget(label, 2);
+-
+-        return layout;
+-    }
+-    inline QColor color() { return QColor(this->r_slider->value(), this->g_slider->value(), this->b_slider->value()); }
++    QColor color() const;
++    void show_choice();
+ 
+     QWidget *dialog_body();
+ 
+diff --git a/include/app/widgets/color_wheel.hpp b/include/app/widgets/color_wheel.hpp
+new file mode 100644
+index 0000000..17393a5
+--- /dev/null
++++ b/include/app/widgets/color_wheel.hpp
+@@ -0,0 +1,43 @@
++#pragma once
++
++// Same wheel as the lighting plugins (lighting/common in Ozark OS)
++
++#include <QColor>
++#include <QImage>
++#include <QWidget>
++
++// Hue/saturation colour wheel, as in most LED apps: hue around the circle,
++// white in the middle to full colour at the edge. Brightness is left to a
++// separate control, so colours are always at full value.
++class ColorWheel : public QWidget {
++    Q_OBJECT
++
++   public:
++    explicit ColorWheel(QWidget *parent = nullptr);
++
++    QColor color() const;
++    void setColor(const QColor &color);  // no signal
++    bool dragging() const { return this->drag; }
++
++   signals:
++    // While the wheel is being touched or dragged, and once more on release
++    void colorChanged(const QColor &color);
++    void released(const QColor &color);
++
++   protected:
++    void paintEvent(QPaintEvent *event) override;
++    void resizeEvent(QResizeEvent *event) override;
++    void mousePressEvent(QMouseEvent *event) override;
++    void mouseMoveEvent(QMouseEvent *event) override;
++    void mouseReleaseEvent(QMouseEvent *event) override;
++    QSize sizeHint() const override { return QSize(200, 200); }
++
++   private:
++    QRectF circle() const;
++    void pick(const QPointF &position);
++
++    QImage wheel;
++    double hue = 0.0;         // 0..1, 0 = red
++    double saturation = 1.0;  // 0..1
++    bool drag = false;
++};
+diff --git a/include/app/widgets/osd.hpp b/include/app/widgets/osd.hpp
+index 51b1d78..4cde56d 100644
+--- a/include/app/widgets/osd.hpp
++++ b/include/app/widgets/osd.hpp
+@@ -6,6 +6,7 @@
+ #include <QString>
+ 
+ class Arbiter;
++class QFrame;
+ class QLabel;
+ class QProgressBar;
+ class QPushButton;
+@@ -29,8 +30,10 @@ class Osd : public QDialog {
+     void show_message(const QString &icon, const QString &text);
+     void present(const QString &icon);
+     void place();
++    void apply_theme();
+ 
+     Arbiter &arbiter;
++    QFrame *panel;
+     QPushButton *icon;
+     QLabel *text;
+     QProgressBar *level;
+diff --git a/src/app/widgets/color_picker.cpp b/src/app/widgets/color_picker.cpp
+index ba06f29..08b5dfe 100644
+--- a/src/app/widgets/color_picker.cpp
++++ b/src/app/widgets/color_picker.cpp
+@@ -1,42 +1,36 @@
+ #include <QColor>
+ #include <QHBoxLayout>
+-#include <QMap>
+ #include <QString>
+ 
+ #include "app/arbiter.hpp"
+ #include "app/config.hpp"
++#include "app/widgets/color_wheel.hpp"
+ #include "app/widgets/color_picker.hpp"
+ 
+ ColorPicker::ColorPicker(Arbiter &arbiter, uint8_t block_size, QFont font, QWidget *parent)
+     : QWidget(parent)
+-    , hint_palette()
+ {
+     this->font = font;
+ 
+     this->scale = arbiter.layout().scale;
+ 
+-    this->r_slider = new QSlider(Qt::Orientation::Horizontal);
+-    this->g_slider = new QSlider(Qt::Orientation::Horizontal);
+-    this->b_slider = new QSlider(Qt::Orientation::Horizontal);
+-
+     QHBoxLayout *layout = new QHBoxLayout(this);
+ 
+     this->button = new QPushButton(this);
+     this->button->setFlat(true);
+     this->button->setFont(this->font);
+-    this->button->setText(this->color().name());
+     this->button->setIconSize(QSize(block_size, block_size) * this->scale);
+-    this->set_icon();
+     layout->addWidget(this->button);
+ 
+     Dialog *dialog = new Dialog(arbiter, true, arbiter.window());
++    dialog->set_title("Theme color");
+     dialog->set_body(this->dialog_body());
+ 
+     QPushButton *save_button = new QPushButton("save");
+     connect(save_button, &QPushButton::clicked, [this]() {
+         QColor color = this->color();
+         this->button->setText(color.name());
+-        this->set_icon();
++        this->set_icon(color);
+ 
+         emit color_changed(color);
+     });
+@@ -45,30 +39,69 @@ ColorPicker::ColorPicker(Arbiter &arbiter, uint8_t block_size, QFont font, QWidg
+     connect(this->button, &QPushButton::clicked, [dialog]() { dialog->open(); });
+ }
+ 
++// The wheel gives hue and saturation at full brightness; the slider dims it
++QColor ColorPicker::color() const
++{
++    QColor color = this->wheel->color();
++    color.setHsv(color.hsvHue(), color.hsvSaturation(), this->brightness->value());
++    return color;
++}
++
+ void ColorPicker::update(QColor color)
+ {
+-    this->r_slider->setValue(color.red());
+-    this->g_slider->setValue(color.green());
+-    this->b_slider->setValue(color.blue());
++    this->wheel->setColor(color);
++    this->brightness->setValue(color.value());
+     this->button->setText(color.name());
++    this->set_icon(color);
++    this->show_choice();
++}
+ 
+-    this->set_icon();
++void ColorPicker::show_choice()
++{
++    const QColor color = this->color();
++    QPalette palette = this->color_hint->palette();
++    palette.setColor(QPalette::Window, color);
++    this->color_hint->setPalette(palette);
++    this->hex->setText(color.name());
+ }
+ 
+ QWidget *ColorPicker::dialog_body()
+ {
+     QWidget *widget = new QWidget();
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
++    QHBoxLayout *layout = new QHBoxLayout(widget);
++    layout->setContentsMargins(0, 8, 0, 0);
++    layout->setSpacing(24);
+ 
++    this->wheel = new ColorWheel(widget);
++    this->wheel->setFixedSize(QSize(260, 260) * this->scale);
++    connect(this->wheel, &ColorWheel::colorChanged, [this](const QColor &) { this->show_choice(); });
++    layout->addWidget(this->wheel);
++
++    auto side = new QVBoxLayout();
++    side->addStretch();
+     this->color_hint = new QFrame(widget);
+-    this->color_hint->setFixedHeight(12 * this->scale);
++    this->color_hint->setFixedSize(QSize(160, 64) * this->scale);
+     this->color_hint->setAutoFillBackground(true);
+-
+-    layout->addLayout(this->component_slider(this->r_slider));
+-    layout->addLayout(this->component_slider(this->g_slider));
+-    layout->addLayout(this->component_slider(this->b_slider));
+-    layout->addWidget(this->color_hint);
++    side->addWidget(this->color_hint, 0, Qt::AlignHCenter);
++    this->hex = new QLabel(widget);
++    this->hex->setFont(this->font);
++    this->hex->setAlignment(Qt::AlignCenter);
++    side->addWidget(this->hex);
++    side->addSpacing(16);
++
++    auto label = new QLabel("Brightness", widget);
++    label->setFont(this->font);
++    side->addWidget(label);
++    this->brightness = new QSlider(Qt::Orientation::Horizontal, widget);
++    this->brightness->setProperty("neutral", true);
++    this->brightness->setRange(0, 255);
++    this->brightness->setValue(255);
++    this->brightness->setFixedHeight(30 * this->scale);
++    this->brightness->setMinimumWidth(200 * this->scale);
++    connect(this->brightness, &QSlider::valueChanged, [this](int) { this->show_choice(); });
++    side->addWidget(this->brightness);
++    side->addStretch();
++    layout->addLayout(side);
+ 
+     return widget;
+ }
+diff --git a/src/app/widgets/color_wheel.cpp b/src/app/widgets/color_wheel.cpp
+new file mode 100644
+index 0000000..4e50262
+--- /dev/null
++++ b/src/app/widgets/color_wheel.cpp
+@@ -0,0 +1,134 @@
++#include <algorithm>
++#include <cmath>
++
++#include <QMouseEvent>
++#include <QPainter>
++
++#include "app/widgets/color_wheel.hpp"
++
++namespace {
++constexpr double kPi = 3.14159265358979323846;
++}  // namespace
++
++ColorWheel::ColorWheel(QWidget *parent)
++    : QWidget(parent)
++{
++    this->setAttribute(Qt::WA_OpaquePaintEvent, false);
++    this->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
++}
++
++QColor ColorWheel::color() const
++{
++    return QColor::fromHsvF(this->hue, this->saturation, 1.0);
++}
++
++void ColorWheel::setColor(const QColor &color)
++{
++    // Greys have no hue: keep the marker's angle, move it to the middle
++    const double hue = color.hsvHueF();
++    if (hue >= 0.0)
++        this->hue = hue;
++    this->saturation = color.hsvSaturationF();
++    this->update();
++}
++
++// The largest centred square, minus room for the marker at the edge
++QRectF ColorWheel::circle() const
++{
++    const double margin = 12.0;
++    const double size = std::min(this->width(), this->height()) - 2 * margin;
++    return QRectF((this->width() - size) / 2.0, (this->height() - size) / 2.0, size, size);
++}
++
++// Draw the wheel once per size, pixel by pixel, with a soft 1 px edge
++void ColorWheel::resizeEvent(QResizeEvent *)
++{
++    const QRectF c = this->circle();
++    const double r = c.width() / 2.0;
++    const QPointF centre = c.center();
++    const qreal dpr = this->devicePixelRatioF();
++
++    this->wheel = QImage(this->size() * dpr, QImage::Format_ARGB32_Premultiplied);
++    this->wheel.setDevicePixelRatio(dpr);
++    this->wheel.fill(Qt::transparent);
++    for (int y = 0; y < this->wheel.height(); ++y) {
++        auto line = reinterpret_cast<QRgb *>(this->wheel.scanLine(y));
++        for (int x = 0; x < this->wheel.width(); ++x) {
++            const double dx = (x + 0.5) / dpr - centre.x();
++            const double dy = (y + 0.5) / dpr - centre.y();
++            const double d = std::sqrt(dx * dx + dy * dy);
++            if (d > r + 1.0)
++                continue;
++            double angle = std::atan2(-dy, dx) / (2 * kPi);
++            if (angle < 0)
++                angle += 1.0;
++            const QColor c = QColor::fromHsvF(angle, std::min(d / r, 1.0), 1.0);
++            const double alpha = std::clamp(r + 0.5 - d, 0.0, 1.0);
++            line[x] = qPremultiply(qRgba(c.red(), c.green(), c.blue(), int(alpha * 255)));
++        }
++    }
++}
++
++void ColorWheel::paintEvent(QPaintEvent *)
++{
++    QPainter painter(this);
++    painter.setRenderHint(QPainter::Antialiasing);
++    painter.drawImage(0, 0, this->wheel);
++
++    // Marker: the picked colour in a white ring with a dark outline
++    const QRectF c = this->circle();
++    const double r = c.width() / 2.0;
++    const double angle = this->hue * 2 * kPi;
++    const QPointF at(c.center().x() + std::cos(angle) * this->saturation * r,
++                     c.center().y() - std::sin(angle) * this->saturation * r);
++    const double size = this->drag ? 14.0 : 11.0;
++    painter.setPen(QPen(QColor(0, 0, 0, 120), 5));
++    painter.setBrush(Qt::NoBrush);
++    painter.drawEllipse(at, size, size);
++    painter.setPen(QPen(Qt::white, 3));
++    painter.setBrush(this->color());
++    painter.drawEllipse(at, size, size);
++}
++
++void ColorWheel::pick(const QPointF &position)
++{
++    const QRectF c = this->circle();
++    const double dx = position.x() - c.center().x();
++    const double dy = position.y() - c.center().y();
++    double angle = std::atan2(-dy, dx) / (2 * kPi);
++    if (angle < 0)
++        angle += 1.0;
++    this->hue = angle;
++    this->saturation = std::min(std::sqrt(dx * dx + dy * dy) / (c.width() / 2.0), 1.0);
++    this->update();
++    emit colorChanged(this->color());
++}
++
++void ColorWheel::mousePressEvent(QMouseEvent *event)
++{
++    // Only start on the wheel itself, so the page can still be scrolled around it
++    const QRectF c = this->circle();
++    const QPointF d = event->pos() - c.center();
++    if (std::hypot(d.x(), d.y()) > c.width() / 2.0 + 12.0) {
++        event->ignore();
++        return;
++    }
++    this->drag = true;
++    this->pick(event->pos());
++}
++
++void ColorWheel::mouseMoveEvent(QMouseEvent *event)
++{
++    if (this->drag)
++        this->pick(event->pos());
++}
++
++void ColorWheel::mouseReleaseEvent(QMouseEvent *event)
++{
++    if (!this->drag)
++        return;
++    this->pick(event->pos());
++    this->drag = false;
++    this->update();
++    emit released(this->color());
++}
+diff --git a/src/app/widgets/osd.cpp b/src/app/widgets/osd.cpp
+index af1ea41..3cbbafe 100644
+--- a/src/app/widgets/osd.cpp
++++ b/src/app/widgets/osd.cpp
+@@ -30,15 +30,13 @@ Osd::Osd(Arbiter &arbiter, QWidget *parent)
+     const double scale = this->arbiter.layout().scale;
+     auto outer = new QHBoxLayout(this);
+     outer->setContentsMargins(0, 0, 0, 0);
+-    auto panel = new QFrame(this);
+-    panel->setObjectName("OsdPanel");
+-    // Follows light/dark mode through the palette Dash sets
+-    panel->setStyleSheet(QString(
+-        "QFrame#OsdPanel { background: palette(window); border: 1px solid palette(mid); border-radius: %1px; }"
+-        "QProgressBar { background-color: palette(alternate-base); border: none; border-radius: 2px; }"
+-        "QProgressBar::chunk { background-color: palette(base); border-radius: 2px; }")
+-        .arg(int(14 * scale)));
+-    outer->addWidget(panel);
++    this->panel = new QFrame(this);
++    this->panel->setObjectName("OsdPanel");
++    this->apply_theme();
++    connect(&this->arbiter, &Arbiter::mode_changed, this, [this]{ this->apply_theme(); });
++    connect(&this->arbiter, &Arbiter::color_changed, this, [this]{ this->apply_theme(); });
++    outer->addWidget(this->panel);
++    auto panel = this->panel;
+ 
+     auto layout = new QHBoxLayout(panel);
+     layout->setContentsMargins(int(16 * scale), int(10 * scale), int(20 * scale), int(10 * scale));
+@@ -100,6 +98,22 @@ Osd::Osd(Arbiter &arbiter, QWidget *parent)
+     });
+ }
+ 
++// Same look as Dash's dialogs in each mode (light.qss / dark.qss). Dash's
++// palette only carries the accent colour (base), so window/mid would stay
++// light in dark mode: the colours are spelled out instead.
++void Osd::apply_theme()
++{
++    const bool dark = this->arbiter.theme().mode == Session::Theme::Dark;
++    this->panel->setStyleSheet(QString(
++        "QFrame#OsdPanel { background-color: %1; border: 2px solid %2; border-radius: %3px; }"
++        "QProgressBar { background-color: %4; border: none; border-radius: 2px; }"
++        "QProgressBar::chunk { background-color: palette(base); border-radius: 2px; }")
++        .arg(dark ? "rgb(56, 56, 56)" : "rgb(255, 255, 255)")
++        .arg(dark ? "rgb(66, 66, 66)" : "rgb(224, 224, 224)")
++        .arg(int(14 * this->arbiter.layout().scale))
++        .arg(dark ? "rgba(255, 255, 255, 46)" : "rgba(0, 0, 0, 31)"));
++}
++
+ bool Osd::eventFilter(QObject *watched, QEvent *event)
+ {
+     if (watched == this->parentWidget() && event->type() == QEvent::Resize && this->isVisible())
+diff --git a/src/app/widgets/text_entry.cpp b/src/app/widgets/text_entry.cpp
+index 47f9033..1bb19f9 100644
+--- a/src/app/widgets/text_entry.cpp
++++ b/src/app/widgets/text_entry.cpp
+@@ -56,7 +56,7 @@ void Keyboard::build()
+             col += 2;
+         }
+         if (r == 3)
+-            key("⌫", r, 17, 3, [this] { this->target->backspace(); });
++            key("del", r, 17, 3, [this] { this->target->backspace(); });
+     }
+     key(this->symbols ? "abc" : "?123", 4, 0, 4, [this] {
+         this->symbols = !this->symbols;
+-- 
+2.43.0
+

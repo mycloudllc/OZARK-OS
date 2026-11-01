@@ -1,0 +1,1153 @@
+From 8cef507f3cd818462f8873585af3fb91c8039e5c Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 00:46:28 -0500
+Subject: [PATCH] Bluetooth and Local players: now-playing view, library
+ browser
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+NowPlaying, shared by both: album art (or a music-note placeholder) with
+rounded corners and sized to fit, title / artist / album (long names end
+in "…"; messages such as "Nothing playing" wrap), a progress bar with
+elapsed and total time, and previous / round play-pause / next.
+
+- Bluetooth: the phone's track (BlueZ AVRCP), position counted on between
+  BlueZ's reports, the device's name; Android Auto's media with its album
+  art when that is playing. Without a player it says so and points to
+  Settings > Phone. AVRCP can't seek, so the bar only shows progress.
+- Local: a folder browser (folder and song icons, up, folder name, make it
+  the music home) beside the now-playing view. Songs show title and artist
+  from their tags and cover art embedded in the file (TagLib 2 pictures);
+  MP3, FLAC, Ogg Vorbis/Opus and WAV. Browsing doesn't stop the
+  music: the folder on screen becomes the playlist when a song in it is
+  tapped.
+---
+ assets/icons/arrow_upward.svg       |   4 +
+ assets/icons/folder.svg             |   4 +
+ assets/icons/music_note.svg         |   4 +
+ assets/resources.qrc                |   3 +
+ assets/stylesheets/dark.qss         |   5 +
+ assets/stylesheets/light.qss        |   5 +
+ include/app/pages/media.hpp         |  43 ++-
+ include/app/widgets/now_playing.hpp |  68 ++++
+ src/app/pages/media.cpp             | 545 +++++++++++++++-------------
+ src/app/pages/settings.cpp          |   4 +-
+ src/app/widgets/now_playing.cpp     | 224 ++++++++++++
+ 11 files changed, 640 insertions(+), 269 deletions(-)
+ create mode 100644 assets/icons/arrow_upward.svg
+ create mode 100644 assets/icons/folder.svg
+ create mode 100644 assets/icons/music_note.svg
+ create mode 100644 include/app/widgets/now_playing.hpp
+ create mode 100644 src/app/widgets/now_playing.cpp
+
+diff --git a/assets/icons/arrow_upward.svg b/assets/icons/arrow_upward.svg
+new file mode 100644
+index 0000000..d7752be
+--- /dev/null
++++ b/assets/icons/arrow_upward.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z"/>
++</svg>
+diff --git a/assets/icons/folder.svg b/assets/icons/folder.svg
+new file mode 100644
+index 0000000..a066739
+--- /dev/null
++++ b/assets/icons/folder.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/>
++</svg>
+diff --git a/assets/icons/music_note.svg b/assets/icons/music_note.svg
+new file mode 100644
+index 0000000..c95fd46
+--- /dev/null
++++ b/assets/icons/music_note.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
++</svg>
+diff --git a/assets/resources.qrc b/assets/resources.qrc
+index 5a8565d..e7a7dda 100644
+--- a/assets/resources.qrc
++++ b/assets/resources.qrc
+@@ -6,6 +6,9 @@
+         <file>camera_overlay.svg</file>
+         <file>splash.png</file>
+         <file>icons/play.svg</file>
++        <file>icons/arrow_upward.svg</file>
++        <file>icons/folder.svg</file>
++        <file>icons/music_note.svg</file>
+         <file>icons/pause.svg</file>
+         <file>icons/stop.svg</file>
+         <file>icons/brightness_low.svg</file>
+diff --git a/assets/stylesheets/dark.qss b/assets/stylesheets/dark.qss
+index 2dcbe5f..5a5bef7 100644
+--- a/assets/stylesheets/dark.qss
++++ b/assets/stylesheets/dark.qss
+@@ -15,6 +15,11 @@ QLabel:disabled {
+     color: rgba(255, 255, 255, 128);
+ }
+ 
++/* Secondary text (album, credits): set the "muted" property on a label */
++QLabel[muted="true"] {
++    color: rgba(255, 255, 255, 140);
++}
++
+ QTabWidget::pane {
+     background-color: transparent;
+     border: none;
+diff --git a/assets/stylesheets/light.qss b/assets/stylesheets/light.qss
+index 5f63893..8b23273 100644
+--- a/assets/stylesheets/light.qss
++++ b/assets/stylesheets/light.qss
+@@ -15,6 +15,11 @@ QLabel:disabled {
+     color: rgba(0, 0, 0, 97);
+ }
+ 
++/* Secondary text (album, credits): set the "muted" property on a label */
++QLabel[muted="true"] {
++    color: rgba(0, 0, 0, 138);
++}
++
+ QTabWidget::pane {
+     background-color: transparent;
+     border: none;
+diff --git a/include/app/pages/media.hpp b/include/app/pages/media.hpp
+index b3a86b5..c8b1a12 100644
+--- a/include/app/pages/media.hpp
++++ b/include/app/pages/media.hpp
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <BluezQt/MediaPlayer>
++#include <BluezQt/MediaPlayerTrack>
+ #include <QFileInfo>
+ #include <QMap>
+ #include <QMediaPlayer>
+@@ -10,6 +12,7 @@
+ #include "app/config.hpp"
+ #include "app/pages/page.hpp"
+ #include "app/widgets/selector.hpp"
++#include "app/widgets/now_playing.hpp"
+ #include "app/widgets/tuner.hpp"
+ 
+ class Arbiter;
+@@ -23,6 +26,7 @@ class MediaPage : public QTabWidget, public Page {
+     void init() override;
+ };
+ 
++// Music playing on the connected phone (Bluetooth AVRCP), or on Android Auto
+ class BluetoothPlayerTab : public QWidget {
+     Q_OBJECT
+ 
+@@ -30,10 +34,20 @@ class BluetoothPlayerTab : public QWidget {
+     BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+    private:
+-    Arbiter &arbiter;
++    void attach(const QString &device, BluezQt::MediaPlayerPtr player);
++    void show_track(const BluezQt::MediaPlayerTrack &track);
++    void tick();
+ 
+-    QWidget *track_widget();
+-    QWidget *controls_widget();
++    Arbiter &arbiter;
++    NowPlaying *now_playing;
++    BluezQt::MediaPlayerPtr player;
++    QMetaObject::Connection position_connection;
++    // BlueZ only reports the position now and then: count on from the last report
++    qint64 position_base = 0;
++    qint64 duration = 0;
++    QElapsedTimer since_report;
++    bool playing = false;
++    QTimer *ticker;
+ };
+ 
+ class RadioPlayerTab : public QWidget {
+@@ -73,24 +87,27 @@ class RadioPlayerTab : public QWidget {
+ 
+ };
+ 
++// Music files on this unit: a folder browser beside the now-playing view
+ class LocalPlayerTab : public QWidget {
+     Q_OBJECT
+ 
+    public:
+     LocalPlayerTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+-    static QString durationFmt(int total_ms);
+-
+    private:
+-    Arbiter &arbiter;
+-
+-    QWidget *playlist_widget();
+-    QWidget *seek_widget();
+-    QWidget *controls_widget();
+-    void populate_dirs(QString path, QListWidget *dirs_widget);
+-    void populate_tracks(QString path, QListWidget *tracks_widget);
++    QWidget *browser_widget();
++    void open_folder(const QString &path);
++    void show_current();
+ 
++    Arbiter &arbiter;
+     Config *config;
+     QMediaPlayer *player;
+-    QLabel *path_label;
++    NowPlaying *now_playing;
++    QListWidget *list;
++    QLabel *folder;
++    QPushButton *up;
++    QPushButton *home;
++    QString path;
++    QStringList track_paths;    // songs in the folder on screen
++    QStringList playing_paths;  // the playlist: the folder a song was last tapped in
+ };
+diff --git a/include/app/widgets/now_playing.hpp b/include/app/widgets/now_playing.hpp
+new file mode 100644
+index 0000000..5edcb86
+--- /dev/null
++++ b/include/app/widgets/now_playing.hpp
+@@ -0,0 +1,68 @@
++#pragma once
++
++#include <QImage>
++#include <QtWidgets>
++
++class Arbiter;
++
++// Album art (or a music-note placeholder), drawn with rounded corners
++class AlbumArt : public QWidget {
++    Q_OBJECT
++
++   public:
++    AlbumArt(Arbiter &arbiter, QWidget *parent = nullptr);
++    void set_art(const QImage &art);
++
++   protected:
++    void paintEvent(QPaintEvent *event) override;
++
++   private:
++    Arbiter &arbiter;
++    QImage art;
++};
++
++// The now-playing view of the Bluetooth and Local players: album art, title,
++// artist and album, a progress bar with times, and previous / play-pause /
++// next. Sources feed it track details and react to its signals.
++class NowPlaying : public QWidget {
++    Q_OBJECT
++
++   public:
++    NowPlaying(Arbiter &arbiter, QWidget *parent = nullptr);
++
++    void set_track(const QString &title, const QString &artist, const QString &album);
++    void set_art(const QImage &art) { this->art->set_art(art); }
++    void set_source(const QString &source);
++    // Shown instead of the track details when nothing is loaded ("" = track)
++    void set_message(const QString &message, const QString &hint = QString());
++    void set_playing(bool playing);
++    // Milliseconds; a zero duration hides the progress bar's times
++    void set_position(qint64 position, qint64 duration);
++    void set_seekable(bool seekable);
++
++   signals:
++    void play_pause(bool play);
++    void previous();
++    void next();
++    void seek(qint64 position);
++
++   protected:
++    void resizeEvent(QResizeEvent *event) override;
++
++   private:
++    void update_text();
++    QPushButton *control(const QString &icon, int size);
++
++    Arbiter &arbiter;
++    AlbumArt *art;
++    QLabel *source;
++    QLabel *title;
++    QLabel *artist;
++    QLabel *album;
++    QSlider *progress;
++    QLabel *elapsed;
++    QLabel *total;
++    QPushButton *play;
++    bool playing = false;
++    QString title_text, artist_text, album_text, message_text, hint_text;
++};
+diff --git a/src/app/pages/media.cpp b/src/app/pages/media.cpp
+index 07d7eab..e03d457 100644
+--- a/src/app/pages/media.cpp
++++ b/src/app/pages/media.cpp
+@@ -2,6 +2,7 @@
+ #include <math.h>
+ #include <tag.h>
+ #include <tpropertymap.h>
++#include <tvariant.h>
+ #include <BluezQt/PendingCall>
+ #include <QDirIterator>
+ #include <QListWidget>
+@@ -9,6 +10,7 @@
+ #include <QMediaPlaylist>
+ 
+ #include "app/pages/equalizer.hpp"
++#include "app/utilities/icon_engine.hpp"
+ #include "app/window.hpp"
+ #include "app/pages/media.hpp"
+ #include "plugins/radio_plugin.hpp"
+@@ -31,113 +33,120 @@ void MediaPage::init()
+ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+     : QWidget(parent)
+     , arbiter(arbiter)
++    , now_playing(new NowPlaying(arbiter, this))
++    , ticker(new QTimer(this))
+ {
+-    QVBoxLayout *layout = new QVBoxLayout(this);
++    auto layout = new QVBoxLayout(this);
++    layout->addWidget(this->now_playing);
++    // AVRCP can skip and pause, not seek
++    this->now_playing->set_seekable(false);
+ 
+-    layout->addWidget(this->track_widget());
+-    layout->addWidget(this->controls_widget());
+-}
++    connect(this->now_playing, &NowPlaying::play_pause, [this](bool play){
++        if (this->player)
++            play ? this->player->play() : this->player->pause();
++    });
++    connect(this->now_playing, &NowPlaying::previous, [this]{ if (this->player) this->player->previous(); });
++    connect(this->now_playing, &NowPlaying::next, [this]{ if (this->player) this->player->next(); });
+ 
+-QWidget *BluetoothPlayerTab::track_widget()
+-{
+-    BluezQt::MediaPlayerPtr media_player = this->arbiter.system().bluetooth.get_media_player().second;
+-    AAHandler *aa_handler = this->arbiter.android_auto().handler;
+-
+-    QWidget *widget = new QWidget(this);
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-
+-    QLabel *artist_hdr = new QLabel("Artist", widget);
+-    QLabel *artist = new QLabel((media_player != nullptr) ? media_player->track().artist() : QString(), widget);
+-    artist->setIndent(16);
+-    layout->addWidget(artist_hdr);
+-    layout->addWidget(artist);
+-
+-    QLabel *album_hdr = new QLabel("Album", widget);
+-    QLabel *album = new QLabel((media_player != nullptr) ? media_player->track().album() : QString(), widget);
+-    album->setIndent(16);
+-    layout->addWidget(album_hdr);
+-    layout->addWidget(album);
+-
+-    QLabel *title_hdr = new QLabel("Title", widget);
+-    QLabel *title = new QLabel((media_player != nullptr) ? media_player->track().title() : QString(), widget);
+-    title->setIndent(16);
+-    layout->addWidget(title_hdr);
+-    layout->addWidget(title);
+-
+-    QLabel *albumArt = new QLabel(widget);
+-    layout->addWidget(albumArt);
+-
+-    connect(&this->arbiter.system().bluetooth, &Bluetooth::media_player_track_changed, [artist, album, title](BluezQt::MediaPlayerTrack track){
+-        artist->setText(track.artist());
+-        album->setText(track.album());
+-        title->setText(track.title());
++    Bluetooth &bluetooth = this->arbiter.system().bluetooth;
++    connect(&bluetooth, &Bluetooth::media_player_changed, this, [this](QString device, BluezQt::MediaPlayerPtr player){
++        this->attach(device, player);
++    });
++    connect(&bluetooth, &Bluetooth::media_player_track_changed, this, [this](BluezQt::MediaPlayerTrack track){
++        this->show_track(track);
+     });
+-    connect(aa_handler, &AAHandler::aa_media_metadata_update, [artist, album, title, albumArt](const aasdk::proto::messages::MediaInfoChannelMetadataData& metadata){
+-        title->setText(QString::fromStdString(metadata.track_name()));
+-        if(metadata.has_artist_name()) artist->setText(QString::fromStdString(metadata.artist_name()));
+-        if(metadata.has_album_name()) album->setText(QString::fromStdString(metadata.album_name()));
+-        if(metadata.has_album_art()){
+-            QImage art;
++    connect(&bluetooth, &Bluetooth::media_player_status_changed, this, [this](BluezQt::MediaPlayer::Status status){
++        this->position_base = this->player ? this->player->position() : 0;
++        this->since_report.restart();
++        this->playing = status == BluezQt::MediaPlayer::Status::Playing;
++        this->now_playing->set_playing(this->playing);
++        this->tick();
++    });
++
++    // Android Auto's media (it calls from its own threads: copy, then update here)
++    AAHandler *aa = this->arbiter.android_auto().handler;
++    connect(aa, &AAHandler::aa_media_metadata_update, [this](const aasdk::proto::messages::MediaInfoChannelMetadataData &metadata){
++        const QString title = QString::fromStdString(metadata.track_name());
++        const QString artist = metadata.has_artist_name() ? QString::fromStdString(metadata.artist_name()) : QString();
++        const QString album = metadata.has_album_name() ? QString::fromStdString(metadata.album_name()) : QString();
++        const qint64 length = metadata.has_track_length() ? qint64(metadata.track_length()) * 1000 : 0;
++        QImage art;
++        if (metadata.has_album_art())
+             art.loadFromData(QByteArray::fromStdString(metadata.album_art()));
+-            albumArt->setPixmap(QPixmap::fromImage(art));
+-        }
+-    
++        QMetaObject::invokeMethod(this, [this, title, artist, album, length, art]{
++            this->now_playing->set_message(QString());
++            this->now_playing->set_source("Android Auto");
++            this->now_playing->set_track(title, artist, album);
++            this->now_playing->set_art(art);
++            this->duration = length;
++        }, Qt::QueuedConnection);
++    });
++    connect(aa, &AAHandler::aa_media_playback_update, [this](const aasdk::proto::messages::MediaInfoChannelPlaybackData &playback){
++        const bool playing = playback.playback_state() == aasdk::proto::messages::MediaInfoChannelPlaybackData::PLAY;
++        const qint64 progress = qint64(playback.track_progress()) * 1000;
++        QMetaObject::invokeMethod(this, [this, playing, progress]{
++            this->playing = playing;
++            this->position_base = progress;
++            this->since_report.restart();
++            this->now_playing->set_playing(playing);
++            this->tick();
++        }, Qt::QueuedConnection);
+     });
+ 
++    this->ticker->setInterval(1000);
++    connect(this->ticker, &QTimer::timeout, [this]{ this->tick(); });
++    this->ticker->start();
+ 
+-    return widget;
++    auto current = bluetooth.get_media_player();
++    this->attach(current.first, current.second);
+ }
+ 
+-QWidget *BluetoothPlayerTab::controls_widget()
++void BluetoothPlayerTab::attach(const QString &device, BluezQt::MediaPlayerPtr player)
+ {
+-    BluezQt::MediaPlayerPtr media_player = this->arbiter.system().bluetooth.get_media_player().second;
+-
+-    QWidget *widget = new QWidget(this);
+-    QHBoxLayout *layout = new QHBoxLayout(widget);
+-
+-    QPushButton *previous_button = new QPushButton(widget);
+-    previous_button->setFlat(true);
+-    this->arbiter.forge().iconize("skip_previous", previous_button, 56);
+-    connect(previous_button, &QPushButton::clicked, [this]{
+-        BluezQt::MediaPlayerPtr media_player = this->arbiter.system().bluetooth.get_media_player().second;
+-        if (media_player != nullptr)
+-            media_player->previous()->waitForFinished();
+-    });
+-    layout->addWidget(previous_button);
+-
+-    QPushButton *play_button = new QPushButton(widget);
+-    play_button->setFlat(true);
+-    play_button->setCheckable(true);
+-    bool status = (media_player != nullptr) ? media_player->status() == BluezQt::MediaPlayer::Status::Playing : false;
+-    play_button->setChecked(status);
+-    this->arbiter.forge().iconize("play", "pause", play_button, 56);
+-    connect(play_button, &QPushButton::clicked, [this, play_button](bool checked = false){
+-        play_button->setChecked(!checked);
+-
+-        BluezQt::MediaPlayerPtr media_player = this->arbiter.system().bluetooth.get_media_player().second;
+-        if (media_player != nullptr) {
+-            if (checked)
+-                media_player->play()->waitForFinished();
+-            else
+-                media_player->pause()->waitForFinished();
+-        }
+-    });
+-    connect(&this->arbiter.system().bluetooth, &Bluetooth::media_player_status_changed, [play_button](BluezQt::MediaPlayer::Status status){
+-        play_button->setChecked(status == BluezQt::MediaPlayer::Status::Playing);
+-    });
+-    layout->addWidget(play_button);
+-
+-    QPushButton *forward_button = new QPushButton(widget);
+-    forward_button->setFlat(true);
+-    this->arbiter.forge().iconize("skip_next", forward_button, 56);
+-    connect(forward_button, &QPushButton::clicked, [this]{
+-        BluezQt::MediaPlayerPtr media_player = this->arbiter.system().bluetooth.get_media_player().second;
+-        if (media_player != nullptr)
+-            media_player->next()->waitForFinished();
++    if (this->position_connection)
++        disconnect(this->position_connection);
++    this->player = player;
++    this->now_playing->set_art(QImage());
++
++    if (!player) {
++        this->playing = false;
++        this->duration = 0;
++        this->now_playing->set_source(QString());
++        this->now_playing->set_message("Nothing playing over Bluetooth", "Connect your phone in Settings > Phone");
++        this->now_playing->set_playing(false);
++        this->now_playing->set_position(0, 0);
++        return;
++    }
++
++    this->now_playing->set_message(QString());
++    this->now_playing->set_source(device);
++    this->position_connection = connect(player.data(), &BluezQt::MediaPlayer::positionChanged, this, [this](quint32 position){
++        this->position_base = position;
++        this->since_report.restart();
++        this->tick();
+     });
+-    layout->addWidget(forward_button);
++    this->playing = player->status() == BluezQt::MediaPlayer::Status::Playing;
++    this->now_playing->set_playing(this->playing);
++    this->show_track(player->track());
++}
+ 
+-    return widget;
++void BluetoothPlayerTab::show_track(const BluezQt::MediaPlayerTrack &track)
++{
++    this->now_playing->set_track(track.title().isEmpty() ? QString("Unknown title") : track.title(), track.artist(), track.album());
++    this->duration = track.duration();
++    this->position_base = this->player ? this->player->position() : 0;
++    this->since_report.restart();
++    this->tick();
++}
++
++void BluetoothPlayerTab::tick()
++{
++    qint64 position = this->position_base;
++    if (this->playing && this->since_report.isValid())
++        position += this->since_report.elapsed();
++    if (this->duration > 0)
++        position = std::min(position, this->duration);
++    this->now_playing->set_position(position, this->duration);
+ }
+ 
+ QMap<QString, QFileInfo> RadioPlayerTab::get_plugins()
+@@ -407,195 +416,223 @@ QWidget *RadioPlayerTab::controls_widget()
+     return widget;
+ }
+ 
++namespace {
++// Audio files the local player lists: what Ozark OS's GStreamer decodes
++// (meta-ozark opendash recipe; AAC/M4A would need gst-libav)
++const QStringList kAudioFiles = {"*.mp3", "*.flac", "*.ogg", "*.oga", "*.opus", "*.wav"};
++
++struct TrackTags {
++    QString title, artist, album;
++    QImage art;
++};
++
++// Title, artist, album and embedded cover art (any format TagLib reads)
++TrackTags read_tags(const QString &path, bool with_art)
++{
++    TrackTags tags;
++    TagLib::FileRef file(QFile::encodeName(path).constData());
++    if (!file.isNull() && file.tag()) {
++        tags.title = QString::fromStdString(file.tag()->title().to8Bit(true));
++        tags.artist = QString::fromStdString(file.tag()->artist().to8Bit(true));
++        tags.album = QString::fromStdString(file.tag()->album().to8Bit(true));
++    }
++    if (with_art && !file.isNull()) {
++        const auto pictures = file.complexProperties("PICTURE");
++        if (!pictures.isEmpty()) {
++            const TagLib::ByteVector data = pictures.front()["data"].toByteVector();
++            tags.art.loadFromData(reinterpret_cast<const uchar *>(data.data()), int(data.size()));
++        }
++    }
++    if (tags.title.isEmpty())
++        tags.title = QFileInfo(path).completeBaseName();
++    return tags;
++}
++}  // namespace
++
+ LocalPlayerTab::LocalPlayerTab(Arbiter &arbiter, QWidget *parent)
+     : QWidget(parent)
+     , arbiter(arbiter)
++    , config(Config::get_instance())
++    , player(new QMediaPlayer(this))
++    , now_playing(new NowPlaying(arbiter, this))
+ {
+-    this->config = Config::get_instance();
+-
+-    QMediaPlaylist *playlist = new QMediaPlaylist(this);
++    auto playlist = new QMediaPlaylist(this);
+     playlist->setPlaybackMode(QMediaPlaylist::Loop);
+-
+-    this->player = new QMediaPlayer(this);
+     this->player->setPlaylist(playlist);
+ 
+-    this->path_label = new QLabel(this->config->get_media_home(), this);
+-
+-    QVBoxLayout *layout = new QVBoxLayout(this);
+-
+-    layout->addWidget(this->path_label);
+-    layout->addWidget(this->playlist_widget());
+-    layout->addWidget(this->seek_widget());
+-    layout->addWidget(this->controls_widget());
+-}
+-
+-QWidget *LocalPlayerTab::playlist_widget()
+-{
+-    QWidget *widget = new QWidget(this);
+-    QHBoxLayout *layout = new QHBoxLayout(widget);
+-
+-    QString root_path(config->get_media_home());
+-
+-    QPushButton *home_button = new QPushButton(widget);
+-    home_button->setFlat(true);
+-    home_button->setCheckable(true);
+-    home_button->setChecked(this->config->get_media_home() == root_path);
+-    this->arbiter.forge().iconize("playlist_add", "playlist_add_check", home_button, 32);
+-    connect(home_button, &QPushButton::clicked, [this](bool checked = false) {
+-        this->config->set_media_home(checked ? this->path_label->text() : QDir().absolutePath());
++    auto layout = new QHBoxLayout(this);
++    layout->addWidget(this->browser_widget(), 2);
++    layout->addWidget(this->now_playing, 3);
++
++    connect(this->now_playing, &NowPlaying::play_pause, [this](bool play){
++        if (play) {
++            if (this->playing_paths.isEmpty() && !this->track_paths.isEmpty()) {
++                for (const QString &file : this->track_paths)
++                    this->player->playlist()->addMedia(QMediaContent(QUrl::fromLocalFile(file)));
++                this->playing_paths = this->track_paths;
++                this->player->playlist()->setCurrentIndex(0);
++            }
++            this->player->play();
++        }
++        else {
++            this->player->pause();
++        }
+     });
+-    layout->addWidget(home_button, 0, Qt::AlignTop);
+-
+-    QListWidget *folders = new QListWidget(widget);
+-    Session::Forge::to_touch_scroller(folders);
+-    this->populate_dirs(root_path, folders);
+-    layout->addWidget(folders, 1);
+-
+-    QListWidget *tracks = new QListWidget(widget);
+-    Session::Forge::to_touch_scroller(tracks);
+-    this->populate_tracks(root_path, tracks);
+-    connect(tracks, &QListWidget::itemClicked, [tracks, player = this->player](QListWidgetItem *item) {
+-        player->playlist()->setCurrentIndex(tracks->row(item));
+-        player->play();
++    connect(this->now_playing, &NowPlaying::previous, [this]{
++        this->player->playlist()->previous();
++        this->player->play();
+     });
+-    connect(this->player->playlist(), &QMediaPlaylist::currentIndexChanged, [tracks](int idx) {
+-        if (idx < 0) return;
+-        tracks->setCurrentRow(idx);
++    connect(this->now_playing, &NowPlaying::next, [this]{
++        this->player->playlist()->next();
++        this->player->play();
+     });
+-    connect(folders, &QListWidget::itemClicked, [this, folders, tracks, home_button](QListWidgetItem *item) {
+-        if (!item->isSelected()) return;
++    connect(this->now_playing, &NowPlaying::seek, [this](qint64 position){ this->player->setPosition(position); });
+ 
+-        tracks->clear();
+-        this->player->playlist()->clear();
+-        QString current_path(item->data(Qt::UserRole).toString());
+-        this->path_label->setText(current_path);
+-        this->populate_tracks(current_path, tracks);
+-        this->populate_dirs(current_path, folders);
+-
+-        home_button->setChecked(this->config->get_media_home() == current_path);
++    connect(this->player, &QMediaPlayer::stateChanged, [this](QMediaPlayer::State state){
++        this->now_playing->set_playing(state == QMediaPlayer::PlayingState);
+     });
+-    layout->addWidget(tracks, 2);
+-
+-    return widget;
+-}
+-
+-QWidget *LocalPlayerTab::seek_widget()
+-{
+-    QWidget *widget = new QWidget(this);
+-    QHBoxLayout *layout = new QHBoxLayout(widget);
+-
+-    QSlider *slider = new QSlider(Qt::Orientation::Horizontal, widget);
+-    slider->setTracking(false);
+-    slider->setRange(0, 0);
+-    QLabel *value = new QLabel(LocalPlayerTab::durationFmt(slider->value()), widget);
+-    connect(slider, &QSlider::sliderReleased,
+-            [player = this->player, slider]() { player->setPosition(slider->sliderPosition()); });
+-    connect(slider, &QSlider::sliderMoved,
+-            [value](int position) { value->setText(LocalPlayerTab::durationFmt(position)); });
+-    connect(this->player, &QMediaPlayer::durationChanged, [slider](qint64 duration) {
+-        slider->setValue(0);
+-        slider->setRange(0, duration);
++    connect(this->player, &QMediaPlayer::positionChanged, [this](qint64 position){
++        this->now_playing->set_position(position, this->player->duration());
+     });
+-    connect(this->player, &QMediaPlayer::positionChanged, [slider, value](qint64 position) {
+-        if (!slider->isSliderDown()) {
+-            slider->setValue(position);
+-            value->setText(LocalPlayerTab::durationFmt(position));
+-        }
++    connect(this->player, &QMediaPlayer::durationChanged, [this](qint64 duration){
++        this->now_playing->set_position(this->player->position(), duration);
+     });
++    connect(playlist, &QMediaPlaylist::currentIndexChanged, [this](int){ this->show_current(); });
+ 
+-    layout->addStretch(4);
+-    layout->addWidget(slider, 28);
+-    layout->addWidget(value, 3);
+-    layout->addStretch(1);
+-
+-    return widget;
++    this->open_folder(this->config->get_media_home());
++    this->show_current();
++    // The list's icons are drawn in the theme's text colour: redraw on a change
++    connect(&this->arbiter, &Arbiter::mode_changed, this, [this]{ this->open_folder(this->path); });
+ }
+ 
+-QWidget *LocalPlayerTab::controls_widget()
++QWidget *LocalPlayerTab::browser_widget()
+ {
+-    QWidget *widget = new QWidget(this);
+-    QHBoxLayout *layout = new QHBoxLayout(widget);
+-
+-    QPushButton *previous_button = new QPushButton(widget);
+-    previous_button->setFlat(true);
+-    this->arbiter.forge().iconize("skip_previous", previous_button, 56);
+-    connect(previous_button, &QPushButton::clicked, [player = this->player]() {
+-        if (player->playlist()->currentIndex() < 0) player->playlist()->setCurrentIndex(0);
+-        player->playlist()->previous();
+-        player->play();
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++    layout->setContentsMargins(0, 0, 0, 0);
++
++    // Header: up a folder, the folder's name, make it the music home
++    auto header = new QHBoxLayout();
++    this->up = new QPushButton(widget);
++    this->up->setFlat(true);
++    this->arbiter.forge().iconize("arrow_upward", this->up, 28);
++    connect(this->up, &QPushButton::clicked, [this]{
++        QDir dir(this->path);
++        if (dir.cdUp())
++            this->open_folder(dir.absolutePath());
+     });
+-    layout->addWidget(previous_button);
+-
+-    QPushButton *play_button = new QPushButton(widget);
+-    play_button->setFlat(true);
+-    play_button->setCheckable(true);
+-    play_button->setChecked(false);
+-    this->arbiter.forge().iconize("play", "pause", play_button, 56);
+-    connect(play_button, &QPushButton::clicked, [player = this->player, play_button](bool checked = false) {
+-        play_button->setChecked(!checked);
+-        if (checked)
+-            player->play();
+-        else
+-            player->pause();
++    header->addWidget(this->up);
++
++    this->folder = new QLabel(widget);
++    QFont font = this->arbiter.forge().font(14);
++    font.setBold(true);
++    this->folder->setFont(font);
++    header->addWidget(this->folder, 1);
++
++    this->home = new QPushButton(widget);
++    this->home->setFlat(true);
++    this->home->setCheckable(true);
++    this->arbiter.forge().iconize("playlist_add", "playlist_add_check", this->home, 28);
++    connect(this->home, &QPushButton::clicked, [this](bool checked){
++        this->config->set_media_home(checked ? this->path : QDir::homePath());
+     });
+-    connect(this->player, &QMediaPlayer::stateChanged,
+-            [play_button](QMediaPlayer::State state) { play_button->setChecked(state == QMediaPlayer::PlayingState); });
+-    layout->addWidget(play_button);
+-
+-    QPushButton *forward_button = new QPushButton(widget);
+-    forward_button->setFlat(true);
+-    this->arbiter.forge().iconize("skip_next", forward_button, 56);
+-    connect(forward_button, &QPushButton::clicked, [player = this->player]() {
+-        player->playlist()->next();
+-        player->play();
++    header->addWidget(this->home);
++    layout->addLayout(header);
++
++    // Folders, then songs
++    this->list = new QListWidget(widget);
++    Session::Forge::to_touch_scroller(this->list);
++    this->list->setIconSize(QSize(24, 24) * this->arbiter.layout().scale);
++    connect(this->list, &QListWidget::itemClicked, [this](QListWidgetItem *item){
++        const int track = item->data(Qt::UserRole + 1).toInt();
++        if (track < 0) {
++            this->open_folder(item->data(Qt::UserRole).toString());
++        }
++        else {
++            // The folder on screen becomes the playlist when one of its songs is tapped
++            if (this->playing_paths != this->track_paths) {
++                this->player->playlist()->clear();
++                for (const QString &file : this->track_paths)
++                    this->player->playlist()->addMedia(QMediaContent(QUrl::fromLocalFile(file)));
++                this->playing_paths = this->track_paths;
++            }
++            this->player->playlist()->setCurrentIndex(track);
++            this->player->play();
++        }
+     });
+-    layout->addWidget(forward_button);
++    layout->addWidget(this->list, 1);
+ 
+     return widget;
+ }
+ 
+-QString LocalPlayerTab::durationFmt(int total_ms)
+-{
+-    int mins = (total_ms / (1000 * 60)) % 60;
+-    int secs = (total_ms / 1000) % 60;
+-
+-    return QString("%1:%2").arg(mins, 2, 10, QChar('0')).arg(secs, 2, 10, QChar('0'));
+-}
+-
+-void LocalPlayerTab::populate_dirs(QString path, QListWidget *dirs_widget)
++void LocalPlayerTab::open_folder(const QString &path)
+ {
+-    dirs_widget->clear();
+-    QDir current_dir(path);
+-    QFileInfoList dirs = current_dir.entryInfoList(QDir::AllDirs | QDir::Readable);
+-    for (QFileInfo dir : dirs) {
+-        if (dir.fileName() == ".") continue;
+-
+-        QListWidgetItem *item = new QListWidgetItem(dir.fileName(), dirs_widget);
+-        if (dir.fileName() == "..") {
+-            item->setText("↲");
+-
+-            if (current_dir.isRoot()) item->setFlags(Qt::NoItemFlags);
+-        }
+-        else {
+-            item->setText(dir.fileName());
+-        }
+-        item->setData(Qt::UserRole, QVariant(dir.absoluteFilePath()));
++    QDir dir(path);
++    if (!dir.exists())
++        dir = QDir::home();
++    this->path = dir.absolutePath();
++    this->folder->setText(dir.isRoot() ? QString("/") : dir.dirName());
++    this->up->setEnabled(!dir.isRoot());
++    this->home->setChecked(this->config->get_media_home() == this->path);
++
++    // Browsing doesn't stop the music: this only lists the folder
++    this->track_paths.clear();
++    this->list->clear();
++
++    // Pre-rendered: Dash's tinting icon engine floods the whole square when a
++    // list paints it straight onto its background. The selected row gets the
++    // icon in the highlight's text colour.
++    const QSize icon_size = this->list->iconSize();
++    auto list_icon = [this, icon_size](const QString &file) {
++        const QPixmap normal = QIcon(new IconEngine(this->arbiter, file, false)).pixmap(icon_size);
++        QPixmap selected = normal;
++        QPainter painter(&selected);
++        painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
++        // as the stylesheet's selected text: light on the accent in light mode, dark in dark mode
++        const bool dark = this->arbiter.theme().mode == Session::Theme::Dark;
++        painter.fillRect(selected.rect(), dark ? QColor(0, 0, 0) : QColor(255, 255, 255, 222));
++        painter.end();
++        QIcon icon(normal);
++        icon.addPixmap(selected, QIcon::Selected);
++        return icon;
++    };
++    const QIcon folder_icon = list_icon(":/icons/folder.svg");
++    const QIcon track_icon = list_icon(":/icons/music_note.svg");
++    for (const QFileInfo &sub : dir.entryInfoList(QDir::AllDirs | QDir::NoDotAndDotDot | QDir::Readable, QDir::Name | QDir::IgnoreCase)) {
++        auto item = new QListWidgetItem(folder_icon, sub.fileName(), this->list);
++        item->setData(Qt::UserRole, sub.absoluteFilePath());
++        item->setData(Qt::UserRole + 1, -1);
++    }
++    for (const QFileInfo &file : dir.entryInfoList(kAudioFiles, QDir::Files | QDir::Readable, QDir::Name | QDir::IgnoreCase)) {
++        const TrackTags tags = read_tags(file.absoluteFilePath(), false);
++        const QString text = tags.artist.isEmpty() ? tags.title : QString("%1 · %2").arg(tags.title, tags.artist);
++        auto item = new QListWidgetItem(track_icon, text, this->list);
++        item->setData(Qt::UserRole, file.absoluteFilePath());
++        item->setData(Qt::UserRole + 1, this->track_paths.size());
++        this->track_paths.append(file.absoluteFilePath());
+     }
++    this->show_current();
+ }
+ 
+-void LocalPlayerTab::populate_tracks(QString path, QListWidget *tracks_widget)
++void LocalPlayerTab::show_current()
+ {
+-    QStringList tracks = QDir(path).entryList(QStringList() << "*.mp3", QDir::Files | QDir::Readable);
+-    for (QString track : tracks) {
+-        if (this->player->playlist()->addMedia(QMediaContent(QUrl::fromLocalFile(path + '/' + track)))) {
+-            TagLib::FileRef f(std::string(path.toStdString() + "/" + track.toStdString()).c_str());
+-            if (!f.isNull() && f.tag()) {
+-                TagLib::Tag *tag = f.tag();
+-                tag->title();
+-            }
+-            int lastPoint = track.lastIndexOf(".");
+-            QString fileNameNoExt = track.left(lastPoint);
+-            new QListWidgetItem(fileNameNoExt, tracks_widget);
+-        }
++    const int index = this->player->playlist()->currentIndex();
++    if (index < 0 || index >= this->playing_paths.size()) {
++        this->now_playing->set_art(QImage());
++        if (this->track_paths.isEmpty())
++            this->now_playing->set_message("No music in this folder", "Copy music to the radio, then open its folder here");
++        else
++            this->now_playing->set_message("Choose a song", QString("%1 in this folder").arg(this->track_paths.size()));
++        this->now_playing->set_position(0, 0);
++        return;
++    }
++    const TrackTags tags = read_tags(this->playing_paths[index], true);
++    this->now_playing->set_message(QString());
++    this->now_playing->set_track(tags.title, tags.artist, tags.album);
++    this->now_playing->set_art(tags.art);
++    // Highlight it when its folder is the one on screen
++    for (int i = 0; i < this->list->count(); i++) {
++        if (this->list->item(i)->data(Qt::UserRole).toString() == this->playing_paths[index])
++            this->list->setCurrentRow(i);
+     }
+ }
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index d575865..c9493f2 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -719,11 +719,11 @@ QWidget *AboutSettingsTab::load_msg()
+     // build time for reproducible builds, so neither is shown)
+     auto revision = new QLabel("github.com/openDsh/dash", widget);
+     revision->setFont(small);
+-    revision->setEnabled(false);
++    revision->setProperty("muted", true);
+     revision->setAlignment(Qt::AlignCenter);
+     auto android_auto = new QLabel("Android Auto by OpenAuto and aasdk", widget);
+     android_auto->setFont(small);
+-    android_auto->setEnabled(false);
++    android_auto->setProperty("muted", true);
+     android_auto->setAlignment(Qt::AlignCenter);
+ 
+     layout->addStretch();
+diff --git a/src/app/widgets/now_playing.cpp b/src/app/widgets/now_playing.cpp
+new file mode 100644
+index 0000000..9e8de20
+--- /dev/null
++++ b/src/app/widgets/now_playing.cpp
+@@ -0,0 +1,224 @@
++#include "app/arbiter.hpp"
++#include "app/utilities/icon_engine.hpp"
++
++#include "app/widgets/now_playing.hpp"
++
++namespace {
++QString clock(qint64 ms)
++{
++    const qint64 s = std::max<qint64>(0, ms / 1000);
++    if (s >= 3600)
++        return QString("%1:%2:%3").arg(s / 3600).arg((s / 60) % 60, 2, 10, QChar('0')).arg(s % 60, 2, 10, QChar('0'));
++    return QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QChar('0'));
++}
++}  // namespace
++
++AlbumArt::AlbumArt(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    const int side = 220 * arbiter.layout().scale;
++    this->setFixedSize(side, side);  // NowPlaying resizes it to fit
++    connect(&arbiter, &Arbiter::mode_changed, this, [this]{ this->update(); });
++}
++
++void AlbumArt::set_art(const QImage &art)
++{
++    this->art = art;
++    this->update();
++}
++
++void AlbumArt::paintEvent(QPaintEvent *)
++{
++    QPainter painter(this);
++    painter.setRenderHint(QPainter::Antialiasing);
++    painter.setRenderHint(QPainter::SmoothPixmapTransform);
++    const QRectF frame = this->rect();
++    const qreal radius = 12 * this->arbiter.layout().scale;
++    QPainterPath path;
++    path.addRoundedRect(frame, radius, radius);
++    painter.setClipPath(path);
++
++    if (!this->art.isNull()) {
++        // fill the square, cropping the longer side
++        const QImage scaled = this->art.scaled(this->size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
++        painter.drawImage(QPointF((this->width() - scaled.width()) / 2.0, (this->height() - scaled.height()) / 2.0), scaled);
++        return;
++    }
++
++    // placeholder: a soft tile with a music note (Dash's palette carries only
++    // the accent, so the tile's colour comes from the mode)
++    const bool dark = this->arbiter.theme().mode == Session::Theme::Dark;
++    const QColor tile = dark ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 20);
++    painter.fillPath(path, tile);
++    const int note = this->width() * 0.45;
++    QIcon icon(new IconEngine(this->arbiter, ":/icons/music_note.svg", false));
++    const QPixmap pixmap = icon.pixmap(note, note, QIcon::Disabled);
++    painter.drawPixmap((this->width() - note) / 2, (this->height() - note) / 2, pixmap);
++}
++
++NowPlaying::NowPlaying(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    const double scale = arbiter.layout().scale;
++    auto layout = new QHBoxLayout(this);
++    layout->setSpacing(24 * scale);
++
++    this->art = new AlbumArt(arbiter, this);
++    layout->addWidget(this->art, 0, Qt::AlignVCenter);
++
++    auto right = new QVBoxLayout();
++    right->setSpacing(4 * scale);
++    right->addStretch(1);
++
++    this->source = new QLabel(this);
++    this->source->setFont(arbiter.forge().font(11));
++    this->source->setProperty("muted", true);
++    right->addWidget(this->source);
++
++    this->title = new QLabel(this);
++    QFont title_font = arbiter.forge().font(20);
++    title_font.setBold(true);
++    this->title->setFont(title_font);
++    right->addWidget(this->title);
++
++    this->artist = new QLabel(this);
++    this->artist->setFont(arbiter.forge().font(15));
++    right->addWidget(this->artist);
++
++    this->album = new QLabel(this);
++    this->album->setFont(arbiter.forge().font(12));
++    this->album->setProperty("muted", true);
++    right->addWidget(this->album);
++    right->addSpacing(12 * scale);
++
++    auto times = new QHBoxLayout();
++    this->elapsed = new QLabel(this);
++    this->elapsed->setFont(arbiter.forge().font(11));
++    this->progress = new QSlider(Qt::Horizontal, this);
++    this->progress->setTracking(false);
++    this->progress->setRange(0, 0);
++    this->total = new QLabel(this);
++    this->total->setFont(arbiter.forge().font(11));
++    times->addWidget(this->elapsed);
++    times->addWidget(this->progress, 1);
++    times->addWidget(this->total);
++    right->addLayout(times);
++    connect(this->progress, &QSlider::sliderMoved, [this](int position){ this->elapsed->setText(clock(position)); });
++    connect(this->progress, &QSlider::sliderReleased, [this]{ emit seek(this->progress->sliderPosition()); });
++
++    auto controls = new QHBoxLayout();
++    controls->setSpacing(24 * scale);
++    controls->addStretch(1);
++    auto prev = this->control("skip_previous", 40);
++    connect(prev, &QPushButton::clicked, [this]{ emit previous(); });
++    controls->addWidget(prev);
++
++    // The main control: a round button; its icon follows the playing state
++    this->play = new QPushButton(this);
++    const int side = 76 * scale;
++    this->play->setFixedSize(side, side);
++    this->play->setStyleSheet(QString("QPushButton { border-radius: %1px; padding: 0; }").arg(side / 2));
++    this->arbiter.forge().iconize("play", this->play, 40);
++    connect(this->play, &QPushButton::clicked, [this]{ emit play_pause(!this->playing); });
++    controls->addWidget(this->play);
++
++    auto nxt = this->control("skip_next", 40);
++    connect(nxt, &QPushButton::clicked, [this]{ emit next(); });
++    controls->addWidget(nxt);
++    controls->addStretch(1);
++    right->addLayout(controls);
++    right->addStretch(1);
++
++    layout->addLayout(right, 1);
++    this->set_position(0, 0);
++}
++
++QPushButton *NowPlaying::control(const QString &icon, int size)
++{
++    auto button = new QPushButton(this);
++    button->setFlat(true);
++    this->arbiter.forge().iconize(icon, button, size);
++    return button;
++}
++
++void NowPlaying::set_track(const QString &title, const QString &artist, const QString &album)
++{
++    this->title_text = title;
++    this->artist_text = artist;
++    this->album_text = album;
++    this->update_text();
++}
++
++void NowPlaying::set_source(const QString &source)
++{
++    this->source->setText(source);
++    this->source->setVisible(!source.isEmpty());
++}
++
++void NowPlaying::set_message(const QString &message, const QString &hint)
++{
++    this->message_text = message;
++    this->hint_text = hint;
++    this->update_text();
++}
++
++void NowPlaying::set_playing(bool playing)
++{
++    if (playing == this->playing)
++        return;
++    this->playing = playing;
++    this->arbiter.forge().iconize(playing ? "pause" : "play", this->play, 40);
++}
++
++void NowPlaying::set_position(qint64 position, qint64 duration)
++{
++    const bool known = duration > 0;
++    if (!this->progress->isSliderDown()) {
++        this->progress->setRange(0, known ? int(duration) : 0);
++        this->progress->setValue(int(std::min(position, std::max<qint64>(duration, 0))));
++        this->elapsed->setText(known ? clock(position) : QString());
++    }
++    this->total->setText(known ? clock(duration) : QString());
++}
++
++void NowPlaying::set_seekable(bool seekable)
++{
++    this->progress->setEnabled(seekable);
++}
++
++void NowPlaying::resizeEvent(QResizeEvent *event)
++{
++    QWidget::resizeEvent(event);
++    // Art: as tall as fits, but leave the text at least ~55% of the width
++    const int side = std::max(80, std::min(int(event->size().height() * 0.8), int(event->size().width() * 0.42)));
++    if (side != this->art->width())
++        this->art->setFixedSize(side, side);
++    this->update_text();
++}
++
++// Long names end in "…" rather than widening the layout
++void NowPlaying::update_text()
++{
++    const int width = std::max(100, this->width() - this->art->width() - int(48 * this->arbiter.layout().scale));
++    auto put = [width](QLabel *label, const QString &text) {
++        label->setText(label->fontMetrics().elidedText(text, Qt::ElideRight, width));
++        label->setVisible(!text.isEmpty());
++    };
++    const bool message = !this->message_text.isEmpty();
++    // A message (nothing playing) wraps; track details stay on one line each
++    for (QLabel *label : {this->title, this->artist})
++        label->setWordWrap(message);
++    if (message) {
++        this->title->setText(this->message_text);
++        this->artist->setText(this->hint_text);
++        this->title->setVisible(true);
++        this->artist->setVisible(!this->hint_text.isEmpty());
++        this->album->setVisible(false);
++        return;
++    }
++    put(this->title, this->title_text);
++    put(this->artist, this->artist_text);
++    put(this->album, this->album_text);
++}
+-- 
+2.43.0
+

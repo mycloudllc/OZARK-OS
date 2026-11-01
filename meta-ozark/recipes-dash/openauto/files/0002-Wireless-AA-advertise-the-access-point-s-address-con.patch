@@ -1,0 +1,114 @@
+From 18442278aa69b32db98d0b952086a2e540fa8f31 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 18:48:45 -0500
+Subject: [PATCH] Wireless AA: advertise the access point's address,
+ configurable interface
+
+The Bluetooth handshake told the phone to connect to whichever IPv4 address
+QNetworkInterface listed last, which is wrong (or empty) unless the hotspot
+is the only network. Use the access point interface's address and MAC,
+taken from OPENAUTO_WIFI_INTERFACE (default wlan0), falling back to the old
+behaviour when it has no address. Stop logging the Wi-Fi key.
+---
+ btservice/AndroidBluetoothServer.cpp | 61 +++++++++++++++++++---------
+ 1 file changed, 42 insertions(+), 19 deletions(-)
+
+diff --git a/btservice/AndroidBluetoothServer.cpp b/btservice/AndroidBluetoothServer.cpp
+index 5ee99a3..d453d75 100644
+--- a/btservice/AndroidBluetoothServer.cpp
++++ b/btservice/AndroidBluetoothServer.cpp
+@@ -8,6 +8,42 @@ namespace openauto
+ namespace btservice
+ {
+ 
++namespace
++{
++
++// The Wi-Fi interface running the access point phones join for wireless
++// Android Auto: OPENAUTO_WIFI_INTERFACE, default wlan0 (set it when, say, a
++// second adapter runs the hotspot).
++QNetworkInterface accessPointInterface()
++{
++    return QNetworkInterface::interfaceFromName(qEnvironmentVariable("OPENAUTO_WIFI_INTERFACE", "wlan0"));
++}
++
++// The address phones connect to once on the access point. Without one (no
++// hotspot up), fall back to the last non-loopback IPv4 address as before.
++QString accessPointAddress()
++{
++    for(const QNetworkAddressEntry &entry : accessPointInterface().addressEntries())
++    {
++        if(entry.ip().protocol() == QAbstractSocket::IPv4Protocol)
++        {
++            return entry.ip().toString();
++        }
++    }
++
++    QString ipAddr;
++    foreach(QHostAddress addr, QNetworkInterface::allAddresses())
++    {
++        if(!addr.isLoopback() && (addr.protocol() == QAbstractSocket::IPv4Protocol))
++        {
++            ipAddr = addr.toString();
++        }
++    }
++    return ipAddr;
++}
++
++}
++
+ AndroidBluetoothServer::AndroidBluetoothServer(openauto::configuration::IConfiguration::Pointer config)
+     : rfcommServer_(std::make_unique<QBluetoothServer>(QBluetoothServiceInfo::RfcommProtocol, this))
+     , socket_(nullptr)
+@@ -58,14 +94,7 @@ void AndroidBluetoothServer::writeSocketInfoRequest()
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sending SocketInfoRequest.";
+ 
+-    QString ipAddr;
+-    foreach(QHostAddress addr, QNetworkInterface::allAddresses())
+-    {
+-        if(!addr.isLoopback() && (addr.protocol() == QAbstractSocket::IPv4Protocol))
+-        {
+-            ipAddr = addr.toString();
+-        }
+-    }
++    QString ipAddr = accessPointAddress();
+ 
+     btservice::proto::SocketInfoRequest socketInfoRequest;
+     socketInfoRequest.set_ip_address(ipAddr.toStdString());
+@@ -86,14 +115,7 @@ void AndroidBluetoothServer::writeSocketInfoRequest()
+ void AndroidBluetoothServer::writeSocketInfoResponse()
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sending SocketInfoResponse.";
+-    QString ipAddr;
+-    foreach(QHostAddress addr, QNetworkInterface::allAddresses())
+-    {
+-        if(!addr.isLoopback() && (addr.protocol() == QAbstractSocket::IPv4Protocol))
+-        {
+-            ipAddr = addr.toString();
+-        }
+-    }
++    QString ipAddr = accessPointAddress();
+ 
+     btservice::proto::SocketInfoResponse socketInfoResponse;
+     socketInfoResponse.set_ip_address(ipAddr.toStdString());
+@@ -149,12 +171,13 @@ void AndroidBluetoothServer::writeNetworkInfoMessage()
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] SSID: "<<config_->getWifiSSID();
+ 
+     networkMessage.set_psk(config_->getWifiPassword());
+-    OPENAUTO_LOG(info) << "[AndroidBluetoothServer] PSKEY: "<<config_->getWifiPassword();
++    // not the key itself: logs end up on the SD card
++    OPENAUTO_LOG(info) << "[AndroidBluetoothServer] PSKEY: "<<(config_->getWifiPassword().empty() ? "(none)" : "(set)");
+ 
+     if(config_->getWifiMAC().empty())
+     {
+-        networkMessage.set_mac_addr(QNetworkInterface::interfaceFromName("wlan0").hardwareAddress().toStdString());
+-        OPENAUTO_LOG(info) << "[AndroidBluetoothServer] MAC: "<<QNetworkInterface::interfaceFromName("wlan0").hardwareAddress().toStdString();
++        networkMessage.set_mac_addr(accessPointInterface().hardwareAddress().toStdString());
++        OPENAUTO_LOG(info) << "[AndroidBluetoothServer] MAC: "<<accessPointInterface().hardwareAddress().toStdString();
+     }
+     else
+     {
+-- 
+2.43.0
+

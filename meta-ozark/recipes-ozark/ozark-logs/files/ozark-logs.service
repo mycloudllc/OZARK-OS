@@ -1,0 +1,19 @@
+[Unit]
+Description=Save boot logs to the SD card's OZARKLOGS partition
+# Start as early as the partition is mounted, so a boot that hangs still
+# leaves a log; skip quietly if the partition is missing
+DefaultDependencies=no
+Wants=logs.mount
+After=logs.mount
+ConditionPathIsMountPoint=/logs
+After=systemd-journald.socket
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+ExecStart=/usr/sbin/ozark-logs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=sysinit.target

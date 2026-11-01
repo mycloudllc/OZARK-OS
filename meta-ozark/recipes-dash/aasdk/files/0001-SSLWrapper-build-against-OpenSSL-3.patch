@@ -1,0 +1,44 @@
+From 67824042427970bb8ddc9119cbbd20677e4f2197 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Wed, 28 Oct 2026 21:40:18 -0500
+Subject: [PATCH 1/2] SSLWrapper: build against OpenSSL 3
+
+Taken from openDsh/dash patches/aasdk_openssl-fips-fix.patch.
+
+Upstream-Status: Submitted [https://github.com/openDsh/dash/blob/develop/patches/aasdk_openssl-fips-fix.patch]
+---
+ src/Transport/SSLWrapper.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/Transport/SSLWrapper.cpp b/src/Transport/SSLWrapper.cpp
+index 6aca9b4..1c770bf 100644
+--- a/src/Transport/SSLWrapper.cpp
++++ b/src/Transport/SSLWrapper.cpp
+@@ -33,13 +33,27 @@ SSLWrapper::SSLWrapper()
+ {
+     SSL_library_init();
+     SSL_load_error_strings();
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L && !defined(LIBRESSL_VERSION_NUMBER)
++    /*
++    * ERR_load_*(), ERR_func_error_string(), ERR_get_error_line(), ERR_get_error_line_data(), ERR_get_state()
++    * OpenSSL now loads error strings automatically so these functions are not needed.
++    * SEE FOR MORE:
++    *   https://www.openssl.org/docs/manmaster/man7/migration_guide.html
++    *
++    */
++#else
+     ERR_load_BIO_strings();
++#endif
+     OpenSSL_add_all_algorithms();
+ }
+ 
+ SSLWrapper::~SSLWrapper()
+ {
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++    EVP_default_properties_enable_fips(nullptr, 0);
++#else
+     FIPS_mode_set(0);
++#endif
+     ENGINE_cleanup();
+     CONF_modules_unload(1);
+     EVP_cleanup();

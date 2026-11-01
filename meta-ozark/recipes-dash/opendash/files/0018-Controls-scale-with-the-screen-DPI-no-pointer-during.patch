@@ -1,0 +1,256 @@
+From 3a9e535023a83e88b04d1400c0481d5cf0b2ea90 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 22:13:49 -0500
+Subject: [PATCH] Controls scale with the screen DPI; no pointer during the
+ splash
+
+- Layout::scale now follows the screen's logical DPI (1x at 96), so icons,
+  switches, sliders, stylesheet padding and dialogs grow with point-sized
+  text instead of staying at their pixel size when QT_FONT_DPI is raised.
+  Fonts already follow the DPI and are not scaled again. The nav rail's
+  Side Bar Scale applies on top. The colour wheel and keyboard keys start
+  smaller so their dialogs still fit at about 2x.
+- Full-screen dialogs size their body to its content (up to the space the
+  window has) instead of the scroll area's small default, which clipped
+  the colour pop-up behind a scrollbar.
+- With the cursor setting off (or auto-hide on) the pointer is hidden from
+  the first frame: EGLFS drew its arrow in the top-left corner during the
+  splash, before Dash applied the setting.
+---
+ include/app/session.hpp          |  7 ++++---
+ include/app/widgets/dialog.hpp   |  2 ++
+ src/app/session.cpp              | 19 ++++++++++++++++--
+ src/app/widgets/color_picker.cpp |  2 +-
+ src/app/widgets/dialog.cpp       | 34 ++++++++++++++++++++++++++------
+ src/app/widgets/text_entry.cpp   |  7 ++++---
+ src/app/window.cpp               |  3 ++-
+ src/dash.cpp                     |  5 +++++
+ 8 files changed, 63 insertions(+), 16 deletions(-)
+
+diff --git a/include/app/session.hpp b/include/app/session.hpp
+index 718ca0a..993fdb6 100644
+--- a/include/app/session.hpp
++++ b/include/app/session.hpp
+@@ -90,8 +90,9 @@ class Session {
+             QList<FullscreenToggler *> togglers_;
+         };
+ 
+-        // Everything draws at 1x except the nav rail: the Layout > Side Bar Scale
+-        // setting only sizes that (Forge::BarScope while it is built).
++        // scale: pixel sizes for the screen's DPI (1 at 96 DPI; text follows the
++        // DPI by itself). bar_scale: the Layout > Side Bar Scale setting, which
++        // sizes only the nav rail, on top (Forge::BarScope while it is built).
+         double scale;
+         double bar_scale;
+         Fullscreen fullscreen;
+@@ -167,7 +168,7 @@ class Session {
+         QFont font(int size, bool mono = false) const;
+         QWidget *brightness_slider(bool buttons = true) const;
+         QWidget *volume_slider(bool buttons = true) const;
+-        // Factor iconize() and font() apply: 1, or bar_scale inside a BarScope
++        // Extra factor iconize() and font() apply: 1, or bar_scale inside a BarScope
+         double scale() const { return this->scale_; }
+ 
+         // While one exists, sizes from this Forge follow Layout::bar_scale
+diff --git a/include/app/widgets/dialog.hpp b/include/app/widgets/dialog.hpp
+index 0d04131..b6307ab 100644
+--- a/include/app/widgets/dialog.hpp
++++ b/include/app/widgets/dialog.hpp
+@@ -39,10 +39,12 @@ class Dialog : public QDialog {
+     QHBoxLayout *buttons;
+     QTimer *timer;
+     QPushButton *cancel = nullptr;
++    QScrollArea *scroll = nullptr;
+     bool fullscreen;
+ 
+     QWidget *content_widget();
+     void set_position();
++    void fit_body();
+ 
+     inline void add_cancel_button()
+     {
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index 8107452..b10b673 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -3,6 +3,8 @@
+ #include <QCoreApplication>
+ #include <QFile>
+ #include <QFontDatabase>
++#include <QGuiApplication>
++#include <QScreen>
+ #include <QHBoxLayout>
+ #include <QProcess>
+ #include <QPushButton>
+@@ -111,8 +113,20 @@ Session::Layout::Fullscreen::Fullscreen(QSettings &settings, Arbiter &arbiter)
+     this->curr_toggler = this->togglers_.value(settings.value("Layout/Fullscreen/toggler", 0).toInt());
+ }
+ 
++namespace {
++// Pixel sizes (icons, switches, stylesheet px, dialogs) follow the screen's
++// DPI the way point-sized text does, so the two stay in proportion whatever
++// QT_FONT_DPI is set to. 96 DPI is 1x.
++double screen_scale()
++{
++    if (QScreen *screen = QGuiApplication::primaryScreen())
++        return std::max(1.0, screen->logicalDotsPerInch() / 96.0);
++    return 1.0;
++}
++}  // namespace
++
+ Session::Layout::Layout(QSettings &settings, Arbiter &arbiter)
+-    : scale(1.0)
++    : scale(screen_scale())
+     , bar_scale(settings.value("Layout/scale", 1.0).toDouble())
+     , control_bar(settings, arbiter)
+     , openauto_page(new OpenAutoPage(arbiter))
+@@ -311,7 +325,8 @@ void Session::Forge::iconize(QString name, QString alt_name, QAbstractButton *bu
+ 
+ void Session::Forge::iconize(QIcon &icon, QAbstractButton *button, uint8_t size) const
+ {
+-    auto scaled = size * this->scale_;
++    // Icons follow the screen scale (and the bar scale inside a BarScope)
++    auto scaled = size * this->scale_ * this->arbiter_.layout().scale;
+     button->setIconSize(QSize(scaled, scaled));
+     button->setIcon(icon);
+ }
+diff --git a/src/app/widgets/color_picker.cpp b/src/app/widgets/color_picker.cpp
+index 431ddd1..0a427aa 100644
+--- a/src/app/widgets/color_picker.cpp
++++ b/src/app/widgets/color_picker.cpp
+@@ -74,7 +74,7 @@ QWidget *ColorPicker::dialog_body()
+     layout->setSpacing(24);
+ 
+     this->wheel = new ColorWheel(widget);
+-    this->wheel->setFixedSize(QSize(260, 260) * this->scale);
++    this->wheel->setFixedSize(QSize(200, 200) * this->scale);
+     connect(this->wheel, &ColorWheel::colorChanged, [this](const QColor &) { this->show_choice(); });
+     layout->addWidget(this->wheel);
+ 
+diff --git a/src/app/widgets/dialog.cpp b/src/app/widgets/dialog.cpp
+index 1856c94..fc498f8 100644
+--- a/src/app/widgets/dialog.cpp
++++ b/src/app/widgets/dialog.cpp
+@@ -33,6 +33,7 @@ Dialog::Dialog(Arbiter &arbiter, bool fullscreen, QWidget *parent)
+ 
+ void Dialog::open(int timeout)
+ {
++    this->fit_body();
+     this->show();
+     this->raise();
+     this->activateWindow();
+@@ -40,6 +41,27 @@ void Dialog::open(int timeout)
+         this->timer->start(timeout);
+ }
+ 
++// A scroll area asks for less room than its contents need, so full-screen
++// dialogs came up with their body clipped behind a scrollbar. Ask for the whole
++// body, up to the space the window has; it only scrolls beyond that.
++void Dialog::fit_body()
++{
++    if (!this->scroll || !this->scroll->widget())
++        return;
++    QWidget *parent = this->parentWidget();
++    if (!parent)
++        return;
++    const int margin = std::ceil(24 * this->arbiter.layout().scale) * 2;
++    this->scroll->setMinimumSize(0, 0);
++    const QSize chrome = this->sizeHint() - this->scroll->sizeHint();
++    const QSize room = parent->size() - QSize(margin, margin) - chrome;
++    this->scroll->setMinimumSize(this->scroll->widget()->sizeHint().boundedTo(room.expandedTo(QSize(0, 0))));
++    this->setMinimumSize(0, 0);
++    this->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
++    // Not adjustSize(): that caps a window at 2/3 of the screen
++    this->resize(this->sizeHint());
++}
++
+ void Dialog::set_title(QString str)
+ {
+     QLabel *label = new QLabel(str, this);
+@@ -52,12 +74,12 @@ void Dialog::set_title(QString str)
+ void Dialog::set_body(QWidget *widget)
+ {
+     if (this->fullscreen) {
+-        QScrollArea *scroll_area = new QScrollArea(this);
+-        Session::Forge::to_touch_scroller(scroll_area);
+-        scroll_area->setWidgetResizable(true);
+-        scroll_area->setWidget(widget);
++        this->scroll = new QScrollArea(this);
++        Session::Forge::to_touch_scroller(this->scroll);
++        this->scroll->setWidgetResizable(true);
++        this->scroll->setWidget(widget);
+ 
+-        this->body->addWidget(scroll_area);
++        this->body->addWidget(this->scroll);
+     }
+     else {
+         this->body->addWidget(widget);
+@@ -152,7 +174,7 @@ void Dialog::showEvent(QShowEvent *event)
+ 
+     if (this->fullscreen) {
+         if (QWidget *parent = this->parentWidget()) {
+-            int margin = std::ceil(48 * this->arbiter.layout().scale) * 2;
++            int margin = std::ceil(24 * this->arbiter.layout().scale) * 2;
+             this->setFixedWidth(std::min(this->width(), parent->width() - margin));
+             this->setFixedHeight(std::min(this->height(), parent->height() - margin));
+         }
+diff --git a/src/app/widgets/text_entry.cpp b/src/app/widgets/text_entry.cpp
+index 1bb19f9..f901b1e 100644
+--- a/src/app/widgets/text_entry.cpp
++++ b/src/app/widgets/text_entry.cpp
+@@ -29,10 +29,11 @@ void Keyboard::build()
+     }
+ 
+     const QFont font = this->arbiter.forge().font(14);
+-    auto key = [this, font](const QString &label, int row, int col, int span, std::function<void()> action) {
++    const double scale = this->arbiter.layout().scale;
++    auto key = [this, font, scale](const QString &label, int row, int col, int span, std::function<void()> action) {
+         auto button = new QPushButton(label, this);
+         button->setFont(font);
+-        button->setMinimumSize(56, 48);
++        button->setMinimumSize(QSize(48, 34) * scale);
+         button->setFocusPolicy(Qt::NoFocus);
+         connect(button, &QPushButton::clicked, action);
+         this->grid->addWidget(button, row, col, 1, span);
+@@ -120,7 +121,7 @@ void TextEntry::open_editor()
+     // The person editing is the owner: show what they type, passwords too
+     auto line = new QLineEdit(this->value_, body);
+     line->setFont(this->arbiter.forge().font(16));
+-    line->setMinimumHeight(48);
++    line->setMinimumHeight(40 * this->arbiter.layout().scale);
+     line->setStyleSheet("QLineEdit { background-color: palette(window); color: palette(text); "
+                         "border: 1px solid palette(mid); border-radius: 4px; padding: 0 8px; }");
+     layout->addWidget(line);
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index 9f2d504..f39b5d2 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -104,7 +104,8 @@ void Dash::init()
+ // scale (button padding, radii), which its buttons inherit.
+ void Dash::style_rail() const
+ {
+-    auto stylesheet = this->arbiter.core().stylesheet(this->arbiter.theme().mode, this->arbiter.layout().bar_scale);
++    const auto &layout = this->arbiter.layout();
++    auto stylesheet = this->arbiter.core().stylesheet(this->arbiter.theme().mode, layout.bar_scale * layout.scale);
+     this->rail.widget->setStyleSheet(stylesheet);
+ }
+ 
+diff --git a/src/dash.cpp b/src/dash.cpp
+index 7051d71..b7ad6a9 100644
+--- a/src/dash.cpp
++++ b/src/dash.cpp
+@@ -80,6 +80,11 @@ int main(int argc, char *argv[])
+     QSettings settings;
+     DASH_LOG(info) << "loaded config: " << settings.fileName().toStdString();
+ 
++    // Hide the pointer from the first frame (the splash) when it's off or auto-
++    // hidden; otherwise EGLFS draws its arrow in the corner until Dash is up
++    if (!settings.value("Core/cursor", true).toBool() || qEnvironmentVariableIntValue("DASH_CURSOR_AUTOHIDE") > 0)
++        QGuiApplication::setOverrideCursor(QCursor(Qt::BlankCursor));
++
+     QStringList args = dash.arguments();
+     if (args.size() > 2) {
+         size = QSize(args.at(1).toInt(), args.at(2).toInt());
+-- 
+2.43.0
+

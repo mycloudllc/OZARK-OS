@@ -1,0 +1,18 @@
+[Unit]
+Description=Ozark OS hello-world UI
+After=systemd-udevd.service systemd-user-sessions.service psplash-start.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/ozark-display
+RuntimeDirectory=ozark
+Environment=XDG_RUNTIME_DIR=/run/ozark
+# Hand the screen over from the splash right before Qt takes it
+ExecStartPre=-/usr/bin/psplash-write QUIT
+ExecStart=/usr/bin/hello-ozark
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,239 @@
+From 697a0003441218c4589c9f2cba506b639237062b Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 21:21:09 -0500
+Subject: [PATCH] Restart from Settings only; Material-style scrollbars
+
+- The control bar loses its restart button. Settings > Main > Controls
+  "restart" now asks "Restart the radio now?" (No / Yes) first, instead of
+  restarting on the first tap.
+- Scrollbars: a thin rounded thumb (Material style), no track or arrow
+  buttons, in both themes.
+---
+ assets/stylesheets/dark.qss  | 36 +++++++++++++++++++++++++++++-------
+ assets/stylesheets/light.qss | 36 +++++++++++++++++++++++++++++-------
+ include/app/window.hpp       |  1 -
+ src/app/pages/settings.cpp   | 19 ++++++++++++++++---
+ src/app/window.cpp           | 25 +------------------------
+ 5 files changed, 75 insertions(+), 42 deletions(-)
+
+diff --git a/assets/stylesheets/dark.qss b/assets/stylesheets/dark.qss
+index 042f628..025ff04 100644
+--- a/assets/stylesheets/dark.qss
++++ b/assets/stylesheets/dark.qss
+@@ -204,27 +204,49 @@ QScrollArea > QWidget > QWidget {
+     background-color: transparent;
+ }
+ 
++/* Material-style: a thin rounded thumb, no track, no arrow buttons */
+ QScrollBar {
+     background-color: transparent;
++    border: none;
+ }
+ 
+ QScrollBar:vertical {
+-    padding-top: 6px;
+-    padding-bottom: 6px;
+-    width: 16px;
++    width: 10px;
++    margin: 4px 2px 4px 2px;
++}
++
++QScrollBar:horizontal {
++    height: 10px;
++    margin: 2px 4px 2px 4px;
+ }
+ 
+ QScrollBar::handle {
+-    background-color: rgba(255, 255, 255, 31);
+-    border-radius: 8px;
++    background-color: rgba(255, 255, 255, 97);
++    border-radius: 3px;
+ }
+ 
+-QScrollBar::add-line {
+-    border: none;
++QScrollBar::handle:pressed {
++    background-color: rgba(255, 255, 255, 153);
+ }
+ 
++QScrollBar::handle:vertical {
++    min-height: 32px;
++}
++
++QScrollBar::handle:horizontal {
++    min-width: 32px;
++}
++
++QScrollBar::add-line,
+ QScrollBar::sub-line {
+     border: none;
++    width: 0px;
++    height: 0px;
++}
++
++QScrollBar::add-page,
++QScrollBar::sub-page {
++    background: none;
+ }
+ 
+ QLineEdit {
+diff --git a/assets/stylesheets/light.qss b/assets/stylesheets/light.qss
+index 5178422..016aacc 100644
+--- a/assets/stylesheets/light.qss
++++ b/assets/stylesheets/light.qss
+@@ -204,27 +204,49 @@ QScrollArea > QWidget > QWidget {
+     background-color: transparent;
+ }
+ 
++/* Material-style: a thin rounded thumb, no track, no arrow buttons */
+ QScrollBar {
+     background-color: transparent;
++    border: none;
+ }
+ 
+ QScrollBar:vertical {
+-    padding-top: 6px;
+-    padding-bottom: 6px;
+-    width: 16px;
++    width: 10px;
++    margin: 4px 2px 4px 2px;
++}
++
++QScrollBar:horizontal {
++    height: 10px;
++    margin: 2px 4px 2px 4px;
+ }
+ 
+ QScrollBar::handle {
+-    background-color: rgba(0, 0, 0, 64);
+-    border-radius: 8px;
++    background-color: rgba(0, 0, 0, 97);
++    border-radius: 3px;
+ }
+ 
+-QScrollBar::add-line {
+-    border: none;
++QScrollBar::handle:pressed {
++    background-color: rgba(0, 0, 0, 153);
++}
++
++QScrollBar::handle:vertical {
++    min-height: 32px;
++}
++
++QScrollBar::handle:horizontal {
++    min-width: 32px;
+ }
+ 
++QScrollBar::add-line,
+ QScrollBar::sub-line {
+     border: none;
++    width: 0px;
++    height: 0px;
++}
++
++QScrollBar::add-page,
++QScrollBar::sub-page {
++    background: none;
+ }
+ 
+ QLineEdit {
+diff --git a/include/app/window.hpp b/include/app/window.hpp
+index e5795c2..5c674f2 100644
+--- a/include/app/window.hpp
++++ b/include/app/window.hpp
+@@ -51,7 +51,6 @@ class Dash : public QWidget {
+     void set_page(Page *page);
+     void style_rail() const;
+     QWidget *control_bar() const;
+-    QWidget *power_control() const;
+ };
+ 
+ class MainWindow : public QMainWindow {
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index e3e56e4..061fe05 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -20,6 +20,7 @@
+ #include "app/pages/lighting_settings.hpp"
+ #include "app/services/server.hpp"
+ #include "app/widgets/color_picker.hpp"
++#include "app/widgets/dialog.hpp"
+ #include "app/widgets/selector.hpp"
+ #include "app/widgets/switch.hpp"
+ #include "app/pages/network_settings.hpp"
+@@ -233,13 +234,25 @@ QWidget *MainSettingsTab::controls_widget()
+     auto widget = new QWidget();
+     auto layout = new QVBoxLayout(widget);
+ 
+-    // Head unit: reboot is the only control (no minimize, exit or shut down)
+-    auto reboot_button = new QPushButton("reboot");
+-    connect(reboot_button, &QPushButton::clicked, [this]{
++    // Head unit: restart is the only control (no minimize, exit or shut down),
++    // and it asks first
++    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    dialog->set_title("Restart");
++    auto question = new QLabel("Restart the radio now?");
++    question->setFont(this->arbiter.forge().font(14));
++    question->setContentsMargins(0, 8, 0, 8);
++    dialog->set_body(question);
++    dialog->set_cancel_text("No");
++    auto yes = new QPushButton("Yes");
++    connect(yes, &QPushButton::clicked, [this]{
+         this->arbiter.settings().sync();
+         sync();
+         system(Session::System::REBOOT_CMD);
+     });
++    dialog->set_button(yes);
++
++    auto reboot_button = new QPushButton("restart");
++    connect(reboot_button, &QPushButton::clicked, [dialog]{ dialog->open(); });
+     layout->addWidget(reboot_button);
+ 
+     return widget;
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index f2f4e45..9f2d504 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -137,23 +137,7 @@ QWidget *Dash::control_bar() const
+ 
+     layout->addStretch();
+ 
+-    // Head unit: no exit button, and restart is the only power action
+-    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
+-    dialog->set_title("Restart");
+-    dialog->set_body(this->power_control());
+-    dialog->set_cancel_text("No");
+-    auto yes = new QPushButton("Yes");
+-    connect(yes, &QPushButton::clicked, [this]{
+-        this->arbiter.settings().sync();
+-        sync();
+-        system(Session::System::REBOOT_CMD);
+-    });
+-    dialog->set_button(yes);
+-    auto restart = new QPushButton();
+-    restart->setFlat(true);
+-    this->arbiter.forge().iconize("power_settings_new", restart, 26);
+-    layout->addWidget(restart);
+-    connect(restart, &QPushButton::clicked, [dialog]{ dialog->open(); });
++    // Head unit: no exit or power buttons here (Settings > Main > Controls restarts)
+ 
+     widget->setVisible(this->arbiter.layout().control_bar.enabled);
+     connect(&this->arbiter, &Arbiter::control_bar_changed, [widget](bool enabled){
+@@ -163,13 +147,6 @@ QWidget *Dash::control_bar() const
+     return widget;
+ }
+ 
+-QWidget *Dash::power_control() const
+-{
+-    auto label = new QLabel("Restart the radio now?");
+-    label->setFont(this->arbiter.forge().font(14));
+-    label->setContentsMargins(0, 8, 0, 8);
+-    return label;
+-}
+ 
+ MainWindow::MainWindow(QRect geometry)
+     : QMainWindow()
+-- 
+2.43.0
+

@@ -1,0 +1,405 @@
+From eeaef5572c7283b3951b2a930ec7f23e22566964 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 20:12:31 -0500
+Subject: [PATCH] Side-bar-only scale, Yes/No restart, Phone moves to Settings
+
+- The Side Bar Scale setting now sizes only the nav rail; the control bar
+  stays at 1x with the rest of the UI.
+- The restart confirmation asks "Restart the radio now?" with No and Yes
+  buttons instead of an icon and "cancel". Dialog gains set_cancel_text().
+- The Phone page leaves the nav rail and becomes Settings > Phone, in place
+  of the Bluetooth tab. It is created with Settings at startup, so phones are
+  still reconnected when Dash starts.
+---
+ include/app/pages/phone.hpp          | 16 ++++-----
+ include/app/session.hpp              |  4 +--
+ include/app/widgets/dialog.hpp       | 11 ++++---
+ include/app/window.hpp               |  2 +-
+ src/app/pages/phone.cpp              | 30 ++++++++---------
+ src/app/pages/settings.cpp           |  5 +--
+ src/app/quick_views/android_auto.cpp |  2 +-
+ src/app/session.cpp                  |  2 --
+ src/app/widgets/dialog.cpp           |  7 ++++
+ src/app/window.cpp                   | 49 +++++++++++-----------------
+ 10 files changed, 61 insertions(+), 67 deletions(-)
+
+diff --git a/include/app/pages/phone.hpp b/include/app/pages/phone.hpp
+index 9b076d6..6571323 100644
+--- a/include/app/pages/phone.hpp
++++ b/include/app/pages/phone.hpp
+@@ -8,8 +8,6 @@
+ #include <QPointer>
+ #include <QtWidgets>
+ 
+-#include "app/pages/page.hpp"
+-
+ class Arbiter;
+ class Dialog;
+ 
+@@ -19,7 +17,7 @@ class Manager;
+ 
+ // Answers BlueZ's pairing questions (registered as the default agent): shows
+ // the code to compare on a "Pair with ...?" dialog, and only lets new devices
+-// pair while the Phone page has pairing mode on.
++// pair while Settings > Phone has pairing mode on.
+ class PairingAgent : public BluezQt::Agent {
+     Q_OBJECT
+ 
+@@ -51,15 +49,14 @@ class PairingAgent : public BluezQt::Agent {
+     QPointer<Dialog> prompt;
+ };
+ 
+-// Paired phones (connect, disconnect, forget) and pairing a new one. Trusted
+-// phones are reconnected when Dash starts, the most recently used first.
+-class PhonePage : public QTabWidget, public Page {
++// Settings > Phone: paired phones (connect, disconnect, forget) and pairing a
++// new one. Trusted phones are reconnected when Dash starts, the most recently
++// used first.
++class PhoneSettingsTab : public QWidget {
+     Q_OBJECT
+ 
+    public:
+-    PhonePage(Arbiter &arbiter, QWidget *parent = nullptr);
+-
+-    void init() override;
++    PhoneSettingsTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+    private:
+     QWidget *phones_tab();
+@@ -70,6 +67,7 @@ class PhonePage : public QTabWidget, public Page {
+     void remove_device(const QString &address);
+     void reconnect();
+ 
++    Arbiter &arbiter;
+     BluezQt::Manager *manager = nullptr;
+     BluezQt::AdapterPtr adapter;
+     PairingAgent *agent = nullptr;
+diff --git a/include/app/session.hpp b/include/app/session.hpp
+index 08bb0e3..718ca0a 100644
+--- a/include/app/session.hpp
++++ b/include/app/session.hpp
+@@ -90,8 +90,8 @@ class Session {
+             QList<FullscreenToggler *> togglers_;
+         };
+ 
+-        // Page content always draws at 1x. The Layout > Bar Scale setting only sizes
+-        // the nav rail and control bar (Forge::BarScope while they are built).
++        // Everything draws at 1x except the nav rail: the Layout > Side Bar Scale
++        // setting only sizes that (Forge::BarScope while it is built).
+         double scale;
+         double bar_scale;
+         Fullscreen fullscreen;
+diff --git a/include/app/widgets/dialog.hpp b/include/app/widgets/dialog.hpp
+index fec5224..0d04131 100644
+--- a/include/app/widgets/dialog.hpp
++++ b/include/app/widgets/dialog.hpp
+@@ -22,6 +22,8 @@ class Dialog : public QDialog {
+     void set_title(QString str);
+     void set_body(QWidget *widget);
+     void set_button(QPushButton *button);
++    // Label of the button that just closes the dialog ("cancel" by default)
++    void set_cancel_text(QString text);
+ 
+    protected:
+     Arbiter &arbiter;
+@@ -36,6 +38,7 @@ class Dialog : public QDialog {
+     QVBoxLayout *body;
+     QHBoxLayout *buttons;
+     QTimer *timer;
++    QPushButton *cancel = nullptr;
+     bool fullscreen;
+ 
+     QWidget *content_widget();
+@@ -45,10 +48,10 @@ class Dialog : public QDialog {
+     {
+         this->buttons->addStretch();
+ 
+-        QPushButton *button = new QPushButton("cancel", this);
+-        button->setFlat(true);
+-        connect(button, &QPushButton::clicked, [this]() { this->close(); });
+-        this->buttons->addWidget(button, 0, Qt::AlignRight);
++        this->cancel = new QPushButton("cancel", this);
++        this->cancel->setFlat(true);
++        connect(this->cancel, &QPushButton::clicked, [this]() { this->close(); });
++        this->buttons->addWidget(this->cancel, 0, Qt::AlignRight);
+     }
+ };
+ 
+diff --git a/include/app/window.hpp b/include/app/window.hpp
+index 77d3273..e5795c2 100644
+--- a/include/app/window.hpp
++++ b/include/app/window.hpp
+@@ -49,7 +49,7 @@ class Dash : public QWidget {
+     Body body;
+ 
+     void set_page(Page *page);
+-    void style_bars(QWidget *control_bar) const;
++    void style_rail() const;
+     QWidget *control_bar() const;
+     QWidget *power_control() const;
+ };
+diff --git a/src/app/pages/phone.cpp b/src/app/pages/phone.cpp
+index 0374a94..44838b2 100644
+--- a/src/app/pages/phone.cpp
++++ b/src/app/pages/phone.cpp
+@@ -152,17 +152,15 @@ void PairingAgent::release()
+     this->close_prompt();
+ }
+ 
+-// ---------------------------------------------------------------- page
++// ---------------------------------------------------------------- settings tab
+ 
+-PhonePage::PhonePage(Arbiter &arbiter, QWidget *parent)
+-    : QTabWidget(parent)
+-    , Page(arbiter, "Phone", "smartphone", true, this)
+-{
+-}
+-
+-void PhonePage::init()
++PhoneSettingsTab::PhoneSettingsTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
+ {
+-    this->addTab(this->phones_tab(), "Phones");
++    auto layout = new QVBoxLayout(this);
++    layout->setContentsMargins(0, 0, 0, 0);
++    layout->addWidget(this->phones_tab());
+ 
+     this->countdown = new QTimer(this);
+     this->countdown->setInterval(1000);
+@@ -201,7 +199,7 @@ void PhonePage::init()
+     });
+ }
+ 
+-QWidget *PhonePage::phones_tab()
++QWidget *PhoneSettingsTab::phones_tab()
+ {
+     auto widget = new QWidget(this);
+     auto layout = new QVBoxLayout(widget);
+@@ -244,7 +242,7 @@ QWidget *PhonePage::phones_tab()
+     return widget;
+ }
+ 
+-void PhonePage::set_adapter(BluezQt::AdapterPtr adapter)
++void PhoneSettingsTab::set_adapter(BluezQt::AdapterPtr adapter)
+ {
+     if (this->adapter)
+         this->adapter->disconnect(this);
+@@ -275,7 +273,7 @@ void PhonePage::set_adapter(BluezQt::AdapterPtr adapter)
+     this->update_header();
+ }
+ 
+-void PhonePage::set_pairing(bool enabled)
++void PhoneSettingsTab::set_pairing(bool enabled)
+ {
+     if (enabled && !this->adapter) {
+         this->pair_button->setChecked(false);
+@@ -306,7 +304,7 @@ void PhonePage::set_pairing(bool enabled)
+     this->update_header();
+ }
+ 
+-void PhonePage::update_header()
++void PhoneSettingsTab::update_header()
+ {
+     if (!this->adapter) {
+         this->status->setText("Bluetooth is not available");
+@@ -335,7 +333,7 @@ void PhonePage::update_header()
+     }
+ }
+ 
+-void PhonePage::update_device(BluezQt::DevicePtr device)
++void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+ {
+     const QString address = device->address();
+     if (!device->isPaired()) {
+@@ -407,7 +405,7 @@ void PhonePage::update_device(BluezQt::DevicePtr device)
+     this->update_header();
+ }
+ 
+-void PhonePage::remove_device(const QString &address)
++void PhoneSettingsTab::remove_device(const QString &address)
+ {
+     QWidget *row = this->rows.take(address);
+     if (row)
+@@ -418,7 +416,7 @@ void PhonePage::remove_device(const QString &address)
+ 
+ // Once per start (and when the adapter powers up): connect trusted phones,
+ // trying the last one used first, until one connects
+-void PhonePage::reconnect()
++void PhoneSettingsTab::reconnect()
+ {
+     if (this->reconnected || !this->adapter || !this->adapter->isPowered())
+         return;
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 0c40da5..1619d09 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -22,6 +22,7 @@
+ #include "app/widgets/color_picker.hpp"
+ #include "app/widgets/selector.hpp"
+ #include "app/widgets/switch.hpp"
++#include "app/pages/phone.hpp"
+ #include "gitversion.h"
+ 
+ SettingsPage::SettingsPage(Arbiter &arbiter, QWidget *parent)
+@@ -34,7 +35,7 @@ void SettingsPage::init()
+ {
+     this->addTab(new MainSettingsTab(this->arbiter), "Main");
+     this->addTab(new LayoutSettingsTab(this->arbiter), "Layout");
+-    this->addTab(new BluetoothSettingsTab(this->arbiter, this), "Bluetooth");
++    this->addTab(new PhoneSettingsTab(this->arbiter, this), "Phone");
+     this->addTab(new LightingSettingsTab(this->arbiter, this), "Lighting");
+     this->addTab(new ActionsSettingsTab(this->arbiter), "Actions");
+     this->addTab(new AboutSettingsTab(this->arbiter), "About");
+@@ -395,7 +396,7 @@ QWidget *LayoutSettingsTab::scale_row_widget()
+     QWidget *widget = new QWidget(this);
+     QHBoxLayout *layout = new QHBoxLayout(widget);
+ 
+-    QLabel *label = new QLabel("Bar Scale", widget);
++    QLabel *label = new QLabel("Side Bar Scale", widget);
+     layout->addWidget(label, 1);
+ 
+     layout->addWidget(this->scale_widget(), 1);
+diff --git a/src/app/quick_views/android_auto.cpp b/src/app/quick_views/android_auto.cpp
+index 20e24a0..a542e2c 100644
+--- a/src/app/quick_views/android_auto.cpp
++++ b/src/app/quick_views/android_auto.cpp
+@@ -54,7 +54,7 @@ AndroidAutoQuickView::AndroidAutoQuickView(Arbiter &arbiter)
+ 
+ void AndroidAutoQuickView::init()
+ {
+-    const double scale = this->arbiter.forge().scale();
++    const double scale = this->arbiter.layout().scale;
+     this->icon_size = int(32 * scale);
+     this->text_width = int(190 * scale);
+ 
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index bf20751..8107452 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -16,7 +16,6 @@
+ #include "app/pages/vehicle.hpp"
+ #include "app/pages/launcher.hpp"
+ #include "app/pages/media.hpp"
+-#include "app/pages/phone.hpp"
+ #include "app/pages/settings.hpp"
+ #include "app/quick_views/android_auto.hpp"
+ #include "app/quick_views/combo.hpp"
+@@ -123,7 +122,6 @@ Session::Layout::Layout(QSettings &settings, Arbiter &arbiter)
+     this->pages_ = {
+         this->openauto_page,
+         new MediaPage(arbiter),
+-        new PhonePage(arbiter),
+         new VehiclePage(arbiter),
+         new CameraPage(arbiter),
+         new LauncherPage(arbiter),
+diff --git a/src/app/widgets/dialog.cpp b/src/app/widgets/dialog.cpp
+index 03c3f72..1856c94 100644
+--- a/src/app/widgets/dialog.cpp
++++ b/src/app/widgets/dialog.cpp
+@@ -73,6 +73,13 @@ void Dialog::set_button(QPushButton *button)
+     connect(button, &QPushButton::clicked, [this]() { this->close(); });
+ }
+ 
++void Dialog::set_cancel_text(QString text)
++{
++    if (this->buttons->count() == 0)
++        this->add_cancel_button();
++    this->cancel->setText(text);
++}
++
+ QWidget *Dialog::content_widget()
+ {
+     QFrame *frame = new QFrame(this);
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index 6acccb6..f2f4e45 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -93,21 +93,19 @@ void Dash::init()
+     }
+     this->set_page(this->arbiter.layout().curr_page);
+ 
+-    auto control_bar = this->control_bar();
+-    this->body.control_bar->addWidget(control_bar);
++    this->body.control_bar->addWidget(this->control_bar());
+ 
+-    this->style_bars(control_bar);
+-    connect(&this->arbiter, &Arbiter::mode_changed, [this, control_bar]{ this->style_bars(control_bar); });
+-    connect(&this->arbiter, &Arbiter::color_changed, [this, control_bar]{ this->style_bars(control_bar); });
++    this->style_rail();
++    connect(&this->arbiter, &Arbiter::mode_changed, [this]{ this->style_rail(); });
++    connect(&this->arbiter, &Arbiter::color_changed, [this]{ this->style_rail(); });
+ }
+ 
+-// The app stylesheet is at 1x for page content; the rail and control bar get
+-// their own copy at the bar scale (padding, radii), which their children inherit.
+-void Dash::style_bars(QWidget *control_bar) const
++// The app stylesheet is at 1x; the nav rail gets its own copy at the bar
++// scale (button padding, radii), which its buttons inherit.
++void Dash::style_rail() const
+ {
+     auto stylesheet = this->arbiter.core().stylesheet(this->arbiter.theme().mode, this->arbiter.layout().bar_scale);
+     this->rail.widget->setStyleSheet(stylesheet);
+-    control_bar->setStyleSheet(stylesheet);
+ }
+ 
+ void Dash::set_page(Page *page)
+@@ -119,13 +117,8 @@ void Dash::set_page(Page *page)
+ 
+ QWidget *Dash::control_bar() const
+ {
+-    // Everything in the bar, quick views included, is sized by the bar scale
+-    Session::Forge::BarScope bar(this->arbiter.forge());
+-
+     auto widget = new QWidget();
+     widget->setObjectName("ControlBar");
+-    // Inherited by text in the bar, including plugins' status icons
+-    widget->setFont(this->arbiter.forge().font(14));
+     auto layout = new QHBoxLayout(widget);
+     layout->setContentsMargins(0, 0, 0, 0);
+     layout->setSpacing(0);
+@@ -148,6 +141,14 @@ QWidget *Dash::control_bar() const
+     auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
+     dialog->set_title("Restart");
+     dialog->set_body(this->power_control());
++    dialog->set_cancel_text("No");
++    auto yes = new QPushButton("Yes");
++    connect(yes, &QPushButton::clicked, [this]{
++        this->arbiter.settings().sync();
++        sync();
++        system(Session::System::REBOOT_CMD);
++    });
++    dialog->set_button(yes);
+     auto restart = new QPushButton();
+     restart->setFlat(true);
+     this->arbiter.forge().iconize("power_settings_new", restart, 26);
+@@ -164,22 +165,10 @@ QWidget *Dash::control_bar() const
+ 
+ QWidget *Dash::power_control() const
+ {
+-    auto widget = new QWidget();
+-    auto layout = new QHBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
+-    layout->setSpacing(0);
+-
+-    auto restart = new QPushButton();
+-    restart->setFlat(true);
+-    this->arbiter.forge().iconize("refresh", restart, 36);
+-    connect(restart, &QPushButton::clicked, [this]{
+-        this->arbiter.settings().sync();
+-        sync();
+-        system(Session::System::REBOOT_CMD);
+-    });
+-    layout->addWidget(restart);
+-
+-    return widget;
++    auto label = new QLabel("Restart the radio now?");
++    label->setFont(this->arbiter.forge().font(14));
++    label->setContentsMargins(0, 8, 0, 8);
++    return label;
+ }
+ 
+ MainWindow::MainWindow(QRect geometry)
+-- 
+2.43.0
+

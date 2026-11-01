@@ -1,0 +1,334 @@
+From 3d5141286dd39471ad72d9865d2612fe0302f430 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 21:02:11 -0500
+Subject: [PATCH 06/10] Android Auto quick view: next turn and now playing
+
+A control bar quick view ('android auto') showing Android Auto's next
+turn (arrow, distance, street) and the current track (album art, title,
+artist). Each half shows while Android Auto keeps sending updates and
+hides 30 s after they stop, e.g. when guidance ends or the phone is
+unplugged. The turn arrow is tinted to the theme's text colour.
+
+The data was already received (AAHandler's navigation and media
+signals) but only the media page used the track metadata.
+
+Upstream-Status: Pending
+---
+ include/app/quick_views/android_auto.hpp |  50 +++++
+ src/app/quick_views/android_auto.cpp     | 227 +++++++++++++++++++++++
+ src/app/session.cpp                      |   4 +-
+ 3 files changed, 280 insertions(+), 1 deletion(-)
+ create mode 100644 include/app/quick_views/android_auto.hpp
+ create mode 100644 src/app/quick_views/android_auto.cpp
+
+diff --git a/include/app/quick_views/android_auto.hpp b/include/app/quick_views/android_auto.hpp
+new file mode 100644
+index 0000000..187af91
+--- /dev/null
++++ b/include/app/quick_views/android_auto.hpp
+@@ -0,0 +1,50 @@
++#pragma once
++
++#include <QFrame>
++#include <QImage>
++#include <QString>
++
++#include "app/quick_views/quick_view.hpp"
++
++class Arbiter;
++class QLabel;
++class QTimer;
++
++// Android Auto's next turn and now playing, side by side in the control bar.
++// Each half only shows while Android Auto keeps sending it: navigation hides
++// when guidance stops, media when nothing has played for a while (both also
++// clear when the phone disconnects, since the updates stop).
++class AndroidAutoQuickView : public QFrame, public QuickView {
++    Q_OBJECT
++
++   public:
++    AndroidAutoQuickView(Arbiter &arbiter);
++
++    void init() override;
++
++   private:
++    void set_turn(const QString &street, const QImage &icon);
++    void set_distance(const QString &distance);
++    void set_navigating(bool navigating);
++    void set_track(const QString &title, const QString &artist, const QImage &art);
++    void set_playing();
++    void update_turn_icon();
++    void set_elided(QLabel *label, const QString &text, int width);
++    void update_empty();
++
++    QWidget *nav = nullptr;
++    QLabel *turn_icon = nullptr;
++    QLabel *turn_distance = nullptr;
++    QLabel *turn_street = nullptr;
++    QImage turn_image;
++    QTimer *nav_timeout = nullptr;
++
++    QWidget *media = nullptr;
++    QLabel *album_art = nullptr;
++    QLabel *track = nullptr;
++    QTimer *media_timeout = nullptr;
++
++    QLabel *empty = nullptr;
++    int icon_size = 32;
++    int text_width = 160;
++};
+diff --git a/src/app/quick_views/android_auto.cpp b/src/app/quick_views/android_auto.cpp
+new file mode 100644
+index 0000000..a542e2c
+--- /dev/null
++++ b/src/app/quick_views/android_auto.cpp
+@@ -0,0 +1,227 @@
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QPainter>
++#include <QTimer>
++#include <QVBoxLayout>
++
++#include "app/arbiter.hpp"
++
++#include "app/quick_views/android_auto.hpp"
++
++namespace {
++// Android Auto sends distance updates about once a second while guiding, and
++// playback progress about once a second while playing
++constexpr int kStaleMs = 30000;
++
++QString format_distance(const aasdk::proto::messages::NavigationDistanceEvent &event)
++{
++    using Unit = aasdk::proto::enums::DistanceUnit;
++    const double value = event.distancetostepmillis() / 1000.0;
++
++    switch (event.distanceunit()) {
++        case Unit::METERS:
++            return QString("%1 m").arg(qRound(value));
++        case Unit::KILOMETERS:
++            return QString("%1 km").arg(qRound(value));
++        case Unit::KILOMETERS_PARTIAL:
++            return QString("%1 km").arg(value, 0, 'f', 1);
++        case Unit::MILES:
++            return QString("%1 mi").arg(qRound(value));
++        case Unit::MILES_PARTIAL:
++            return QString("%1 mi").arg(value, 0, 'f', 1);
++        case Unit::FEET:
++            return QString("%1 ft").arg(qRound(value));
++        case Unit::YARDS:
++            return QString("%1 yd").arg(qRound(value));
++        default:
++            return QString("%1 m").arg(event.meters());
++    }
++}
++
++QImage image_from_bytes(const std::string &bytes)
++{
++    QImage image;
++    image.loadFromData(reinterpret_cast<const uchar *>(bytes.data()), int(bytes.size()));
++    return image;
++}
++}  // namespace
++
++AndroidAutoQuickView::AndroidAutoQuickView(Arbiter &arbiter)
++    : QFrame()
++    , QuickView(arbiter, "android auto", this)
++{
++}
++
++void AndroidAutoQuickView::init()
++{
++    const double scale = this->arbiter.layout().scale;
++    this->icon_size = int(32 * scale);
++    this->text_width = int(190 * scale);
++
++    auto layout = new QHBoxLayout(this);
++    layout->setContentsMargins(int(8 * scale), 0, 0, 0);
++    layout->setSpacing(int(16 * scale));
++
++    // next turn: arrow, distance over street
++    this->nav = new QWidget(this);
++    auto nav_layout = new QHBoxLayout(this->nav);
++    nav_layout->setContentsMargins(0, 0, 0, 0);
++    nav_layout->setSpacing(int(6 * scale));
++    this->turn_icon = new QLabel(this->nav);
++    this->turn_icon->setFixedSize(this->icon_size, this->icon_size);
++    nav_layout->addWidget(this->turn_icon);
++    auto nav_text = new QVBoxLayout();
++    nav_text->setSpacing(0);
++    this->turn_distance = new QLabel(this->nav);
++    QFont distance_font(this->arbiter.forge().font(12));
++    distance_font.setBold(true);
++    this->turn_distance->setFont(distance_font);
++    this->turn_street = new QLabel(this->nav);
++    this->turn_street->setFont(this->arbiter.forge().font(10));
++    nav_text->addWidget(this->turn_distance);
++    nav_text->addWidget(this->turn_street);
++    nav_layout->addLayout(nav_text);
++    layout->addWidget(this->nav);
++
++    // now playing: album art, title over artist
++    this->media = new QWidget(this);
++    auto media_layout = new QHBoxLayout(this->media);
++    media_layout->setContentsMargins(0, 0, 0, 0);
++    media_layout->setSpacing(int(6 * scale));
++    this->album_art = new QLabel(this->media);
++    this->album_art->setFixedSize(this->icon_size, this->icon_size);
++    media_layout->addWidget(this->album_art);
++    this->track = new QLabel(this->media);
++    this->track->setFont(this->arbiter.forge().font(10));
++    media_layout->addWidget(this->track);
++    layout->addWidget(this->media);
++
++    this->empty = new QLabel("Android Auto", this);
++    this->empty->setFont(this->arbiter.forge().font(10));
++    this->empty->setEnabled(false);
++    layout->addWidget(this->empty);
++    layout->addStretch();
++
++    this->nav_timeout = new QTimer(this);
++    this->nav_timeout->setSingleShot(true);
++    this->nav_timeout->setInterval(kStaleMs);
++    connect(this->nav_timeout, &QTimer::timeout, [this]{ this->set_navigating(false); });
++
++    this->media_timeout = new QTimer(this);
++    this->media_timeout->setSingleShot(true);
++    this->media_timeout->setInterval(kStaleMs);
++    connect(this->media_timeout, &QTimer::timeout, [this]{
++        this->media->hide();
++        this->update_empty();
++    });
++
++    this->nav->hide();
++    this->media->hide();
++    this->update_empty();
++
++    // The turn arrow is a single-colour image: keep it the theme's text colour
++    connect(&this->arbiter, &Arbiter::mode_changed, [this]{ this->update_turn_icon(); });
++
++    // Android Auto calls these from OpenAuto's threads: copy what's needed and
++    // update the widgets on the GUI thread
++    AAHandler *aa = this->arbiter.android_auto().handler;
++    connect(aa, &AAHandler::aa_navigation_status_update, [this](const aasdk::proto::messages::NavigationStatus &status){
++        const bool active = status.status() == aasdk::proto::messages::NavigationStatus::ACTIVE ||
++                            status.status() == aasdk::proto::messages::NavigationStatus::REROUTING;
++        QMetaObject::invokeMethod(this, [this, active]{ this->set_navigating(active); }, Qt::QueuedConnection);
++    });
++    connect(aa, &AAHandler::aa_navigation_turn_event, [this](const aasdk::proto::messages::NavigationTurnEvent &event){
++        const QString street = QString::fromStdString(event.street_name());
++        const QImage icon = image_from_bytes(event.turnimage());
++        QMetaObject::invokeMethod(this, [this, street, icon]{ this->set_turn(street, icon); }, Qt::QueuedConnection);
++    });
++    connect(aa, &AAHandler::aa_navigation_distance_event, [this](const aasdk::proto::messages::NavigationDistanceEvent &event){
++        const QString distance = format_distance(event);
++        QMetaObject::invokeMethod(this, [this, distance]{ this->set_distance(distance); }, Qt::QueuedConnection);
++    });
++    connect(aa, &AAHandler::aa_media_metadata_update, [this](const aasdk::proto::messages::MediaInfoChannelMetadataData &metadata){
++        const QString title = QString::fromStdString(metadata.track_name());
++        const QString artist = metadata.has_artist_name() ? QString::fromStdString(metadata.artist_name()) : QString();
++        const QImage art = metadata.has_album_art() ? image_from_bytes(metadata.album_art()) : QImage();
++        QMetaObject::invokeMethod(this, [this, title, artist, art]{ this->set_track(title, artist, art); }, Qt::QueuedConnection);
++    });
++    connect(aa, &AAHandler::aa_media_playback_update, [this](const aasdk::proto::messages::MediaInfoChannelPlaybackData &playback){
++        if (playback.playback_state() == aasdk::proto::messages::MediaInfoChannelPlaybackData::PLAY)
++            QMetaObject::invokeMethod(this, [this]{ this->set_playing(); }, Qt::QueuedConnection);
++    });
++}
++
++void AndroidAutoQuickView::set_turn(const QString &street, const QImage &icon)
++{
++    this->turn_image = icon;
++    this->update_turn_icon();
++    this->set_elided(this->turn_street, street, this->text_width);
++    this->set_navigating(true);
++}
++
++void AndroidAutoQuickView::set_distance(const QString &distance)
++{
++    this->turn_distance->setText(distance);
++    this->set_navigating(true);
++}
++
++void AndroidAutoQuickView::set_navigating(bool navigating)
++{
++    if (navigating)
++        this->nav_timeout->start();
++    else
++        this->nav_timeout->stop();
++    this->nav->setVisible(navigating);
++    this->update_empty();
++}
++
++void AndroidAutoQuickView::set_track(const QString &title, const QString &artist, const QImage &art)
++{
++    const QString text = artist.isEmpty() ? title : QString("%1 – %2").arg(title, artist);
++    this->set_elided(this->track, text, this->text_width + this->icon_size);
++
++    if (art.isNull()) {
++        this->album_art->hide();
++    }
++    else {
++        this->album_art->setPixmap(QPixmap::fromImage(
++            art.scaled(this->icon_size, this->icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
++        this->album_art->show();
++    }
++    this->set_playing();
++}
++
++void AndroidAutoQuickView::set_playing()
++{
++    this->media_timeout->start();
++    this->media->show();
++    this->update_empty();
++}
++
++void AndroidAutoQuickView::update_turn_icon()
++{
++    if (this->turn_image.isNull()) {
++        this->turn_icon->clear();
++        return;
++    }
++
++    QImage icon = this->turn_image.convertToFormat(QImage::Format_ARGB32_Premultiplied)
++                      .scaled(this->icon_size, this->icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
++    QPainter painter(&icon);
++    painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
++    painter.fillRect(icon.rect(), this->palette().color(QPalette::WindowText));
++    painter.end();
++    this->turn_icon->setPixmap(QPixmap::fromImage(icon));
++}
++
++void AndroidAutoQuickView::set_elided(QLabel *label, const QString &text, int width)
++{
++    label->setText(label->fontMetrics().elidedText(text, Qt::ElideRight, width));
++    label->setToolTip(text);
++}
++
++// With neither half showing, a dim label keeps the bar from looking empty
++void AndroidAutoQuickView::update_empty()
++{
++    this->empty->setVisible(this->nav->isHidden() && this->media->isHidden());
++}
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index cd5873e..461d02f 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -17,6 +17,7 @@
+ #include "app/pages/launcher.hpp"
+ #include "app/pages/media.hpp"
+ #include "app/pages/settings.hpp"
++#include "app/quick_views/android_auto.hpp"
+ #include "app/quick_views/combo.hpp"
+ #include "app/utilities/icon_engine.hpp"
+ #include "plugins/brightness_plugin.hpp"
+@@ -89,7 +90,8 @@ Session::Layout::ControlBar::ControlBar(QSettings &settings, Arbiter &arbiter)
+         new NullQuickView(arbiter),
+         new VolumeQuickView(arbiter),
+         new BrightnessQuickView(arbiter),
+-        new ComboQuickView(arbiter)
++        new ComboQuickView(arbiter),
++        new AndroidAutoQuickView(arbiter)
+     };
+ 
+     this->curr_quick_view = this->quick_views_.value(settings.value("Layout/ControlBar/quick_view", 0).toInt());

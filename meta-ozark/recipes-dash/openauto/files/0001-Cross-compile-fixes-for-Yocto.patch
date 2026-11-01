@@ -1,0 +1,162 @@
+From 29a274478d34bb5ed8ab930599eadb49b6e6148b Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Wed, 28 Oct 2026 21:40:18 -0500
+Subject: [PATCH] Cross-compile fixes for Yocto
+
+- Find aasdk and h264bitstream through the sysroot instead of ~/aasdk
+  and /usr/local
+- Build with C++17 and link Protobuf's Abseil dependencies
+- Drop the top-level install(DIRECTORY ...) rules, which copied lib/, bin/
+  and include/ to lib/lib, bin/bin and include/include; the subdirectories
+  already install everything
+
+Upstream-Status: Inappropriate [Yocto Scarthgap toolchain specific]
+---
+ CMakeLists.txt                   |  5 +---
+ cmake_modules/FindProtobuf.cmake | 11 +++++++
+ cmake_modules/Findaasdk.cmake    | 50 +++++++-------------------------
+ cmake_modules/Findh264.cmake     | 30 ++++++-------------
+ 4 files changed, 32 insertions(+), 64 deletions(-)
+ create mode 100644 cmake_modules/FindProtobuf.cmake
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index da2af6b..9d8897a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -25,7 +25,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bin)
+ set(EXECUTABLE_OUTPUT_PATH ${CMAKE_CURRENT_SOURCE_DIR}/bin)
+ 
+ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake_modules/")
+-SET(CMAKE_CXX_STANDARD 14)
++SET(CMAKE_CXX_STANDARD 17)
+ 
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_INIT} -Wall -pedantic")
+ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
+@@ -93,9 +93,6 @@ set_target_properties(openauto PROPERTIES VERSION ${openauto_VERSION_STRING}
+                                           SOVERSION ${openauto_VERSION_MAJOR})
+ message(INFO " Project Version: ${openauto_VERSION_STRING}")
+ 
+-install(DIRECTORY lib DESTINATION lib COMPONENT libraries)
+-install(DIRECTORY include DESTINATION include COMPONENT headers)
+-install(DIRECTORY bin DESTINATION bin COMPONENT applications)
+ 
+ SET(CPACK_GENERATOR "DEB")
+ SET(CPACK_DEBIAN_PACKAGE_MAINTAINER "OpenDsh") #required
+diff --git a/cmake_modules/FindProtobuf.cmake b/cmake_modules/FindProtobuf.cmake
+new file mode 100644
+index 0000000..b4d27ab
+--- /dev/null
++++ b/cmake_modules/FindProtobuf.cmake
+@@ -0,0 +1,11 @@
++# Protobuf 22+ (Yocto Scarthgap ships 4.25) splits its runtime into Abseil
++# libraries that CMake's stock FindProtobuf does not link. Keep the stock
++# module for protoc and protobuf_generate_cpp, and take the libraries from
++# protobuf.pc, which lists the Abseil dependencies.
++include(${CMAKE_ROOT}/Modules/FindProtobuf.cmake)
++
++find_package(PkgConfig REQUIRED)
++pkg_check_modules(PROTOBUF_PC REQUIRED IMPORTED_TARGET GLOBAL protobuf)
++
++set(Protobuf_LIBRARIES PkgConfig::PROTOBUF_PC)
++set(PROTOBUF_LIBRARIES PkgConfig::PROTOBUF_PC)
+diff --git a/cmake_modules/Findaasdk.cmake b/cmake_modules/Findaasdk.cmake
+index 8489e3b..bbc56e8 100644
+--- a/cmake_modules/Findaasdk.cmake
++++ b/cmake_modules/Findaasdk.cmake
+@@ -1,45 +1,17 @@
+-set (AASDK_DIR ~/aasdk)
++# Locate an installed aasdk (headers, generated protobuf headers, both libraries).
++find_path(AASDK_INCLUDE_DIR aasdk/Version.hpp)
++find_path(AASDK_PROTO_INCLUDE_DIR aasdk_proto/AbsoluteInputEventData.pb.h)
++find_library(AASDK_LIBRARY aasdk)
++find_library(AASDK_PROTO_LIBRARY aasdk_proto)
+ 
+-find_path(AASDK_INCLUDE_DIR
+-    aasdk/Version.hpp
+-    PATHS ${AASDK_DIR}
+-    PATH_SUFFIXES include
+-)
++include(FindPackageHandleStandardArgs)
++find_package_handle_standard_args(aasdk DEFAULT_MSG
++    AASDK_INCLUDE_DIR AASDK_PROTO_INCLUDE_DIR AASDK_LIBRARY AASDK_PROTO_LIBRARY)
+ 
+-find_path(AASDK_PROTO_INCLUDE_DIR
+-    aasdk_proto/AbsoluteInputEventData.pb.h
+-    PATHS ${AASDK_DIR}
+-)
+-
+-find_path(AASDK_LIB_DIR
+-    libaasdk.so
+-    PATHS ${AASDK_DIR}
+-    PATH_SUFFIXES lib
+-)
+-
+-if (AASDK_INCLUDE_DIR AND AASDK_PROTO_INCLUDE_DIR AND AASDK_LIB_DIR)
+-    set(AASDK_FOUND TRUE)
+-endif()
+-  
+-if (AASDK_FOUND)
+-    if (NOT aasdk_FIND_QUIETLY)
+-        message(STATUS "Found aasdk:")
+-        message(STATUS " - Includes: ${AASDK_INCLUDE_DIR}")
+-        message(STATUS " - Includes: ${AASDK_PROTO_INCLUDE_DIR}")
+-        message(STATUS " - Libraries: ${AASDK_LIB_DIR}")
+-    endif()
++if (AASDK_FOUND AND NOT TARGET aasdk)
+     add_library(aasdk INTERFACE)
+     target_include_directories(aasdk INTERFACE ${AASDK_INCLUDE_DIR} ${AASDK_PROTO_INCLUDE_DIR})
+-    set_target_properties(aasdk PROPERTIES INTERFACE_LINK_DIRECTORIES ${AASDK_LIB_DIR})
+-    target_link_libraries(aasdk INTERFACE libaasdk.so libaasdk_proto.so)
+-else()
+-    if (aasdk_FIND_REQUIRED)
+-        if(AASDK_INCLUDE_DIR AND NOT AASDK_PROTO_INCLUDE_DIR)
+-            message(FATAL_ERROR "aasdk was found but not built.  Perform an in-source build.")
+-        else()
+-            message(FATAL_ERROR "Could not find aasdk")
+-        endif()
+-    endif()
++    target_link_libraries(aasdk INTERFACE ${AASDK_LIBRARY} ${AASDK_PROTO_LIBRARY})
+ endif()
+ 
+-mark_as_advanced(AASDK_INCLUDE_DIRS AASDK_LIBRARIES)
++mark_as_advanced(AASDK_INCLUDE_DIR AASDK_PROTO_INCLUDE_DIR AASDK_LIBRARY AASDK_PROTO_LIBRARY)
+diff --git a/cmake_modules/Findh264.cmake b/cmake_modules/Findh264.cmake
+index 0f9bffd..8d64521 100644
+--- a/cmake_modules/Findh264.cmake
++++ b/cmake_modules/Findh264.cmake
+@@ -1,26 +1,14 @@
+-set (H264_INCLUDE_DIR /usr/local/include/h264bitstream)
+-set (H264_LIB_DIR /usr/local/lib)
++# Locate an installed h264bitstream library and its headers.
++find_path(H264_INCLUDE_DIR h264_stream.h PATH_SUFFIXES h264bitstream)
++find_library(H264_LIBRARY h264bitstream)
+ 
+-set(H264_FOUND TRUE)
+-  
+-if (H264_FOUND)
+-    if (NOT h264_FIND_QUIETLY)
+-        message(STATUS "Found h264bitstream:")
+-        message(STATUS " - Includes: ${H264_INCLUDE_DIR}")
+-        message(STATUS " - Libraries: ${H264_LIB_DIR}")
+-    endif()
++include(FindPackageHandleStandardArgs)
++find_package_handle_standard_args(h264 DEFAULT_MSG H264_INCLUDE_DIR H264_LIBRARY)
++
++if (H264_FOUND AND NOT TARGET h264)
+     add_library(h264 INTERFACE)
+     target_include_directories(h264 INTERFACE ${H264_INCLUDE_DIR})
+-    set_target_properties(h264 PROPERTIES INTERFACE_LINK_DIRECTORIES ${H264_LIB_DIR})
+-    target_link_libraries(h264 INTERFACE libh264bitstream.so)
+-else()
+-    if (h264_FIND_REQUIRED)
+-        if(H264_INCLUDE_DIR)
+-            message(FATAL_ERROR "h264 was found but not built.  Perform an in-source build.")
+-        else()
+-            message(FATAL_ERROR "Could not find h264")
+-        endif()
+-    endif()
++    target_link_libraries(h264 INTERFACE ${H264_LIBRARY})
+ endif()
+ 
+-mark_as_advanced(H264_INCLUDE_DIR H264_LIBRARIES)
++mark_as_advanced(H264_INCLUDE_DIR H264_LIBRARY)

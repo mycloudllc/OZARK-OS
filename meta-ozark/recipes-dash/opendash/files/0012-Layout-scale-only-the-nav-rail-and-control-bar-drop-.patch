@@ -1,0 +1,397 @@
+From 48069f4d64d956d26d9c86f6ddef5bf050824dae Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 18:31:01 -0500
+Subject: [PATCH] Layout: scale only the nav rail and control bar; drop
+ the status bar
+
+The Scale setting (now "Bar Scale") used to multiply every font, icon and
+stylesheet size, so raising it blew up page content that already fits the
+screen. Page content now always draws at 1x; the setting only sizes the nav
+rail and the control bar (its quick views and plugins' status icons
+included), which get their own copy of the stylesheet at that scale.
+
+The top status bar (a clock) is removed along with its setting: the
+TrailCommand plugin shows the date and time in the control bar.
+---
+ include/app/arbiter.hpp              |  2 -
+ include/app/pages/settings.hpp       |  1 -
+ include/app/session.hpp              | 18 +++++++-
+ include/app/window.hpp               |  4 +-
+ src/app/arbiter.cpp                  | 10 +----
+ src/app/pages/settings.cpp           | 23 +---------
+ src/app/quick_views/android_auto.cpp |  2 +-
+ src/app/session.cpp                  | 20 +++++++--
+ src/app/window.cpp                   | 63 +++++++++++++---------------
+ 9 files changed, 67 insertions(+), 76 deletions(-)
+
+diff --git a/include/app/arbiter.hpp b/include/app/arbiter.hpp
+index d9b33bd..7ea7cde 100644
+--- a/include/app/arbiter.hpp
++++ b/include/app/arbiter.hpp
+@@ -24,7 +24,6 @@ class Arbiter : public QObject {
+     void toggle_mode();
+     void set_color(const QColor &color);
+     void set_scale(double scale);
+-    void set_status_bar(bool enabled);
+     void set_control_bar(bool enabled);
+     void set_curr_quick_view(QuickView *quick_view);
+     void set_curr_quick_view(int id);
+@@ -64,7 +63,6 @@ class Arbiter : public QObject {
+     void mode_changed(Session::Theme::Mode mode);
+     void color_changed(QColor color);
+     void scale_changed(float scale);
+-    void status_bar_changed(bool enabled);
+     void control_bar_changed(bool enabled);
+     void curr_quick_view_changed(QuickView *quick_view);
+     void curr_page_changed(Page *page);
+diff --git a/include/app/pages/settings.hpp b/include/app/pages/settings.hpp
+index d9db3d0..6106035 100644
+--- a/include/app/pages/settings.hpp
++++ b/include/app/pages/settings.hpp
+@@ -54,7 +54,6 @@ class LayoutSettingsTab : public QWidget {
+     QWidget *pages_widget();
+     QWidget *fullscreen_widget();
+     QWidget *fullscreen_on_start_widget();
+-    QWidget *status_bar_widget();
+     QWidget *control_bar_widget();
+     QWidget *quick_view_row_widget();
+     QWidget *scale_row_widget();
+diff --git a/include/app/session.hpp b/include/app/session.hpp
+index b7fb9be..08bb0e3 100644
+--- a/include/app/session.hpp
++++ b/include/app/session.hpp
+@@ -90,8 +90,10 @@ class Session {
+             QList<FullscreenToggler *> togglers_;
+         };
+ 
++        // Page content always draws at 1x. The Layout > Bar Scale setting only sizes
++        // the nav rail and control bar (Forge::BarScope while they are built).
+         double scale;
+-        bool status_bar;
++        double bar_scale;
+         Fullscreen fullscreen;
+         ControlBar control_bar;
+         OpenAutoPage *openauto_page;
+@@ -165,9 +167,23 @@ class Session {
+         QFont font(int size, bool mono = false) const;
+         QWidget *brightness_slider(bool buttons = true) const;
+         QWidget *volume_slider(bool buttons = true) const;
++        // Factor iconize() and font() apply: 1, or bar_scale inside a BarScope
++        double scale() const { return this->scale_; }
++
++        // While one exists, sizes from this Forge follow Layout::bar_scale
++        class BarScope {
++           public:
++            BarScope(Forge &forge);
++            ~BarScope();
++
++           private:
++            Forge &forge_;
++            double prev_;
++        };
+ 
+        private:
+         Arbiter &arbiter_;
++        double scale_ = 1.0;
+     };
+ 
+     struct AndroidAuto {
+diff --git a/include/app/window.hpp b/include/app/window.hpp
+index a24f40c..77d3273 100644
+--- a/include/app/window.hpp
++++ b/include/app/window.hpp
+@@ -30,6 +30,7 @@ class Dash : public QWidget {
+     struct NavRail {
+         QButtonGroup group;
+         QElapsedTimer timer;
++        QWidget *widget;
+         QVBoxLayout *layout;
+ 
+         NavRail();
+@@ -37,7 +38,6 @@ class Dash : public QWidget {
+ 
+     struct Body {
+         QVBoxLayout *layout;
+-        QVBoxLayout *status_bar;
+         QStackedLayout *frame;
+         QVBoxLayout *control_bar;
+ 
+@@ -49,7 +49,7 @@ class Dash : public QWidget {
+     Body body;
+ 
+     void set_page(Page *page);
+-    QWidget *status_bar() const;
++    void style_bars(QWidget *control_bar) const;
+     QWidget *control_bar() const;
+     QWidget *power_control() const;
+ };
+diff --git a/src/app/arbiter.cpp b/src/app/arbiter.cpp
+index 2c8c630..1b86c3b 100644
+--- a/src/app/arbiter.cpp
++++ b/src/app/arbiter.cpp
+@@ -42,20 +42,12 @@ void Arbiter::set_color(const QColor &color)
+ 
+ void Arbiter::set_scale(double scale)
+ {
+-    this->layout().scale = scale;
++    this->layout().bar_scale = scale;
+     this->settings().setValue("Layout/scale", scale);
+ 
+     emit scale_changed(scale);
+ }
+ 
+-void Arbiter::set_status_bar(bool enabled)
+-{
+-    this->layout().status_bar = enabled;
+-    this->settings().setValue("Layout/status_bar", enabled);
+-
+-    emit status_bar_changed(enabled);
+-}
+-
+ void Arbiter::set_control_bar(bool enabled)
+ {
+     this->layout().control_bar.enabled = enabled;
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 47d3bb6..0c40da5 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -264,8 +264,6 @@ QWidget *LayoutSettingsTab::settings_widget()
+     layout->addWidget(this->fullscreen_widget(), 1);
+     layout->addWidget(this->fullscreen_on_start_widget(), 1);
+     layout->addWidget(Session::Forge::br(), 1);
+-    layout->addWidget(this->status_bar_widget(), 1);
+-    layout->addWidget(Session::Forge::br(), 1);
+     layout->addWidget(this->control_bar_widget(), 1);
+ 
+     QWidget *controls_bar_row = this->quick_view_row_widget();
+@@ -355,23 +353,6 @@ QWidget *LayoutSettingsTab::fullscreen_on_start_widget()
+     return widget;
+ }
+ 
+-QWidget *LayoutSettingsTab::status_bar_widget()
+-{
+-    QWidget *widget = new QWidget(this);
+-    QHBoxLayout *layout = new QHBoxLayout(widget);
+-
+-    QLabel *label = new QLabel("Status Bar", widget);
+-    layout->addWidget(label, 1);
+-
+-    Switch *toggle = new Switch(widget);
+-    toggle->scale(this->arbiter.layout().scale);
+-    toggle->setChecked(this->arbiter.layout().status_bar);
+-    connect(toggle, &Switch::stateChanged, [this](bool state){ this->arbiter.set_status_bar(state); });
+-    layout->addWidget(toggle, 1, Qt::AlignHCenter);
+-
+-    return widget;
+-}
+-
+ QWidget *LayoutSettingsTab::control_bar_widget()
+ {
+     QWidget *widget = new QWidget(this);
+@@ -414,7 +395,7 @@ QWidget *LayoutSettingsTab::scale_row_widget()
+     QWidget *widget = new QWidget(this);
+     QHBoxLayout *layout = new QHBoxLayout(widget);
+ 
+-    QLabel *label = new QLabel("Scale", widget);
++    QLabel *label = new QLabel("Bar Scale", widget);
+     layout->addWidget(label, 1);
+ 
+     layout->addWidget(this->scale_widget(), 1);
+@@ -430,7 +411,7 @@ QWidget *LayoutSettingsTab::scale_widget()
+     QSlider *slider = new QSlider(Qt::Orientation::Horizontal, widget);
+     slider->setTracking(false);
+     slider->setRange(2, 6);
+-    slider->setValue(this->arbiter.layout().scale * 4);
++    slider->setValue(this->arbiter.layout().bar_scale * 4);
+     connect(slider, &QSlider::valueChanged, [this, slider](int position){ this->arbiter.set_scale(position / 4.0); });
+ 
+     QPushButton *lower_button = new QPushButton(widget);
+diff --git a/src/app/quick_views/android_auto.cpp b/src/app/quick_views/android_auto.cpp
+index a542e2c..20e24a0 100644
+--- a/src/app/quick_views/android_auto.cpp
++++ b/src/app/quick_views/android_auto.cpp
+@@ -54,7 +54,7 @@ AndroidAutoQuickView::AndroidAutoQuickView(Arbiter &arbiter)
+ 
+ void AndroidAutoQuickView::init()
+ {
+-    const double scale = this->arbiter.layout().scale;
++    const double scale = this->arbiter.forge().scale();
+     this->icon_size = int(32 * scale);
+     this->text_width = int(190 * scale);
+ 
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index 1534658..bf20751 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -113,8 +113,8 @@ Session::Layout::Fullscreen::Fullscreen(QSettings &settings, Arbiter &arbiter)
+ }
+ 
+ Session::Layout::Layout(QSettings &settings, Arbiter &arbiter)
+-    : scale(settings.value("Layout/scale", 1.0).toDouble())
+-    , status_bar(settings.value("Layout/status_bar", false).toBool())
++    : scale(1.0)
++    , bar_scale(settings.value("Layout/scale", 1.0).toDouble())
+     , control_bar(settings, arbiter)
+     , openauto_page(new OpenAutoPage(arbiter))
+     , curr_page(nullptr)
+@@ -313,7 +313,7 @@ void Session::Forge::iconize(QString name, QString alt_name, QAbstractButton *bu
+ 
+ void Session::Forge::iconize(QIcon &icon, QAbstractButton *button, uint8_t size) const
+ {
+-    auto scaled = size * this->arbiter_.layout().scale;
++    auto scaled = size * this->scale_;
+     button->setIconSize(QSize(scaled, scaled));
+     button->setIcon(icon);
+ }
+@@ -321,11 +321,23 @@ void Session::Forge::iconize(QIcon &icon, QAbstractButton *button, uint8_t size)
+ QFont Session::Forge::font(int size, bool mono) const
+ {
+     auto name = mono ? "Titillium Web" : "Montserrat";
+-    auto scaled = size * this->arbiter_.layout().scale;
++    auto scaled = size * this->scale_;
+ 
+     return QFont(name, scaled);
+ }
+ 
++Session::Forge::BarScope::BarScope(Forge &forge)
++    : forge_(forge)
++    , prev_(forge.scale_)
++{
++    forge.scale_ = forge.arbiter_.layout().bar_scale;
++}
++
++Session::Forge::BarScope::~BarScope()
++{
++    this->forge_.scale_ = this->prev_;
++}
++
+ QWidget *Session::Forge::brightness_slider(bool buttons) const
+ {
+     auto widget = new QWidget();
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index 701beae..6acccb6 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -12,24 +12,22 @@
+ Dash::NavRail::NavRail()
+     : group()
+     , timer()
+-    , layout(new QVBoxLayout())
++    , widget(new QWidget())
++    , layout(new QVBoxLayout(widget))
+ {
++    this->widget->setObjectName("NavRail");
+     this->layout->setContentsMargins(0, 0, 0, 0);
+     this->layout->setSpacing(0);
+ }
+ 
+ Dash::Body::Body()
+     : layout(new QVBoxLayout())
+-    , status_bar(new QVBoxLayout())
+     , frame(new QStackedLayout())
+     , control_bar(new QVBoxLayout())
+ {
+     this->layout->setContentsMargins(0, 0, 0, 0);
+     this->layout->setSpacing(0);
+ 
+-    this->status_bar->setContentsMargins(0, 0, 0, 0);
+-    this->layout->addLayout(this->status_bar);
+-
+     this->frame->setContentsMargins(0, 0, 0, 0);
+     this->layout->addLayout(this->frame, 1);
+ 
+@@ -51,7 +49,7 @@ Dash::Dash(Arbiter &arbiter)
+     layout->setContentsMargins(0, 0, 0, 0);
+     layout->setSpacing(0);
+ 
+-    layout->addLayout(this->rail.layout);
++    layout->addWidget(this->rail.widget);
+     layout->addLayout(this->body.layout);
+ 
+     connect(&this->rail.group, QOverload<int>::of(&QButtonGroup::buttonPressed), [this](int id){
+@@ -76,14 +74,15 @@ Dash::Dash(Arbiter &arbiter)
+ 
+ void Dash::init()
+ {
+-    this->body.status_bar->addWidget(this->status_bar());
+-
+     for (auto page : this->arbiter.layout().pages()) {
+         auto button = page->button();
+         button->setCheckable(true);
+         button->setFlat(true);
+         QIcon icon(new StylizedIconEngine(this->arbiter, QString(":/icons/%1.svg").arg(page->icon_name()), true));
+-        this->arbiter.forge().iconize(icon, button, 32);
++        {
++            Session::Forge::BarScope bar(this->arbiter.forge());
++            this->arbiter.forge().iconize(icon, button, 32);
++        }
+ 
+         this->rail.group.addButton(button, this->arbiter.layout().page_id(page));
+         this->rail.layout->addWidget(button);
+@@ -94,7 +93,21 @@ void Dash::init()
+     }
+     this->set_page(this->arbiter.layout().curr_page);
+ 
+-    this->body.control_bar->addWidget(this->control_bar());
++    auto control_bar = this->control_bar();
++    this->body.control_bar->addWidget(control_bar);
++
++    this->style_bars(control_bar);
++    connect(&this->arbiter, &Arbiter::mode_changed, [this, control_bar]{ this->style_bars(control_bar); });
++    connect(&this->arbiter, &Arbiter::color_changed, [this, control_bar]{ this->style_bars(control_bar); });
++}
++
++// The app stylesheet is at 1x for page content; the rail and control bar get
++// their own copy at the bar scale (padding, radii), which their children inherit.
++void Dash::style_bars(QWidget *control_bar) const
++{
++    auto stylesheet = this->arbiter.core().stylesheet(this->arbiter.theme().mode, this->arbiter.layout().bar_scale);
++    this->rail.widget->setStyleSheet(stylesheet);
++    control_bar->setStyleSheet(stylesheet);
+ }
+ 
+ void Dash::set_page(Page *page)
+@@ -104,35 +117,15 @@ void Dash::set_page(Page *page)
+     this->body.frame->setCurrentWidget(page->container());
+ }
+ 
+-QWidget *Dash::status_bar() const
+-{
+-    auto widget = new QWidget();
+-    widget->setObjectName("StatusBar");
+-    auto layout = new QHBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
+-    layout->setSpacing(0);
+-
+-    auto clock = new QLabel();
+-    clock->setFont(this->arbiter.forge().font(10, true));
+-    clock->setAlignment(Qt::AlignCenter);
+-    layout->addWidget(clock);
+-
+-    connect(&this->arbiter.system().clock, &Clock::ticked, [clock](QTime time){
+-        clock->setText(QLocale().toString(time, QLocale::ShortFormat));
+-    });
+-
+-    widget->setVisible(this->arbiter.layout().status_bar);
+-    connect(&this->arbiter, &Arbiter::status_bar_changed, [widget](bool enabled){
+-        widget->setVisible(enabled);
+-    });
+-
+-    return widget;
+-}
+-
+ QWidget *Dash::control_bar() const
+ {
++    // Everything in the bar, quick views included, is sized by the bar scale
++    Session::Forge::BarScope bar(this->arbiter.forge());
++
+     auto widget = new QWidget();
+     widget->setObjectName("ControlBar");
++    // Inherited by text in the bar, including plugins' status icons
++    widget->setFont(this->arbiter.forge().font(14));
+     auto layout = new QHBoxLayout(widget);
+     layout->setContentsMargins(0, 0, 0, 0);
+     layout->setSpacing(0);
+-- 
+2.43.0
+

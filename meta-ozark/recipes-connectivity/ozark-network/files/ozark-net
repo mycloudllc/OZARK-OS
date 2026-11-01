@@ -1,0 +1,218 @@
+#!/bin/sh
+# Network settings: the backend of Settings > Network in Dash (also handy
+# over SSH).
+#
+#   ozark-net status
+#   ozark-net hotspot NAME PASSWORD CHANNEL COUNTRY
+#   ozark-net share yes|no
+#   ozark-net ethernet dhcp
+#   ozark-net ethernet static ADDRESS/PREFIX GATEWAY [DNS]
+#   ozark-net lte yes|no [APN [PIN]]
+#
+# status prints key=value lines. The others apply the change and print
+# nothing, or print the reason on stderr and exit 1 if a value is rejected.
+
+hotspot_conf=/etc/ozark/hotspot.conf
+eth_conf=/etc/ozark/ethernet.conf
+eth_network=/etc/systemd/network/20-ozark-ethernet.network
+lte_conf=/etc/ozark/lte.conf
+lte_state=/run/ozark-lte/state
+eth=eth0
+
+fail() {
+    echo "$*" >&2
+    exit 1
+}
+
+# Settings files are shell, values single-quoted: no quotes, backslashes or
+# control characters in them
+plain() {
+    case "$1" in *\'*|*\\*) return 1 ;; esac
+    [ "$1" = "$(printf '%s' "$1" | tr -d '\001-\037\177')" ]
+}
+
+ipv4() {
+    echo "$1" | awk -F. 'NF == 4 { for (i = 1; i <= 4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) exit 1; ok = 1 } END { exit !ok }'
+}
+
+# Value of KEY in `mmcli -K` output on stdin ("" for "--")
+mmget() {
+    awk -v k="$1" -F': ' '{ key = $1; sub(/ +$/, "", key) }
+        key == k { v = $2; sub(/^ +/, "", v); if (v == "--") v = ""; print v; exit }'
+}
+
+load_hotspot() {
+    IFACE=wlan0 SSID= PASSWORD= COUNTRY=US CHANNEL=36 SHARE=no
+    [ -f "$hotspot_conf" ] && . "$hotspot_conf"
+}
+
+save_hotspot() {
+    mkdir -p "$(dirname "$hotspot_conf")"
+    cat > "$hotspot_conf.tmp" <<CONF
+# Wireless Android Auto hotspot (see /usr/sbin/ozark-hotspot)
+IFACE='$IFACE'
+SSID='$SSID'
+PASSWORD='$PASSWORD'
+COUNTRY='$COUNTRY'
+CHANNEL='$CHANNEL'
+SHARE='$SHARE'
+CONF
+    chmod 600 "$hotspot_conf.tmp"
+    mv "$hotspot_conf.tmp" "$hotspot_conf"
+}
+
+apply_hotspot() {
+    systemctl restart ozark-hotspot-setup.service || fail "Could not apply the hotspot settings"
+    networkctl reload
+    networkctl reconfigure "$IFACE" 2>/dev/null
+    systemctl restart ozark-hotspot.service
+}
+
+status() {
+    load_hotspot
+    echo "hotspot.iface=$IFACE"
+    echo "hotspot.ssid=$SSID"
+    echo "hotspot.password=$PASSWORD"
+    echo "hotspot.channel=$CHANNEL"
+    echo "hotspot.country=$COUNTRY"
+    echo "hotspot.share=$SHARE"
+    echo "hotspot.running=$(systemctl is-active ozark-hotspot.service)"
+    echo "hotspot.clients=$(iw dev "$IFACE" station dump 2>/dev/null | grep -c '^Station')"
+
+    ETH_MODE=dhcp ETH_ADDRESS= ETH_GATEWAY= ETH_DNS=
+    [ -f "$eth_conf" ] && . "$eth_conf"
+    echo "ethernet.mode=$ETH_MODE"
+    echo "ethernet.static_address=$ETH_ADDRESS"
+    echo "ethernet.static_gateway=$ETH_GATEWAY"
+    echo "ethernet.static_dns=$ETH_DNS"
+    if [ ! -d "/sys/class/net/$eth" ]; then
+        echo "ethernet.link=none"
+    elif [ "$(cat "/sys/class/net/$eth/carrier" 2>/dev/null)" = 1 ]; then
+        echo "ethernet.link=up"
+    else
+        echo "ethernet.link=down"
+    fi
+    echo "ethernet.address=$(ip -4 -o addr show dev "$eth" 2>/dev/null | awk '{ print $4; exit }')"
+
+    LTE_ENABLED=no LTE_APN= LTE_PIN=
+    [ -f "$lte_conf" ] && . "$lte_conf"
+    LTE_STATE=off LTE_MESSAGE= LTE_IFACE=
+    [ -f "$lte_state" ] && . "$lte_state"
+    echo "lte.enabled=$LTE_ENABLED"
+    echo "lte.apn=$LTE_APN"
+    echo "lte.pin=$LTE_PIN"
+    echo "lte.state=$LTE_STATE"
+    echo "lte.message=$LTE_MESSAGE"
+    info=$(mmcli -m any -K 2>/dev/null)
+    if [ -n "$info" ]; then
+        echo "lte.modem=$(echo "$info" | mmget modem.generic.manufacturer) $(echo "$info" | mmget modem.generic.model)"
+        echo "lte.operator=$(echo "$info" | mmget modem.3gpp.operator-name)"
+        echo "lte.signal=$(echo "$info" | mmget modem.generic.signal-quality.value)"
+        echo "lte.technology=$(echo "$info" | mmget 'modem.generic.access-technologies.value[1]')"
+    else
+        echo "lte.modem="
+    fi
+    [ -n "$LTE_IFACE" ] && echo "lte.address=$(ip -4 -o addr show dev "$LTE_IFACE" 2>/dev/null | awk '{ print $4; exit }')"
+
+    echo "internet.via=$(ip -4 route show default 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')"
+}
+
+set_hotspot() {
+    [ $# -eq 4 ] || fail "usage: ozark-net hotspot NAME PASSWORD CHANNEL COUNTRY"
+    plain "$1" && [ ${#1} -ge 1 ] && [ ${#1} -le 32 ] || fail "The hotspot name must be 1-32 characters, without quotes or backslashes"
+    plain "$2" && [ ${#2} -ge 8 ] && [ ${#2} -le 63 ] || fail "The password must be 8-63 characters, without quotes or backslashes"
+    case "$3" in
+        1|2|3|4|5|6|7|8|9|10|11|36|40|44|48|149|153|157|161|165) ;;
+        *) fail "Channel $3 is not supported (1-11 for 2.4 GHz; 36-48 or 149-165 for 5 GHz)" ;;
+    esac
+    case "$4" in
+        [A-Z][A-Z]) ;;
+        *) fail "The country must be a two-letter code, e.g. US" ;;
+    esac
+    load_hotspot
+    SSID=$1 PASSWORD=$2 CHANNEL=$3 COUNTRY=$4
+    save_hotspot
+    apply_hotspot
+}
+
+set_share() {
+    case "$1" in yes|no) ;; *) fail "usage: ozark-net share yes|no" ;; esac
+    load_hotspot
+    SHARE=$1
+    save_hotspot
+    apply_hotspot
+}
+
+set_ethernet() {
+    case "$1" in
+    dhcp)
+        ETH_MODE=dhcp ETH_ADDRESS= ETH_GATEWAY= ETH_DNS=
+        network="[Network]
+DHCP=yes
+
+[DHCP]
+UseMTU=yes
+RouteMetric=10
+ClientIdentifier=mac"
+        ;;
+    static)
+        [ $# -ge 3 ] || fail "usage: ozark-net ethernet static ADDRESS/PREFIX GATEWAY [DNS]"
+        ip=${2%/*} prefix=${2#*/}
+        [ "$prefix" != "$2" ] || prefix=24
+        ipv4 "$ip" && [ "$prefix" -ge 1 ] 2>/dev/null && [ "$prefix" -le 32 ] || fail "The address must look like 192.168.1.50/24"
+        ipv4 "$3" || fail "The gateway must look like 192.168.1.1"
+        [ -z "$4" ] || ipv4 "$4" || fail "The DNS server must look like 192.168.1.1"
+        ETH_MODE=static ETH_ADDRESS=$ip/$prefix ETH_GATEWAY=$3 ETH_DNS=$4
+        network="[Network]
+Address=$ETH_ADDRESS
+${ETH_DNS:+DNS=$ETH_DNS
+}
+[Route]
+Gateway=$ETH_GATEWAY
+Metric=10"
+        ;;
+    *) fail "usage: ozark-net ethernet dhcp | static ADDRESS/PREFIX GATEWAY [DNS]" ;;
+    esac
+    mkdir -p "$(dirname "$eth_conf")" "$(dirname "$eth_network")"
+    printf "ETH_MODE='%s'\nETH_ADDRESS='%s'\nETH_GATEWAY='%s'\nETH_DNS='%s'\n" \
+        "$ETH_MODE" "$ETH_ADDRESS" "$ETH_GATEWAY" "$ETH_DNS" > "$eth_conf"
+    # Sorts before Poky's 80-wired.network, so it wins for $eth
+    printf '# Written by ozark-net (Settings > Network)\n[Match]\nName=%s\n\n%s\n' "$eth" "$network" > "$eth_network"
+    networkctl reload
+    networkctl reconfigure "$eth" 2>/dev/null
+    return 0
+}
+
+set_lte() {
+    case "$1" in yes|no) ;; *) fail "usage: ozark-net lte yes|no [APN [PIN]]" ;; esac
+    LTE_ENABLED=no LTE_APN= LTE_PIN=
+    [ -f "$lte_conf" ] && . "$lte_conf"
+    LTE_ENABLED=$1
+    [ $# -ge 2 ] && LTE_APN=$2
+    [ $# -ge 3 ] && LTE_PIN=$3
+    case "$LTE_APN" in
+        *[!A-Za-z0-9._-]*) fail "The APN can only have letters, digits, dots, dashes and underscores" ;;
+    esac
+    case "$LTE_PIN" in
+        "") ;;
+        *[!0-9]*) fail "The SIM PIN must be 4-8 digits" ;;
+        *) [ ${#LTE_PIN} -ge 4 ] && [ ${#LTE_PIN} -le 8 ] || fail "The SIM PIN must be 4-8 digits" ;;
+    esac
+    mkdir -p "$(dirname "$lte_conf")"
+    printf "LTE_ENABLED='%s'\nLTE_APN='%s'\nLTE_PIN='%s'\n" "$LTE_ENABLED" "$LTE_APN" "$LTE_PIN" > "$lte_conf.tmp"
+    chmod 600 "$lte_conf.tmp"
+    mv "$lte_conf.tmp" "$lte_conf"
+    systemctl restart ozark-lte.service
+    return 0
+}
+
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    status) status ;;
+    hotspot) set_hotspot "$@" ;;
+    share) set_share "$@" ;;
+    ethernet) set_ethernet "$@" ;;
+    lte) set_lte "$@" ;;
+    *) fail "usage: ozark-net status | hotspot | share | ethernet | lte (see /usr/sbin/ozark-net)" ;;
+esac

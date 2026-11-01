@@ -1,0 +1,51 @@
+From 666f54e9d5d233a924c4fb862d113a24a87fffdb Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Fri, 30 Oct 2026 19:43:07 -0500
+Subject: [PATCH 10/10] Set the volume without blocking the UI
+
+Session::System::set_volume() ran amixer and waited for it on the UI
+thread, and leaked the QProcess. Each step of a volume knob froze Dash
+for the length of the call. Run it in the background with one reused
+process; while it's busy only the newest value is kept and applied
+next.
+
+Upstream-Status: Pending
+---
+ src/app/session.cpp | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index e24f64c..1534658 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -239,9 +239,27 @@ Session::System::System(QSettings &settings, Arbiter &arbiter)
+ 
+ void Session::System::set_volume() const
+ {
+-    auto process = new QProcess();
+-    process->start(QString(VOLUME_CMD).arg(this->volume));
+-    process->waitForFinished();
++    // Run the mixer in the background: waiting for it blocked the UI on every
++    // volume step, so a turning knob made Dash stutter. Only the newest value
++    // matters, so while one run is busy the latest value waits and is applied
++    // when it finishes.
++    static QProcess *process = nullptr;
++    static int pending = -1;
++
++    pending = this->volume;
++    if (process == nullptr) {
++        process = new QProcess(qApp);
++        QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), [](int, QProcess::ExitStatus){
++            if (pending >= 0) {
++                process->start(QString(VOLUME_CMD).arg(pending));
++                pending = -1;
++            }
++        });
++    }
++    if (process->state() == QProcess::NotRunning) {
++        process->start(QString(VOLUME_CMD).arg(pending));
++        pending = -1;
++    }
+ }
+ 
+ QFrame *Session::Forge::br(bool vertical)

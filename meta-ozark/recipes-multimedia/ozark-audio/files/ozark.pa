@@ -1,0 +1,35 @@
+#!/usr/bin/pulseaudio -nF
+# Ozark OS: PulseAudio startup script for the system-wide server
+# (ozark-pulseaudio.service).
+
+.fail
+
+# Remember volumes, the default sink and card profiles across reboots
+load-module module-device-restore
+load-module module-stream-restore
+load-module module-card-restore
+
+# Sound cards (Pi headphone jack/HDMI, USB DACs and microphones)
+load-module module-udev-detect
+
+# Phones over Bluetooth: music (A2DP sink) and calls through oFono (HFP)
+load-module module-bluetooth-policy
+load-module module-bluetooth-discover headset=ofono
+
+# Local clients. Every process on the unit is trusted (no login users), so no
+# cookie or group check.
+load-module module-native-protocol-unix auth-anonymous=1
+
+# Move playback to a newly connected output, keep a sink even with no card
+load-module module-switch-on-connect
+load-module module-default-device-restore
+load-module module-always-sink
+load-module module-suspend-on-idle
+
+# 10-band equalizer (ozark-eq10) in front of the output, as the default sink.
+# Dash's Media > Equalizer tab sets its bands over PulseAudio's D-Bus interface.
+# .nofail: if the equalizer can't load, sound still plays without it.
+.nofail
+load-module module-dbus-protocol access=local
+load-module module-ladspa-sink sink_name=ozark_eq sink_properties=device.description=Equalizer sink_master=@DEFAULT_SINK@ plugin=ozark_eq10 label=ozark_eq10 channels=2 control=0,0,0,0,0,0,0,0,0,0,0
+set-default-sink ozark_eq

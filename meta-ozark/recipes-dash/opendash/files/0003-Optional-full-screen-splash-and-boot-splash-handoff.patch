@@ -1,0 +1,78 @@
+From c70b2e05aaddacb4961921540091614d2487d472 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 17:09:58 -0500
+Subject: [PATCH 03/10] Optional full-screen splash and boot splash handoff
+
+DASH_SPLASH_BACKGROUND and DASH_SPLASH_IMAGE draw the splash full-screen:
+a background colour with an image centred at its own size, so it can match
+the system's boot splash exactly. DASH_SPLASH_HANDOFF runs a command once
+the splash is on screen (e.g. 'psplash-write QUIT'), so the boot splash
+stays up until Dash has something to show. Without the variables Dash
+behaves as before.
+
+Upstream-Status: Pending
+---
+ src/dash.cpp | 39 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/src/dash.cpp b/src/dash.cpp
+index 1679679..7eb2292 100644
+--- a/src/dash.cpp
++++ b/src/dash.cpp
+@@ -1,5 +1,10 @@
+ #include <QApplication>
++#include <QColor>
++#include <QEventLoop>
++#include <QPainter>
++#include <QProcess>
+ #include <QStringList>
++#include <QTimer>
+ #include <QWindow>
+ 
+ #include "app/window.hpp"
+@@ -37,13 +42,43 @@ int main(int argc, char *argv[])
+         }
+     }
+ 
+-    QPixmap pixmap(QPixmap(":/splash.png").scaledToHeight(size.height() / 2));
++    // DASH_SPLASH_BACKGROUND (a colour) gives a full-screen splash: that colour
++    // with DASH_SPLASH_IMAGE (default: Dash's logo) centred at its own size. A
++    // system boot splash can then hand over without a visible change.
++    // DASH_SPLASH_HANDOFF is a command run once the splash is on screen, e.g. to
++    // stop that boot splash.
++    const QColor splash_background(qEnvironmentVariable("DASH_SPLASH_BACKGROUND"));
++    const QString splash_image = qEnvironmentVariable("DASH_SPLASH_IMAGE", ":/splash.png");
++    QPixmap pixmap;
++    if (splash_background.isValid()) {
++        const QPixmap logo(splash_image);
++        pixmap = QPixmap(size);
++        pixmap.fill(splash_background);
++        QPainter painter(&pixmap);
++        painter.drawPixmap((size.width() - logo.width()) / 2, (size.height() - logo.height()) / 2, logo);
++    }
++    else {
++        pixmap = QPixmap(splash_image).scaledToHeight(size.height() / 2);
++    }
+     QSplashScreen splash(pixmap);
+-    splash.setMask(pixmap.mask());
++    if (!splash_background.isValid())
++        splash.setMask(pixmap.mask());
+     splash.move(pos.x() + ((size.width() / 2) - (splash.width() / 2)), pos.y() + ((size.height() / 2) - (splash.height() / 2)));
+     splash.show();
+     dash.processEvents();
+ 
++    QStringList handoff = QProcess::splitCommand(qEnvironmentVariable("DASH_SPLASH_HANDOFF"));
++    if (splash_background.isValid() || !handoff.isEmpty()) {
++        // On EGLFS windows reach the screen through a timer-driven compositor, and
++        // the main window below is built without returning to the event loop. Run
++        // the loop briefly so the splash is really on screen before going on.
++        QEventLoop loop;
++        QTimer::singleShot(300, &loop, &QEventLoop::quit);
++        loop.exec();
++    }
++    if (!handoff.isEmpty())
++        QProcess::startDetached(handoff.takeFirst(), handoff);
++
+     MainWindow window(QRect(pos, size));
+     window.setWindowIcon(QIcon(":/logo.png"));
+     window.setWindowFlags(Qt::FramelessWindowHint);

@@ -1,0 +1,591 @@
+From 1f7cb7072c103fbb53b9dd86f596fe34de4ee9af Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 21:16:41 -0500
+Subject: [PATCH 08/10] Phone page: pair, connect and forget phones
+
+A Phone page lists paired phones with connect/disconnect and forget.
+'Pair new phone' makes the unit visible for 3 minutes with a countdown;
+a BlueZ agent (registered as the default) shows the pairing code to
+confirm, and only accepts new devices while pairing mode is on. Newly
+paired phones are trusted, and trusted phones are reconnected when Dash
+starts, the last one used first.
+
+Upstream-Status: Pending
+---
+ include/app/pages/phone.hpp |  86 +++++++
+ src/app/pages/phone.cpp     | 452 ++++++++++++++++++++++++++++++++++++
+ src/app/session.cpp         |   2 +
+ 3 files changed, 540 insertions(+)
+ create mode 100644 include/app/pages/phone.hpp
+ create mode 100644 src/app/pages/phone.cpp
+
+diff --git a/include/app/pages/phone.hpp b/include/app/pages/phone.hpp
+new file mode 100644
+index 0000000..9b076d6
+--- /dev/null
++++ b/include/app/pages/phone.hpp
+@@ -0,0 +1,86 @@
++#pragma once
++
++#include <functional>
++
++#include <BluezQt/Agent>
++#include <BluezQt/Types>
++#include <QMap>
++#include <QPointer>
++#include <QtWidgets>
++
++#include "app/pages/page.hpp"
++
++class Arbiter;
++class Dialog;
++
++namespace BluezQt {
++class Manager;
++}
++
++// Answers BlueZ's pairing questions (registered as the default agent): shows
++// the code to compare on a "Pair with ...?" dialog, and only lets new devices
++// pair while the Phone page has pairing mode on.
++class PairingAgent : public BluezQt::Agent {
++    Q_OBJECT
++
++   public:
++    PairingAgent(Arbiter &arbiter, QObject *parent);
++
++    QDBusObjectPath objectPath() const override;
++    Capability capability() const override { return DisplayYesNo; }
++
++    void requestPinCode(BluezQt::DevicePtr device, const BluezQt::Request<QString> &request) override;
++    void displayPinCode(BluezQt::DevicePtr device, const QString &pinCode) override;
++    void requestPasskey(BluezQt::DevicePtr device, const BluezQt::Request<quint32> &request) override;
++    void displayPasskey(BluezQt::DevicePtr device, const QString &passkey, const QString &entered) override;
++    void requestConfirmation(BluezQt::DevicePtr device, const QString &passkey, const BluezQt::Request<> &request) override;
++    void requestAuthorization(BluezQt::DevicePtr device, const BluezQt::Request<> &request) override;
++    void authorizeService(BluezQt::DevicePtr device, const QString &uuid, const BluezQt::Request<> &request) override;
++    void cancel() override;
++    void release() override;
++
++    bool pairing_mode = false;
++
++   private:
++    // Shows the code; answer(true) if confirmed, answer(false) if cancelled.
++    // Without an answer callback the dialog only displays the code.
++    void show_code(BluezQt::DevicePtr device, const QString &code, std::function<void(bool)> answer);
++    void close_prompt();
++
++    Arbiter &arbiter;
++    QPointer<Dialog> prompt;
++};
++
++// Paired phones (connect, disconnect, forget) and pairing a new one. Trusted
++// phones are reconnected when Dash starts, the most recently used first.
++class PhonePage : public QTabWidget, public Page {
++    Q_OBJECT
++
++   public:
++    PhonePage(Arbiter &arbiter, QWidget *parent = nullptr);
++
++    void init() override;
++
++   private:
++    QWidget *phones_tab();
++    void set_adapter(BluezQt::AdapterPtr adapter);
++    void set_pairing(bool enabled);
++    void update_header();
++    void update_device(BluezQt::DevicePtr device);
++    void remove_device(const QString &address);
++    void reconnect();
++
++    BluezQt::Manager *manager = nullptr;
++    BluezQt::AdapterPtr adapter;
++    PairingAgent *agent = nullptr;
++    bool reconnected = false;
++
++    QLabel *status = nullptr;
++    QLabel *hint = nullptr;
++    QPushButton *pair_button = nullptr;
++    QVBoxLayout *device_list = nullptr;
++    QLabel *no_devices = nullptr;
++    QTimer *countdown = nullptr;
++    int seconds_left = 0;
++    QMap<QString, QWidget *> rows;
++};
+diff --git a/src/app/pages/phone.cpp b/src/app/pages/phone.cpp
+new file mode 100644
+index 0000000..0374a94
+--- /dev/null
++++ b/src/app/pages/phone.cpp
+@@ -0,0 +1,452 @@
++#include <BluezQt/Adapter>
++#include <BluezQt/Device>
++#include <BluezQt/InitManagerJob>
++#include <BluezQt/Manager>
++#include <BluezQt/PendingCall>
++#include <BluezQt/Request>
++
++#include "DashLog.hpp"
++
++#include "app/arbiter.hpp"
++#include "app/widgets/dialog.hpp"
++
++#include "app/pages/phone.hpp"
++
++namespace {
++// How long the unit stays visible for a phone to find it
++constexpr int kPairSeconds = 180;
++const char *kLastDevice = "Phone/last_device";
++
++QString spaced_code(const QString &code)
++{
++    // 123456 -> "123 456", easier to compare at a glance
++    return code.size() == 6 ? code.left(3) + " " + code.mid(3) : code;
++}
++}  // namespace
++
++// ---------------------------------------------------------------- agent
++
++PairingAgent::PairingAgent(Arbiter &arbiter, QObject *parent)
++    : BluezQt::Agent(parent)
++    , arbiter(arbiter)
++{
++}
++
++QDBusObjectPath PairingAgent::objectPath() const
++{
++    return QDBusObjectPath("/org/openDsh/dash/agent");
++}
++
++void PairingAgent::show_code(BluezQt::DevicePtr device, const QString &code, std::function<void(bool)> answer)
++{
++    this->close_prompt();
++
++    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    dialog->setAttribute(Qt::WA_DeleteOnClose);
++    dialog->set_title(QString("Pair with %1?").arg(device->name()));
++
++    auto body = new QWidget();
++    auto layout = new QVBoxLayout(body);
++    auto code_label = new QLabel(spaced_code(code), body);
++    QFont code_font(this->arbiter.forge().font(28));
++    code_font.setBold(true);
++    code_label->setFont(code_font);
++    code_label->setAlignment(Qt::AlignCenter);
++    layout->addWidget(code_label);
++    auto hint = new QLabel(answer ? "Make sure this code matches the one on your phone." : "Enter this code on your phone.", body);
++    hint->setFont(this->arbiter.forge().font(12));
++    hint->setAlignment(Qt::AlignCenter);
++    hint->setWordWrap(true);
++    layout->addWidget(hint);
++    dialog->set_body(body);
++
++    if (answer) {
++        // Dialog closes on both "pair" and "cancel": remember which it was
++        auto confirmed = std::make_shared<bool>(false);
++        auto pair = new QPushButton("pair");
++        connect(pair, &QPushButton::clicked, [confirmed]{ *confirmed = true; });
++        dialog->set_button(pair);
++        connect(dialog, &QObject::destroyed, [confirmed, answer]{ answer(*confirmed); });
++    }
++
++    this->prompt = dialog;
++    dialog->open();
++}
++
++void PairingAgent::close_prompt()
++{
++    if (this->prompt)
++        this->prompt->close();
++}
++
++void PairingAgent::requestPinCode(BluezQt::DevicePtr device, const BluezQt::Request<QString> &request)
++{
++    // Old devices without Secure Simple Pairing: the usual default PIN
++    if (this->pairing_mode) {
++        DASH_LOG(info) << "[Phone] PIN request from " << device->name().toStdString() << ", answering 0000";
++        request.accept("0000");
++    }
++    else {
++        request.reject();
++    }
++}
++
++void PairingAgent::displayPinCode(BluezQt::DevicePtr device, const QString &pinCode)
++{
++    this->show_code(device, pinCode, nullptr);
++}
++
++void PairingAgent::requestPasskey(BluezQt::DevicePtr, const BluezQt::Request<quint32> &request)
++{
++    // We advertise DisplayYesNo, so BlueZ shouldn't ask us to type a passkey
++    request.reject();
++}
++
++void PairingAgent::displayPasskey(BluezQt::DevicePtr device, const QString &passkey, const QString &)
++{
++    this->show_code(device, passkey, nullptr);
++}
++
++void PairingAgent::requestConfirmation(BluezQt::DevicePtr device, const QString &passkey, const BluezQt::Request<> &request)
++{
++    if (!this->pairing_mode && !device->isPaired()) {
++        DASH_LOG(info) << "[Phone] Rejected pairing from " << device->name().toStdString() << ": pairing mode is off";
++        request.reject();
++        return;
++    }
++
++    this->show_code(device, passkey, [request](bool confirmed){
++        if (confirmed)
++            request.accept();
++        else
++            request.reject();
++    });
++}
++
++void PairingAgent::requestAuthorization(BluezQt::DevicePtr device, const BluezQt::Request<> &request)
++{
++    // "Just works" pairing from a device without a display
++    if (this->pairing_mode)
++        request.accept();
++    else
++        request.reject();
++    DASH_LOG(info) << "[Phone] Authorization for " << device->name().toStdString() << ": " << (this->pairing_mode ? "accepted" : "rejected");
++}
++
++void PairingAgent::authorizeService(BluezQt::DevicePtr device, const QString &, const BluezQt::Request<> &request)
++{
++    // Paired (or currently pairing) devices may use our profiles: audio, calls, Android Auto
++    if (device->isPaired() || device->isTrusted() || this->pairing_mode)
++        request.accept();
++    else
++        request.reject();
++}
++
++void PairingAgent::cancel()
++{
++    this->close_prompt();
++}
++
++void PairingAgent::release()
++{
++    this->close_prompt();
++}
++
++// ---------------------------------------------------------------- page
++
++PhonePage::PhonePage(Arbiter &arbiter, QWidget *parent)
++    : QTabWidget(parent)
++    , Page(arbiter, "Phone", "smartphone", true, this)
++{
++}
++
++void PhonePage::init()
++{
++    this->addTab(this->phones_tab(), "Phones");
++
++    this->countdown = new QTimer(this);
++    this->countdown->setInterval(1000);
++    connect(this->countdown, &QTimer::timeout, [this]{
++        if (--this->seconds_left <= 0)
++            this->set_pairing(false);
++        else
++            this->update_header();
++    });
++
++    this->agent = new PairingAgent(this->arbiter, this);
++    this->manager = new BluezQt::Manager(this);
++    BluezQt::InitManagerJob *job = this->manager->init();
++    job->start();
++    connect(job, &BluezQt::InitManagerJob::result, [this](BluezQt::InitManagerJob *job){
++        if (job->error()) {
++            DASH_LOG(error) << "[Phone] BlueZ unavailable: " << job->errorText().toStdString();
++            this->update_header();
++            return;
++        }
++
++        BluezQt::PendingCall *call = this->manager->registerAgent(this->agent);
++        connect(call, &BluezQt::PendingCall::finished, [this](BluezQt::PendingCall *call){
++            if (call->error()) {
++                DASH_LOG(error) << "[Phone] Could not register pairing agent: " << call->errorText().toStdString();
++                return;
++            }
++            this->manager->requestDefaultAgent(this->agent);
++            DASH_LOG(info) << "[Phone] Pairing agent registered";
++        });
++
++        connect(this->manager, &BluezQt::Manager::usableAdapterChanged, [this](BluezQt::AdapterPtr adapter){
++            this->set_adapter(adapter);
++        });
++        this->set_adapter(this->manager->usableAdapter());
++    });
++}
++
++QWidget *PhonePage::phones_tab()
++{
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++
++    auto header = new QHBoxLayout();
++    auto header_text = new QVBoxLayout();
++    this->status = new QLabel(widget);
++    this->status->setFont(this->arbiter.forge().font(14));
++    header_text->addWidget(this->status);
++    this->hint = new QLabel(widget);
++    this->hint->setFont(this->arbiter.forge().font(11));
++    this->hint->setWordWrap(true);
++    header_text->addWidget(this->hint);
++    header->addLayout(header_text, 1);
++
++    this->pair_button = new QPushButton("pair new phone", widget);
++    this->pair_button->setFont(this->arbiter.forge().font(14));
++    this->pair_button->setCheckable(true);
++    connect(this->pair_button, &QPushButton::clicked, [this](bool checked){ this->set_pairing(checked); });
++    header->addWidget(this->pair_button, 0, Qt::AlignTop);
++    layout->addLayout(header);
++    layout->addWidget(Session::Forge::br());
++
++    auto scroll = new QScrollArea(widget);
++    Session::Forge::to_touch_scroller(scroll);
++    scroll->setWidgetResizable(true);
++    scroll->setFrameShape(QFrame::NoFrame);
++    auto list = new QWidget(scroll);
++    this->device_list = new QVBoxLayout(list);
++    this->device_list->setContentsMargins(0, 0, 0, 0);
++    this->no_devices = new QLabel("No paired phones yet.", list);
++    this->no_devices->setFont(this->arbiter.forge().font(12));
++    this->no_devices->setAlignment(Qt::AlignCenter);
++    this->device_list->addWidget(this->no_devices);
++    this->device_list->addStretch();
++    scroll->setWidget(list);
++    layout->addWidget(scroll, 1);
++
++    this->update_header();
++    return widget;
++}
++
++void PhonePage::set_adapter(BluezQt::AdapterPtr adapter)
++{
++    if (this->adapter)
++        this->adapter->disconnect(this);
++    for (const QString &address : this->rows.keys())
++        this->remove_device(address);
++
++    this->adapter = adapter;
++    if (this->adapter) {
++        DASH_LOG(info) << "[Phone] Adapter " << this->adapter->address().toStdString() << " as \"" << this->adapter->name().toStdString() << "\"";
++        connect(this->adapter.data(), &BluezQt::Adapter::deviceAdded, this, [this](BluezQt::DevicePtr device){ this->update_device(device); });
++        connect(this->adapter.data(), &BluezQt::Adapter::deviceChanged, this, [this](BluezQt::DevicePtr device){ this->update_device(device); });
++        connect(this->adapter.data(), &BluezQt::Adapter::deviceRemoved, this, [this](BluezQt::DevicePtr device){ this->remove_device(device->address()); });
++        connect(this->adapter.data(), &BluezQt::Adapter::discoverableChanged, this, [this](bool discoverable){
++            if (!discoverable && this->agent->pairing_mode)
++                this->set_pairing(false);
++        });
++        connect(this->adapter.data(), &BluezQt::Adapter::poweredChanged, this, [this](bool powered){
++            if (powered)
++                this->reconnect();
++            this->update_header();
++        });
++        connect(this->adapter.data(), &BluezQt::Adapter::nameChanged, this, [this]{ this->update_header(); });
++
++        for (auto device : this->adapter->devices())
++            this->update_device(device);
++        this->reconnect();
++    }
++    this->update_header();
++}
++
++void PhonePage::set_pairing(bool enabled)
++{
++    if (enabled && !this->adapter) {
++        this->pair_button->setChecked(false);
++        return;
++    }
++
++    this->agent->pairing_mode = enabled;
++    if (this->adapter) {
++        if (enabled) {
++            if (!this->adapter->isPowered())
++                this->adapter->setPowered(true);
++            this->adapter->setPairable(true);
++            this->adapter->setDiscoverableTimeout(kPairSeconds);
++            this->adapter->setDiscoverable(true);
++        }
++        else if (this->adapter->isDiscoverable()) {
++            this->adapter->setDiscoverable(false);
++        }
++    }
++
++    this->seconds_left = kPairSeconds;
++    if (enabled)
++        this->countdown->start();
++    else
++        this->countdown->stop();
++    this->pair_button->setChecked(enabled);
++    this->pair_button->setText(enabled ? "stop" : "pair new phone");
++    this->update_header();
++}
++
++void PhonePage::update_header()
++{
++    if (!this->adapter) {
++        this->status->setText("Bluetooth is not available");
++        this->hint->setText("No Bluetooth adapter was found.");
++        this->pair_button->setEnabled(false);
++        return;
++    }
++
++    this->pair_button->setEnabled(true);
++    const QString name = this->adapter->name();
++    if (this->agent->pairing_mode) {
++        this->status->setText(QString("Visible as “%1” · %2:%3")
++                                  .arg(name)
++                                  .arg(this->seconds_left / 60)
++                                  .arg(this->seconds_left % 60, 2, 10, QChar('0')));
++        this->hint->setText(QString("On your phone, open Bluetooth settings and choose “%1”.").arg(name));
++    }
++    else {
++        QStringList connected;
++        for (auto device : this->adapter->devices()) {
++            if (device->isPaired() && device->isConnected())
++                connected.append(device->name());
++        }
++        this->status->setText(connected.isEmpty() ? QString("No phone connected") : QString("Connected to %1").arg(connected.join(", ")));
++        this->hint->setText(QString("This unit appears as “%1”.").arg(name));
++    }
++}
++
++void PhonePage::update_device(BluezQt::DevicePtr device)
++{
++    const QString address = device->address();
++    if (!device->isPaired()) {
++        this->remove_device(address);
++        return;
++    }
++
++    // Newly paired: trust it (allows reconnecting without asking) and end pairing mode
++    if (!this->rows.contains(address)) {
++        if (!device->isTrusted())
++            device->setTrusted(true);
++        if (this->agent->pairing_mode)
++            this->set_pairing(false);
++    }
++    if (device->isConnected())
++        this->arbiter.settings().setValue(kLastDevice, address);
++
++    QWidget *row = this->rows.value(address);
++    if (!row) {
++        row = new QFrame();
++        auto layout = new QHBoxLayout(row);
++        auto icon = new QPushButton(row);
++        icon->setFlat(true);
++        icon->setFocusPolicy(Qt::NoFocus);
++        icon->setAttribute(Qt::WA_TransparentForMouseEvents);
++        this->arbiter.forge().iconize("smartphone", icon, 28);
++        layout->addWidget(icon);
++
++        auto text = new QVBoxLayout();
++        auto name = new QLabel(row);
++        name->setObjectName("name");
++        name->setFont(this->arbiter.forge().font(14));
++        text->addWidget(name);
++        auto state = new QLabel(row);
++        state->setObjectName("state");
++        state->setFont(this->arbiter.forge().font(11));
++        text->addWidget(state);
++        layout->addLayout(text, 1);
++
++        auto toggle = new QPushButton(row);
++        toggle->setObjectName("toggle");
++        toggle->setFont(this->arbiter.forge().font(14));
++        toggle->setFlat(true);
++        connect(toggle, &QPushButton::clicked, [device]{
++            if (device->isConnected())
++                device->disconnectFromDevice();
++            else
++                device->connectToDevice();
++        });
++        layout->addWidget(toggle);
++
++        auto forget = new QPushButton("forget", row);
++        forget->setFont(this->arbiter.forge().font(14));
++        forget->setFlat(true);
++        connect(forget, &QPushButton::clicked, [this, device]{
++            if (this->adapter)
++                this->adapter->removeDevice(device);
++        });
++        layout->addWidget(forget);
++
++        this->device_list->insertWidget(this->device_list->count() - 1, row);
++        this->rows.insert(address, row);
++        this->no_devices->hide();
++    }
++
++    row->findChild<QLabel *>("name")->setText(device->name());
++    row->findChild<QLabel *>("state")->setText(device->isConnected() ? "Connected" : "Not connected");
++    row->findChild<QPushButton *>("toggle")->setText(device->isConnected() ? "disconnect" : "connect");
++    this->update_header();
++}
++
++void PhonePage::remove_device(const QString &address)
++{
++    QWidget *row = this->rows.take(address);
++    if (row)
++        row->deleteLater();
++    this->no_devices->setVisible(this->rows.isEmpty());
++    this->update_header();
++}
++
++// Once per start (and when the adapter powers up): connect trusted phones,
++// trying the last one used first, until one connects
++void PhonePage::reconnect()
++{
++    if (this->reconnected || !this->adapter || !this->adapter->isPowered())
++        return;
++    this->reconnected = true;
++
++    const QString last = this->arbiter.settings().value(kLastDevice).toString();
++    QList<BluezQt::DevicePtr> candidates;
++    for (auto device : this->adapter->devices()) {
++        if (!device->isPaired() || !device->isTrusted() || device->isBlocked())
++            continue;
++        if (device->isConnected())
++            return;
++        if (device->address() == last)
++            candidates.prepend(device);
++        else
++            candidates.append(device);
++    }
++
++    auto try_next = std::make_shared<std::function<void(int)>>();
++    *try_next = [candidates, try_next](int i){
++        if (i >= candidates.size())
++            return;
++        DASH_LOG(info) << "[Phone] Reconnecting " << candidates[i]->name().toStdString();
++        BluezQt::PendingCall *call = candidates[i]->connectToDevice();
++        QObject::connect(call, &BluezQt::PendingCall::finished, [try_next, i](BluezQt::PendingCall *call){
++            if (call->error())
++                (*try_next)(i + 1);
++        });
++    };
++    (*try_next)(0);
++}
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index 461d02f..e24f64c 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -16,6 +16,7 @@
+ #include "app/pages/vehicle.hpp"
+ #include "app/pages/launcher.hpp"
+ #include "app/pages/media.hpp"
++#include "app/pages/phone.hpp"
+ #include "app/pages/settings.hpp"
+ #include "app/quick_views/android_auto.hpp"
+ #include "app/quick_views/combo.hpp"
+@@ -122,6 +123,7 @@ Session::Layout::Layout(QSettings &settings, Arbiter &arbiter)
+     this->pages_ = {
+         this->openauto_page,
+         new MediaPage(arbiter),
++        new PhonePage(arbiter),
+         new VehiclePage(arbiter),
+         new CameraPage(arbiter),
+         new LauncherPage(arbiter),

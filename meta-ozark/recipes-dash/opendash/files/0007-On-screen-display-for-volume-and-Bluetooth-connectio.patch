@@ -1,0 +1,334 @@
+From 50aa5a578dbe5164082c63927d8a7c79bdd96313 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 21:12:48 -0500
+Subject: [PATCH 07/10] On-screen display for volume and Bluetooth connections
+
+A small overlay in the lower third of the window shows the volume level
+whenever it changes (knob, keys, sliders, Android Auto) and announces
+Bluetooth devices connecting and disconnecting. It also maps the
+standard Volume Up/Down/Mute keys to volume changes, so USB volume knobs
+and steering wheel adapters work without binding actions.
+
+Adds Material icons: bluetooth, bluetooth_connected, bluetooth_disabled,
+smartphone.
+
+Upstream-Status: Pending
+---
+ assets/icons/bluetooth.svg           |   4 +
+ assets/icons/bluetooth_connected.svg |   4 +
+ assets/icons/bluetooth_disabled.svg  |   4 +
+ assets/icons/smartphone.svg          |   4 +
+ assets/resources.qrc                 |   4 +
+ include/app/widgets/osd.hpp          |  42 +++++++
+ src/app/widgets/osd.cpp              | 172 +++++++++++++++++++++++++++
+ src/app/window.cpp                   |   3 +
+ 8 files changed, 237 insertions(+)
+ create mode 100644 assets/icons/bluetooth.svg
+ create mode 100644 assets/icons/bluetooth_connected.svg
+ create mode 100644 assets/icons/bluetooth_disabled.svg
+ create mode 100644 assets/icons/smartphone.svg
+ create mode 100644 include/app/widgets/osd.hpp
+ create mode 100644 src/app/widgets/osd.cpp
+
+diff --git a/assets/icons/bluetooth.svg b/assets/icons/bluetooth.svg
+new file mode 100644
+index 0000000..9451f72
+--- /dev/null
++++ b/assets/icons/bluetooth.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M17.71 7.71L12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.71-5.71-4.3-4.29 4.3-4.29zM13 5.83l1.88 1.88L13 9.59V5.83zm1.88 10.46L13 18.17v-3.76l1.88 1.88z"/>
++</svg>
+diff --git a/assets/icons/bluetooth_connected.svg b/assets/icons/bluetooth_connected.svg
+new file mode 100644
+index 0000000..6490ca9
+--- /dev/null
++++ b/assets/icons/bluetooth_connected.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M7 12l-2-2-2 2 2 2 2-2zm10.71-4.29L12 2h-1v7.59L6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l5.71-5.71-4.3-4.29 4.3-4.29zM13 5.83l1.88 1.88L13 9.59V5.83zm1.88 10.46L13 18.17v-3.76l1.88 1.88zM19 10l-2 2 2 2 2-2-2-2z"/>
++</svg>
+diff --git a/assets/icons/bluetooth_disabled.svg b/assets/icons/bluetooth_disabled.svg
+new file mode 100644
+index 0000000..9572363
+--- /dev/null
++++ b/assets/icons/bluetooth_disabled.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M13 5.83l1.88 1.88-1.6 1.6 1.41 1.41 3.02-3.02L12 2h-1v5.03l2 2v-3.2zM5.41 4L4 5.41 10.59 12 5 17.59 6.41 19 11 14.41V22h1l4.29-4.29 2.3 2.29L20 18.59 5.41 4zM13 18.17v-3.76l1.88 1.88L13 18.17z"/>
++</svg>
+diff --git a/assets/icons/smartphone.svg b/assets/icons/smartphone.svg
+new file mode 100644
+index 0000000..6e4fd45
+--- /dev/null
++++ b/assets/icons/smartphone.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M0 0h24v24H0z"/>
++    <path d="M17 1.01L7 1c-1.1 0-2 .9-2 2v18c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V3c0-1.1-.9-1.99-2-1.99zM17 19H7V5h10v14z"/>
++</svg>
+diff --git a/assets/resources.qrc b/assets/resources.qrc
+index e0d3769..a88456a 100644
+--- a/assets/resources.qrc
++++ b/assets/resources.qrc
+@@ -18,6 +18,10 @@
+         <file>icons/directions_car.svg</file>
+         <file>icons/volume_down.svg</file>
+         <file>icons/volume_up.svg</file>
++        <file>icons/bluetooth.svg</file>
++        <file>icons/bluetooth_connected.svg</file>
++        <file>icons/bluetooth_disabled.svg</file>
++        <file>icons/smartphone.svg</file>
+         <file>icons/check.svg</file>
+         <file>icons/fast_forward.svg</file>
+         <file>icons/fast_rewind.svg</file>
+diff --git a/include/app/widgets/osd.hpp b/include/app/widgets/osd.hpp
+new file mode 100644
+index 0000000..51b1d78
+--- /dev/null
++++ b/include/app/widgets/osd.hpp
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include <QDialog>
++#include <QElapsedTimer>
++#include <QSet>
++#include <QString>
++
++class Arbiter;
++class QLabel;
++class QProgressBar;
++class QPushButton;
++class QTimer;
++
++// On-screen display over the main window: volume changes (from a knob, keys,
++// sliders or Android Auto) and Bluetooth devices connecting or disconnecting.
++// Also turns the standard Volume Up/Down/Mute keys into volume changes, so a
++// USB volume knob or a steering wheel adapter works without binding actions.
++class Osd : public QDialog {
++    Q_OBJECT
++
++   public:
++    Osd(Arbiter &arbiter, QWidget *parent);
++
++   protected:
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++   private:
++    void show_volume(int volume);
++    void show_message(const QString &icon, const QString &text);
++    void present(const QString &icon);
++    void place();
++
++    Arbiter &arbiter;
++    QPushButton *icon;
++    QLabel *text;
++    QProgressBar *level;
++    QLabel *value;
++    QTimer *hide_timer;
++    QElapsedTimer started;
++    QSet<QString> connected;
++    int unmuted_volume = 50;
++};
+diff --git a/src/app/widgets/osd.cpp b/src/app/widgets/osd.cpp
+new file mode 100644
+index 0000000..af1ea41
+--- /dev/null
++++ b/src/app/widgets/osd.cpp
+@@ -0,0 +1,172 @@
++#include <QApplication>
++#include <QFrame>
++#include <QHBoxLayout>
++#include <QKeyEvent>
++#include <QLabel>
++#include <QProgressBar>
++#include <QPushButton>
++#include <QTimer>
++
++#include "app/arbiter.hpp"
++
++#include "app/widgets/osd.hpp"
++
++namespace {
++constexpr int kShowMs = 1500;
++constexpr int kVolumeStep = 5;
++// Volume is restored from settings while Dash starts: don't announce that
++constexpr int kQuietStartMs = 3000;
++}  // namespace
++
++// A frameless dialog window, built and shown like Dash's own dialogs (which
++// composite reliably over the main window on EGLFS). The window itself is
++// translucent; the visible panel is an inner frame.
++Osd::Osd(Arbiter &arbiter, QWidget *parent)
++    : QDialog(parent, Qt::FramelessWindowHint)
++    , arbiter(arbiter)
++{
++    this->setAttribute(Qt::WA_TranslucentBackground, true);
++
++    const double scale = this->arbiter.layout().scale;
++    auto outer = new QHBoxLayout(this);
++    outer->setContentsMargins(0, 0, 0, 0);
++    auto panel = new QFrame(this);
++    panel->setObjectName("OsdPanel");
++    // Follows light/dark mode through the palette Dash sets
++    panel->setStyleSheet(QString(
++        "QFrame#OsdPanel { background: palette(window); border: 1px solid palette(mid); border-radius: %1px; }"
++        "QProgressBar { background-color: palette(alternate-base); border: none; border-radius: 2px; }"
++        "QProgressBar::chunk { background-color: palette(base); border-radius: 2px; }")
++        .arg(int(14 * scale)));
++    outer->addWidget(panel);
++
++    auto layout = new QHBoxLayout(panel);
++    layout->setContentsMargins(int(16 * scale), int(10 * scale), int(20 * scale), int(10 * scale));
++    layout->setSpacing(int(12 * scale));
++
++    this->icon = new QPushButton(panel);
++    this->icon->setFlat(true);
++    this->icon->setFocusPolicy(Qt::NoFocus);
++    layout->addWidget(this->icon);
++
++    this->text = new QLabel(panel);
++    this->text->setFont(this->arbiter.forge().font(14));
++    layout->addWidget(this->text);
++
++    this->level = new QProgressBar(panel);
++    this->level->setRange(0, 100);
++    this->level->setTextVisible(false);
++    this->level->setFixedSize(int(200 * scale), 5);
++    layout->addWidget(this->level);
++
++    this->value = new QLabel(panel);
++    this->value->setFont(this->arbiter.forge().font(14));
++    this->value->setMinimumWidth(this->value->fontMetrics().horizontalAdvance("100"));
++    this->value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
++    layout->addWidget(this->value);
++
++    this->hide_timer = new QTimer(this);
++    this->hide_timer->setSingleShot(true);
++    this->hide_timer->setInterval(kShowMs);
++    connect(this->hide_timer, &QTimer::timeout, [this]{
++        this->hide();
++        this->arbiter.window()->activateWindow();
++    });
++
++    this->hide();
++    this->started.start();
++    parent->installEventFilter(this);
++    qApp->installEventFilter(this);
++
++    connect(&this->arbiter, &Arbiter::volume_changed, this, [this](uint8_t volume){
++        if (this->started.elapsed() > kQuietStartMs)
++            this->show_volume(volume);
++    });
++
++    Bluetooth &bluetooth = this->arbiter.system().bluetooth;
++    connect(&bluetooth, &Bluetooth::device_changed, this, [this](BluezQt::DevicePtr device){
++        const QString address = device->address();
++        const bool was_connected = this->connected.contains(address);
++        if (device->isConnected() == was_connected)
++            return;
++        if (device->isConnected()) {
++            this->connected.insert(address);
++            this->show_message("bluetooth_connected", QString("Connected · %1").arg(device->name()));
++        }
++        else {
++            this->connected.remove(address);
++            this->show_message("bluetooth_disabled", QString("Disconnected · %1").arg(device->name()));
++        }
++    });
++}
++
++bool Osd::eventFilter(QObject *watched, QEvent *event)
++{
++    if (watched == this->parentWidget() && event->type() == QEvent::Resize && this->isVisible())
++        this->place();
++
++    if (event->type() == QEvent::KeyPress) {
++        auto key_event = static_cast<QKeyEvent *>(event);
++        switch (key_event->key()) {
++            case Qt::Key_VolumeUp:
++                this->arbiter.increase_volume(kVolumeStep);
++                return true;
++            case Qt::Key_VolumeDown:
++                this->arbiter.decrease_volume(kVolumeStep);
++                return true;
++            case Qt::Key_VolumeMute:
++                if (key_event->isAutoRepeat())
++                    return true;
++                if (this->arbiter.system().volume > 0) {
++                    this->unmuted_volume = this->arbiter.system().volume;
++                    this->arbiter.set_volume(0);
++                }
++                else {
++                    this->arbiter.set_volume(this->unmuted_volume);
++                }
++                return true;
++            default:
++                break;
++        }
++    }
++
++    return QDialog::eventFilter(watched, event);
++}
++
++void Osd::show_volume(int volume)
++{
++    this->text->hide();
++    this->level->setValue(volume);
++    this->level->show();
++    this->value->setText(QString::number(volume));
++    this->value->show();
++    this->present(volume == 0 ? "volume_off" : (volume < 50 ? "volume_down" : "volume_up"));
++}
++
++void Osd::show_message(const QString &icon, const QString &text)
++{
++    this->level->hide();
++    this->value->hide();
++    this->text->setText(text);
++    this->text->show();
++    this->present(icon);
++}
++
++void Osd::present(const QString &icon)
++{
++    this->arbiter.forge().iconize(icon, this->icon, 32);
++    this->adjustSize();
++    this->place();
++    this->show();
++    this->raise();
++    this->activateWindow();
++    this->hide_timer->start();
++}
++
++// Centred horizontally, in the lower third of the main window
++void Osd::place()
++{
++    const QRect area = this->parentWidget()->rect();
++    this->move(this->parentWidget()->mapToGlobal(
++        QPoint(area.center().x() - this->width() / 2, area.height() * 3 / 4 - this->height() / 2)));
++}
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index 01a6643..701beae 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -6,6 +6,7 @@
+ #include "app/utilities/icon_engine.hpp"
+ #include "app/widgets/dialog.hpp"
+ 
++#include "app/widgets/osd.hpp"
+ #include "app/window.hpp"
+ 
+ Dash::NavRail::NavRail()
+@@ -211,6 +212,8 @@ MainWindow::MainWindow(QRect geometry)
+ 
+     this->arbiter.system().brightness.set();
+ 
++    new Osd(this->arbiter, this);
++
+     if (this->arbiter.layout().fullscreen.on_start)
+         this->arbiter.set_fullscreen(true);
+ }

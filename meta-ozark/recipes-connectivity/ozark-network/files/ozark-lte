@@ -1,0 +1,148 @@
+#!/bin/sh
+# LTE data connection through ModemManager (ozark-lte.service).
+#
+# Settings come from /etc/ozark/lte.conf (Settings > Network, via ozark-net):
+#   LTE_ENABLED yes|no, LTE_APN, LTE_PIN
+# Keeps the modem connected, and gives systemd-networkd the data interface's
+# address, route (metric 700: Ethernet wins when both are up) and DNS.
+# Progress for Settings > Network goes to /run/ozark-lte/state.
+
+conf=/etc/ozark/lte.conf
+state=/run/ozark-lte/state
+net=/run/systemd/network/30-ozark-lte.network
+iface=
+
+# state MESSAGE: what Settings > Network shows
+report() {
+    mkdir -p "$(dirname "$state")"
+    printf "LTE_STATE='%s'\nLTE_MESSAGE='%s'\nLTE_IFACE='%s'\n" "$1" "$(printf '%s' "$2" | tr -d "'\\\\")" "$iface" > "$state.tmp"
+    mv "$state.tmp" "$state"
+}
+
+# Value of KEY in `mmcli -K` output on stdin ("" for "--")
+mmget() {
+    awk -v k="$1" -F': ' '{ key = $1; sub(/ +$/, "", key) }
+        key == k { v = $2; sub(/^ +/, "", v); if (v == "--") v = ""; print v; exit }'
+}
+
+nap() {
+    sleep "$1" &
+    wait $!
+}
+
+unconfigure() {
+    if [ -f "$net" ]; then
+        rm -f "$net"
+        networkctl reload
+    fi
+    iface=
+}
+
+stop() {
+    mmcli -m any --simple-disconnect >/dev/null 2>&1
+    unconfigure
+    report off "${1:-LTE is off}"
+    exit 0
+}
+
+LTE_ENABLED=no LTE_APN= LTE_PIN=
+[ -f "$conf" ] && . "$conf"
+[ "$LTE_ENABLED" = yes ] || stop
+trap 'stop "LTE stopped"' TERM INT
+
+connect="ip-type=ipv4"
+[ -n "$LTE_APN" ] && connect="apn=$LTE_APN,$connect"
+pin_sent=
+
+while :; do
+    info=$(mmcli -m any -K 2>/dev/null)
+    if [ -z "$info" ]; then
+        unconfigure
+        report nomodem "No LTE modem found"
+        nap 5
+        continue
+    fi
+
+    case "$(echo "$info" | mmget modem.generic.state)" in
+    locked)
+        # One try per settings change: three wrong PINs lock the SIM
+        if [ -z "$LTE_PIN" ]; then
+            report locked "The SIM card needs its PIN"
+        elif [ -n "$pin_sent" ]; then
+            report locked "The SIM PIN was not accepted"
+        else
+            pin_sent=1
+            report locked "Unlocking the SIM"
+            mmcli -i any --pin="$LTE_PIN" >/dev/null 2>&1 && continue
+            report locked "The SIM PIN was not accepted"
+        fi
+        nap 10
+        ;;
+    failed)
+        reason=$(echo "$info" | mmget modem.generic.state-failed-reason)
+        report failed "Modem error: ${reason:-unknown}. Is a SIM card inserted?"
+        nap 10
+        ;;
+    initializing|enabling|connecting|disconnecting|disabling)
+        nap 2
+        ;;
+    connected)
+        bearer=$(echo "$info" | mmget 'modem.generic.bearers.value[1]')
+        b=$(mmcli -b "$bearer" -K 2>/dev/null)
+        dev=$(echo "$b" | mmget bearer.status.interface)
+        method=$(echo "$b" | mmget bearer.ipv4-config.method)
+        address=$(echo "$b" | mmget bearer.ipv4-config.address)
+        prefix=$(echo "$b" | mmget bearer.ipv4-config.prefix)
+        gateway=$(echo "$b" | mmget bearer.ipv4-config.gateway)
+        dns1=$(echo "$b" | mmget 'bearer.ipv4-config.dns.value[1]')
+        dns2=$(echo "$b" | mmget 'bearer.ipv4-config.dns.value[2]')
+        mtu=$(echo "$b" | mmget bearer.ipv4-config.mtu)
+
+        if [ "$method" = dhcp ]; then
+            network="DHCP=ipv4
+
+[DHCP]
+RouteMetric=700"
+        else
+            network="Address=$address/${prefix:-32}
+${dns1:+DNS=$dns1
+}${dns2:+DNS=$dns2
+}
+[Route]
+${gateway:+Gateway=$gateway
+}Destination=0.0.0.0/0
+Metric=700"
+        fi
+        new="[Match]
+Name=$dev
+
+[Link]
+RequiredForOnline=no
+${mtu:+MTUBytes=$mtu
+}
+[Network]
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+$network"
+        if [ "$new" != "$(cat "$net" 2>/dev/null)" ]; then
+            mkdir -p "$(dirname "$net")"
+            echo "$new" > "$net"
+            networkctl reload
+            networkctl reconfigure "$dev" 2>/dev/null
+        fi
+        iface=$dev
+        report connected "Connected"
+        nap 10
+        ;;
+    *)
+        # disabled, enabled, searching, registered: (re)connect. simple-connect
+        # enables the modem and waits for the network itself.
+        unconfigure
+        report connecting "Connecting"
+        if ! out=$(mmcli -m any --simple-connect="$connect" 2>&1); then
+            report error "Could not connect: $(echo "$out" | tail -n 1)"
+            nap 15
+        fi
+        ;;
+    esac
+done

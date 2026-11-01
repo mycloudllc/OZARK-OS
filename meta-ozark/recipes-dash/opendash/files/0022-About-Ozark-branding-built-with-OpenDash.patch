@@ -1,0 +1,158 @@
+From 78f3bea472d8638a26873cf6df058a0b319fab83 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 00:30:44 -0500
+Subject: [PATCH] About: Ozark branding, built with OpenDash
+
+Settings > About shows the Ozark Mountain Technologies badge and wordmark
+(Barlow Condensed, as on the boot splash), the OS name and version from
+os-release, and credits: built with OpenDash (Dash), github.com/openDsh/dash,
+and Android Auto by OpenAuto and aasdk. The badge is a copy of
+branding/ozark-badge.svg without its clip-path, which QtSvg ignores.
+---
+ assets/ozark-badge.svg     | 20 +++++++++++
+ assets/resources.qrc       |  1 +
+ src/app/pages/settings.cpp | 74 +++++++++++++++++++++++++++++++++-----
+ 3 files changed, 86 insertions(+), 9 deletions(-)
+ create mode 100644 assets/ozark-badge.svg
+
+diff --git a/assets/ozark-badge.svg b/assets/ozark-badge.svg
+new file mode 100644
+index 0000000..67db5d5
+--- /dev/null
++++ b/assets/ozark-badge.svg
+@@ -0,0 +1,20 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320" viewBox="0 0 320 320">
++  <!-- Ozark Mountain Technologies badge (transparent background), for Dash's About page.
++       branding/ozark-badge.svg without the clip-path, which Qt's SVG renderer ignores
++       (it drew a square): the inner disc is a plain circle; everything inside fits it. -->
++  <circle cx="160" cy="160" r="156" fill="#1F3B2D"/>
++  <g>
++    <circle cx="160" cy="160" r="147" fill="#24432F"/>
++    <polygon points="50,248 128,152 166,196 208,128 276,248" fill="#142A1D" stroke="#F1EBDD" stroke-width="5" stroke-linejoin="round"/>
++    <path d="M92 248 V222 L112 202 M166 248 V214 M232 248 V212 L216 196 M208 248 V170" fill="none" stroke="#C8602B" stroke-width="3.5" stroke-linejoin="round"/>
++    <circle cx="112" cy="202" r="5" fill="#F1EBDD"/>
++    <circle cx="166" cy="214" r="5" fill="#F1EBDD"/>
++    <circle cx="216" cy="196" r="5" fill="#F1EBDD"/>
++    <circle cx="208" cy="170" r="5" fill="#F1EBDD"/>
++    <circle cx="208" cy="128" r="9" fill="#C8602B"/>
++    <path d="M189.6 109.6 A26 26 0 0 1 226.4 109.6 M177 97 A44 44 0 0 1 239 97" fill="none" stroke="#F1EBDD" stroke-width="4" stroke-linecap="round"/>
++    <path d="M50 248 H276" stroke="#F1EBDD" stroke-width="5" stroke-linecap="round"/>
++    <path d="M64 270 H256" stroke="#C8602B" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="14 8"/>
++  </g>
++  <circle cx="160" cy="160" r="147" fill="none" stroke="#F1EBDD" stroke-width="3"/>
++</svg>
+diff --git a/assets/resources.qrc b/assets/resources.qrc
+index 98a4735..5a8565d 100644
+--- a/assets/resources.qrc
++++ b/assets/resources.qrc
+@@ -1,5 +1,6 @@
+ <RCC>
+     <qresource prefix="/">
++        <file>ozark-badge.svg</file>
+         <file>aa_video.qml</file>
+         <file>camera_video.qml</file>
+         <file>camera_overlay.svg</file>
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 061fe05..d575865 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -657,9 +657,28 @@ AboutSettingsTab::AboutSettingsTab(Arbiter &arbiter)
+ void AboutSettingsTab::resizeEvent(QResizeEvent *event)
+ {
+     QWidget::resizeEvent(event);
+-    QSize size = QSize(event->size().width() / 3 * 2, event->size().height() / 3 * 2);
+-    this->logo->setPixmap(QPixmap(":/splash.png").scaled(size, Qt::KeepAspectRatio));
++    // The badge takes about a third of the height; the text needs the rest
++    const int side = std::max(48, event->size().height() / 3);
++    this->logo->setPixmap(QIcon(":/ozark-badge.svg").pixmap(side, side));
++}
++
++namespace {
++// PRETTY_NAME from os-release, e.g. "Ozark OS 0.1.0 (trailhead)"
++QString os_name()
++{
++    for (const QString &path : {QString("/etc/os-release"), QString("/usr/lib/os-release")}) {
++        QFile file(path);
++        if (!file.open(QFile::ReadOnly | QFile::Text))
++            continue;
++        while (!file.atEnd()) {
++            const QString line = QString::fromUtf8(file.readLine()).trimmed();
++            if (line.startsWith("PRETTY_NAME="))
++                return line.mid(12).remove('"');
++        }
++    }
++    return "Ozark OS";
+ }
++}  // namespace
+ 
+ 
+ QWidget *AboutSettingsTab::load_msg()
+@@ -668,21 +687,58 @@ QWidget *AboutSettingsTab::load_msg()
+     QVBoxLayout *layout = new QVBoxLayout(widget);
+     layout->setContentsMargins(0, 0, 0, 0);
+ 
++    // Ozark Mountain Technologies: the badge and wordmark as on the boot splash
++    // (Barlow Condensed, "TECHNOLOGIES" spaced out in the brand orange)
+     this->logo = new QLabel(widget);
+     this->logo->setAlignment(Qt::AlignCenter);
+ 
+-    this->label1 = new QLabel("Dash", widget);
++    QFont brand("Barlow Condensed", 30);
++    brand.setBold(true);
++    this->label1 = new QLabel("OZARK MOUNTAIN", widget);
++    this->label1->setFont(brand);
+     this->label1->setAlignment(Qt::AlignCenter);
+-    QLabel *label2 = new QLabel(GIT_BRANCH " rev " GIT_REVISION GIT_CHANGES, widget);
+-    label2->setAlignment(Qt::AlignCenter);
+-    QLabel *label3 = new QLabel(BUILD_TIMESTAMP, widget);
+-    label3->setAlignment(Qt::AlignCenter);
++
++    QFont tagline("Barlow Condensed", 14);
++    tagline.setBold(true);
++    tagline.setLetterSpacing(QFont::PercentageSpacing, 160);
++    auto company = new QLabel("TECHNOLOGIES", widget);
++    company->setFont(tagline);
++    company->setStyleSheet("color: #C8602B;");
++    company->setAlignment(Qt::AlignCenter);
++
++    auto os = new QLabel(os_name(), widget);
++    os->setFont(this->arbiter.forge().font(14));
++    os->setAlignment(Qt::AlignCenter);
++
++    // Credits: the head unit software this is built on
++    const QFont small = this->arbiter.forge().font(11);
++    auto dash = new QLabel("Built with OpenDash (Dash)", widget);
++    dash->setFont(this->arbiter.forge().font(12));
++    dash->setAlignment(Qt::AlignCenter);
++    // (Yocto builds Dash from a source snapshot: no git revision, and a fixed
++    // build time for reproducible builds, so neither is shown)
++    auto revision = new QLabel("github.com/openDsh/dash", widget);
++    revision->setFont(small);
++    revision->setEnabled(false);
++    revision->setAlignment(Qt::AlignCenter);
++    auto android_auto = new QLabel("Android Auto by OpenAuto and aasdk", widget);
++    android_auto->setFont(small);
++    android_auto->setEnabled(false);
++    android_auto->setAlignment(Qt::AlignCenter);
+ 
+     layout->addStretch();
+     layout->addWidget(this->logo);
++    layout->addSpacing(8);
+     layout->addWidget(this->label1);
+-    layout->addWidget(label2);
+-    layout->addWidget(label3);
++    layout->addWidget(company);
++    layout->addSpacing(8);
++    layout->addWidget(os);
++    layout->addSpacing(12);
++    layout->addWidget(Session::Forge::br());
++    layout->addSpacing(12);
++    layout->addWidget(dash);
++    layout->addWidget(revision);
++    layout->addWidget(android_auto);
+     layout->addStretch();
+ 
+     return widget;
+-- 
+2.43.0
+

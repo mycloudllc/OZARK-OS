@@ -1,0 +1,363 @@
+From b99895948098f8561196eec86fe6d9401fa80a33 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 21:26:27 -0500
+Subject: [PATCH 09/10] Equalizer tab on the Media page
+
+Ten bands (31 Hz to 16 kHz, +/-12 dB) with presets (Flat, Rock, Pop,
+Jazz, Classical, Vocal, Electronic, Bass Boost, Treble Boost, Loudness)
+and a Custom curve that's kept when a band is moved. The bands drive an
+equalizer that PulseAudio runs in front of the output (LADSPA sink
+'ozark_eq'), changed live through PulseAudio's D-Bus interface; the
+preamp drops by the largest boost so boosts can't clip.
+
+Upstream-Status: Inappropriate [needs Ozark OS's PulseAudio setup]
+---
+ include/app/pages/equalizer.hpp |  40 +++++
+ src/app/pages/equalizer.cpp     | 270 ++++++++++++++++++++++++++++++++
+ src/app/pages/media.cpp         |   2 +
+ 3 files changed, 312 insertions(+)
+ create mode 100644 include/app/pages/equalizer.hpp
+ create mode 100644 src/app/pages/equalizer.cpp
+
+diff --git a/include/app/pages/equalizer.hpp b/include/app/pages/equalizer.hpp
+new file mode 100644
+index 0000000..f845755
+--- /dev/null
++++ b/include/app/pages/equalizer.hpp
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include <QList>
++#include <QString>
++#include <QVector>
++#include <QWidget>
++
++class Arbiter;
++class QLabel;
++class QSlider;
++class QTimer;
++class Selector;
++
++// Media > Equalizer: ten bands from 31 Hz to 16 kHz with presets. The bands
++// drive the ozark_eq10 LADSPA filter that PulseAudio runs in front of the
++// output (sink "ozark_eq"), set live over PulseAudio's D-Bus interface.
++class EqualizerTab : public QWidget {
++    Q_OBJECT
++
++   public:
++    EqualizerTab(Arbiter &arbiter, QWidget *parent = nullptr);
++
++   private:
++    QWidget *band_widget(int band);
++    void load_preset(const QString &name);
++    void band_moved();
++    void apply();
++    bool send(const QVector<int> &gains, QString &error) const;
++    QVector<int> gains() const;
++
++    Arbiter &arbiter;
++    QList<QSlider *> sliders;
++    QList<QLabel *> values;
++    Selector *preset = nullptr;
++    QLabel *status = nullptr;
++    QTimer *apply_timer = nullptr;
++    QTimer *retry_timer = nullptr;
++    int retries = 0;
++    bool loading = false;
++};
+diff --git a/src/app/pages/equalizer.cpp b/src/app/pages/equalizer.cpp
+new file mode 100644
+index 0000000..ce1c5d4
+--- /dev/null
++++ b/src/app/pages/equalizer.cpp
+@@ -0,0 +1,270 @@
++#include <algorithm>
++
++#include <QDBusArgument>
++#include <QDBusConnection>
++#include <QDBusMessage>
++#include <QDBusObjectPath>
++#include <QDBusVariant>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QPushButton>
++#include <QSlider>
++#include <QTimer>
++#include <QVBoxLayout>
++
++#include "DashLog.hpp"
++
++#include "app/arbiter.hpp"
++#include "app/widgets/selector.hpp"
++
++#include "app/pages/equalizer.hpp"
++
++namespace {
++constexpr int kBands = 10;
++constexpr int kRange = 12;  // dB either way, as the filter allows
++const char *kBandNames[kBands] = {"31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"};
++
++// PulseAudio's D-Bus server (module-dbus-protocol) and the equalizer sink
++const char *kPulseAddress = "unix:path=/run/pulse/dbus-socket";
++const char *kSinkName = "ozark_eq";
++
++const QString kCustom = "Custom";
++// dB per band, 31 Hz .. 16 kHz
++const QList<QPair<QString, QVector<int>>> kPresets = {
++    {"Flat",         { 0,  0,  0,  0,  0,  0,  0,  0,  0,  0}},
++    {"Rock",         { 5,  4,  3,  1, -1, -1,  1,  3,  4,  5}},
++    {"Pop",          {-1,  1,  3,  4,  3,  1,  0, -1, -1, -1}},
++    {"Jazz",         { 3,  2,  1,  2, -1, -1,  0,  1,  2,  3}},
++    {"Classical",    { 4,  3,  2,  1, -1, -1,  0,  2,  3,  4}},
++    {"Vocal",        {-2, -2, -1,  1,  3,  4,  3,  1,  0, -1}},
++    {"Electronic",   { 5,  4,  1,  0, -2,  1,  0,  1,  4,  5}},
++    {"Bass Boost",   { 6,  5,  4,  2,  0,  0,  0,  0,  0,  0}},
++    {"Treble Boost", { 0,  0,  0,  0,  0,  1,  2,  4,  5,  6}},
++    {"Loudness",     { 6,  4,  1,  0, -1,  0,  0,  1,  4,  5}},
++};
++
++QVector<int> preset_gains(const QString &name)
++{
++    for (const auto &preset : kPresets) {
++        if (preset.first == name)
++            return preset.second;
++    }
++    return QVector<int>(kBands, 0);
++}
++
++QString signed_db(int value)
++{
++    return value > 0 ? QString("+%1").arg(value) : QString::number(value);
++}
++}  // namespace
++
++EqualizerTab::EqualizerTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    auto layout = new QVBoxLayout(this);
++
++    // preset selector, reset, status
++    auto header = new QHBoxLayout();
++    QStringList names;
++    for (const auto &preset : kPresets)
++        names.append(preset.first);
++    names.append(kCustom);
++    const QString saved = this->arbiter.settings().value("Audio/Equalizer/preset", "Flat").toString();
++    this->preset = new Selector(names, saved, this->arbiter.forge().font(14), this->arbiter, this);
++    connect(this->preset, &Selector::item_changed, [this](QString name){
++        if (!this->loading)
++            this->load_preset(name);
++    });
++    header->addWidget(this->preset, 1);
++
++    auto reset = new QPushButton("reset", this);
++    reset->setFlat(true);
++    reset->setFont(this->arbiter.forge().font(14));
++    connect(reset, &QPushButton::clicked, [this]{ this->preset->set_current("Flat"); });
++    header->addWidget(reset);
++    layout->addLayout(header);
++
++    this->status = new QLabel(this);
++    this->status->setFont(this->arbiter.forge().font(11));
++    this->status->setAlignment(Qt::AlignCenter);
++    this->status->hide();
++    layout->addWidget(this->status);
++
++    auto bands = new QHBoxLayout();
++    for (int band = 0; band < kBands; band++)
++        bands->addWidget(this->band_widget(band), 1);
++    layout->addLayout(bands, 1);
++
++    // Coalesce slider drags into a few updates a second
++    this->apply_timer = new QTimer(this);
++    this->apply_timer->setSingleShot(true);
++    this->apply_timer->setInterval(60);
++    connect(this->apply_timer, &QTimer::timeout, [this]{ this->apply(); });
++
++    // PulseAudio may still be starting when Dash comes up
++    this->retry_timer = new QTimer(this);
++    this->retry_timer->setSingleShot(true);
++    this->retry_timer->setInterval(3000);
++    connect(this->retry_timer, &QTimer::timeout, [this]{ this->apply(); });
++
++    this->load_preset(saved);
++}
++
++QWidget *EqualizerTab::band_widget(int band)
++{
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++    layout->setContentsMargins(0, 0, 0, 0);
++
++    auto value = new QLabel("0", widget);
++    value->setFont(this->arbiter.forge().font(11));
++    value->setAlignment(Qt::AlignCenter);
++    layout->addWidget(value);
++
++    const double scale = this->arbiter.layout().scale;
++    const int width = int(34 * scale);
++    const int height = int(190 * scale);
++    // In the style of Dash's horizontal sliders. Dash's stylesheet is written
++    // for horizontal ones (30 px tall, 5 px tall groove, vertical handle
++    // margins) and Qt merges rules property by property, so every size that
++    // would leak in is set again here.
++    auto slider = new QSlider(Qt::Vertical, widget);
++    slider->setStyleSheet(QString(
++        "QSlider { width: %1px; height: %2px; }"
++        "QSlider::groove:vertical { background-color: palette(alternate-base); width: 5px; height: %2px; border-radius: 2px; }"
++        "QSlider::add-page:vertical, QSlider::sub-page:vertical { background: transparent; }"
++        "QSlider::handle:vertical { background-color: palette(base); width: 25px; height: 25px; margin: 0px -10px; border-radius: 12px; }")
++        .arg(width)
++        .arg(height));
++    slider->setFixedSize(width, height);
++    slider->setRange(-kRange, kRange);
++    slider->setPageStep(1);
++    connect(slider, &QSlider::valueChanged, [this, value](int db){
++        value->setText(signed_db(db));
++        this->band_moved();
++    });
++    layout->addWidget(slider, 1, Qt::AlignHCenter);
++
++    auto name = new QLabel(kBandNames[band], widget);
++    name->setFont(this->arbiter.forge().font(11));
++    name->setAlignment(Qt::AlignCenter);
++    layout->addWidget(name);
++
++    this->sliders.append(slider);
++    this->values.append(value);
++    return widget;
++}
++
++void EqualizerTab::load_preset(const QString &name)
++{
++    QVector<int> gains;
++    if (name == kCustom) {
++        const QStringList saved = this->arbiter.settings().value("Audio/Equalizer/custom").toStringList();
++        for (int band = 0; band < kBands; band++)
++            gains.append(saved.value(band, "0").toInt());
++    }
++    else {
++        gains = preset_gains(name);
++    }
++
++    this->loading = true;
++    this->preset->set_current(name);
++    for (int band = 0; band < kBands; band++)
++        this->sliders[band]->setValue(gains[band]);
++    this->loading = false;
++
++    this->arbiter.settings().setValue("Audio/Equalizer/preset", name);
++    this->apply_timer->start();
++}
++
++// Moving a band turns the current curve into the Custom preset
++void EqualizerTab::band_moved()
++{
++    if (this->loading)
++        return;
++
++    QStringList custom;
++    for (int db : this->gains())
++        custom.append(QString::number(db));
++    this->arbiter.settings().setValue("Audio/Equalizer/custom", custom);
++    this->arbiter.settings().setValue("Audio/Equalizer/preset", kCustom);
++
++    if (this->preset->get_current() != kCustom) {
++        this->loading = true;
++        this->preset->set_current(kCustom);
++        this->loading = false;
++    }
++    this->apply_timer->start();
++}
++
++QVector<int> EqualizerTab::gains() const
++{
++    QVector<int> gains;
++    for (auto slider : this->sliders)
++        gains.append(slider->value());
++    return gains;
++}
++
++void EqualizerTab::apply()
++{
++    QString error;
++    if (this->send(this->gains(), error)) {
++        this->retries = 0;
++        this->status->hide();
++        return;
++    }
++
++    // Reconnect next time: PulseAudio may have restarted
++    QDBusConnection::disconnectFromPeer("ozark-equalizer");
++    if (this->retries++ < 10) {
++        this->retry_timer->start();
++        return;
++    }
++    DASH_LOG(error) << "[Equalizer] " << error.toStdString();
++    this->status->setText("Equalizer not available: " + error);
++    this->status->show();
++}
++
++bool EqualizerTab::send(const QVector<int> &gains, QString &error) const
++{
++    QDBusConnection pulse = QDBusConnection::connectToPeer(kPulseAddress, "ozark-equalizer");
++    if (!pulse.isConnected()) {
++        error = pulse.lastError().message();
++        return false;
++    }
++
++    QDBusMessage find = QDBusMessage::createMethodCall(QString(), "/org/pulseaudio/core1", "org.PulseAudio.Core1", "GetSinkByName");
++    find << QString(kSinkName);
++    const QDBusMessage found = pulse.call(find, QDBus::Block, 2000);
++    if (found.type() == QDBusMessage::ErrorMessage) {
++        error = found.errorMessage();
++        return false;
++    }
++    const QString sink = found.arguments().value(0).value<QDBusObjectPath>().path();
++
++    // Controls: the ten bands, then the preamp. Lower the preamp by the largest
++    // boost so a boosted band can't clip.
++    QList<double> controls;
++    for (int db : gains)
++        controls.append(db);
++    controls.append(-std::max(0, *std::max_element(gains.begin(), gains.end())));
++    QList<bool> use_default;
++    for (int i = 0; i < controls.size(); i++)
++        use_default.append(false);
++
++    QDBusArgument parameters;
++    parameters.beginStructure();
++    parameters << controls << use_default;
++    parameters.endStructure();
++
++    QDBusMessage set = QDBusMessage::createMethodCall(QString(), sink, "org.freedesktop.DBus.Properties", "Set");
++    set << QString("org.PulseAudio.Ext.Ladspa1") << QString("AlgorithmParameters")
++        << QVariant::fromValue(QDBusVariant(QVariant::fromValue(parameters)));
++    const QDBusMessage reply = pulse.call(set, QDBus::Block, 2000);
++    if (reply.type() == QDBusMessage::ErrorMessage) {
++        error = reply.errorMessage();
++        return false;
++    }
++    return true;
++}
+diff --git a/src/app/pages/media.cpp b/src/app/pages/media.cpp
+index 1c1ef04..e7bd98a 100644
+--- a/src/app/pages/media.cpp
++++ b/src/app/pages/media.cpp
+@@ -8,6 +8,7 @@
+ #include <QListWidgetItem>
+ #include <QMediaPlaylist>
+ 
++#include "app/pages/equalizer.hpp"
+ #include "app/window.hpp"
+ #include "app/pages/media.hpp"
+ #include "plugins/radio_plugin.hpp"
+@@ -24,6 +25,7 @@ void MediaPage::init()
+     this->addTab(new RadioPlayerTab(this->arbiter, this), "Radio");
+     this->addTab(new BluetoothPlayerTab(this->arbiter, this), "Bluetooth");
+     this->addTab(new LocalPlayerTab(this->arbiter, this), "Local");
++    this->addTab(new EqualizerTab(this->arbiter, this), "Equalizer");
+ }
+ 
+ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)

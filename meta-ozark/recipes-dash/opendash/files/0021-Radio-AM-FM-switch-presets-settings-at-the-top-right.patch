@@ -1,0 +1,433 @@
+From c28ffc153a48bd07f07a47022909685e03465ee4 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 23:43:46 -0500
+Subject: [PATCH] Radio: AM/FM switch, presets, settings at the top right
+
+- An FM / AM switch at the top left. FM tunes 88.0-108.0 MHz in 0.1 MHz
+  steps, AM 530-1700 kHz in 10 kHz steps; the tuner's scale is labelled
+  for the band (MHz or kHz) and each band remembers its station. Radio
+  plugins get am(bool) before freq() on a band change (default: ignored,
+  as the RTL-SDR plugin's FM-only streamer can't receive AM).
+- Six presets per band under the tuner. Tap to tune to one (an empty one,
+  shown as +, saves the current station); hold to save the current station
+  over it. The preset that is playing is highlighted.
+- The tuner settings gear moves to the tab's top-right corner.
+- Dialogs size their body to its minimum size too (plus the scroll area's
+  frame), so small bodies no longer get a needless scrollbar.
+---
+ include/app/pages/media.hpp      |  12 +++
+ include/app/widgets/dialog.hpp   |   1 +
+ include/app/widgets/tuner.hpp    |  10 ++
+ include/plugins/radio_plugin.hpp |   2 +
+ src/app/pages/media.cpp          | 162 ++++++++++++++++++++++++++-----
+ src/app/widgets/dialog.cpp       |  40 ++++++--
+ src/app/widgets/selector.cpp     |   7 +-
+ src/app/widgets/tuner.cpp        |  20 +++-
+ 8 files changed, 221 insertions(+), 33 deletions(-)
+
+diff --git a/include/app/pages/media.hpp b/include/app/pages/media.hpp
+index c6241bd..b3a86b5 100644
+--- a/include/app/pages/media.hpp
++++ b/include/app/pages/media.hpp
+@@ -53,11 +53,23 @@ class RadioPlayerTab : public QWidget {
+     Tuner *tuner;
+     Selector *plugin_selector;
+     QPushButton *play_button;
++    QPushButton *fm_button;
++    QPushButton *am_button;
++    QLabel *unit;
++    QList<QPushButton *> preset_buttons;
++    QSettings settings;
++
++    static constexpr int PRESETS = 6;
+ 
+     void load_plugin();
++    void set_band(Tuner::Band band);
++    void update_presets();
++    QString band_key() const;
+     QWidget *dialog_body();
++    QWidget *top_widget();
+     QWidget *tuner_widget();
+     QWidget *controls_widget();
++    QWidget *presets_widget();
+ 
+ };
+ 
+diff --git a/include/app/widgets/dialog.hpp b/include/app/widgets/dialog.hpp
+index b9bb43d..0894c8f 100644
+--- a/include/app/widgets/dialog.hpp
++++ b/include/app/widgets/dialog.hpp
+@@ -50,6 +50,7 @@ class Dialog : public QDialog {
+     QWidget *content_widget();
+     void set_position();
+     void fit_body();
++    void constrain();
+ 
+     inline void add_cancel_button()
+     {
+diff --git a/include/app/widgets/tuner.hpp b/include/app/widgets/tuner.hpp
+index d23b677..eb651c2 100644
+--- a/include/app/widgets/tuner.hpp
++++ b/include/app/widgets/tuner.hpp
+@@ -15,9 +15,18 @@ class Tuner : public QSlider {
+     Q_PROPERTY(QColor accent READ get_accent WRITE set_accent)
+ 
+    public:
++    // FM: values are 0.1 MHz (880-1080). AM: values are 10 kHz (53-170).
++    enum class Band { FM, AM };
++
+     Tuner(Arbiter &arbiter);
+     QSize sizeHint() const override;
+ 
++    Band band() const { return this->band_; }
++    void set_band(Band band);
++    // The value as a frequency in Hz, and as the text a person reads (98.1, 1010)
++    int hz() const { return this->band_ == Band::FM ? this->value() * 100000 : this->value() * 10000; }
++    QString label(int value) const;
++
+     QColor get_color() { return this->color; }
+     void set_color(QColor color) { this->color = color; }
+     QColor get_accent() { return this->accent; }
+@@ -34,4 +43,5 @@ class Tuner : public QSlider {
+     QColor accent;
+     QPoint mouse_pos;
+     double scale;
++    Band band_ = Band::FM;
+ };
+diff --git a/include/plugins/radio_plugin.hpp b/include/plugins/radio_plugin.hpp
+index 19648d6..e4fd7e0 100644
+--- a/include/plugins/radio_plugin.hpp
++++ b/include/plugins/radio_plugin.hpp
+@@ -9,6 +9,8 @@ class RadioPlugin : public Plugin {
+     virtual void play() = 0;
+     virtual void stop() = 0;
+     virtual void freq(int hz) = 0;
++    // Called before freq() when the band changes. Tuners without AM ignore it.
++    virtual void am(bool enabled) { (void)enabled; }
+ };
+ 
+ #define RadioPlugin_iid "openDsh.plugins.RadioPlugin"
+diff --git a/src/app/pages/media.cpp b/src/app/pages/media.cpp
+index e7bd98a..07d7eab 100644
+--- a/src/app/pages/media.cpp
++++ b/src/app/pages/media.cpp
+@@ -176,15 +176,53 @@ RadioPlayerTab::RadioPlayerTab(Arbiter &arbiter, QWidget *parent)
+         }
+     });
+ 
+-    this->tuner->setValue(this->config->get_radio_station());
+-
+     auto layout = new QVBoxLayout(this);
++    layout->addWidget(this->top_widget());
+     layout->addStretch(1);
+     layout->addWidget(this->tuner_widget(), 1);
+     layout->addWidget(this->controls_widget(), 3);
++    layout->addWidget(this->presets_widget());
+     layout->addStretch(1);
+ 
+     this->load_plugin();
++    const bool am = this->settings.value("Pages/Media/Radio/band", "fm").toString() == "am";
++    this->set_band(am ? Tuner::Band::AM : Tuner::Band::FM);
++}
++
++QString RadioPlayerTab::band_key() const
++{
++    return this->tuner->band() == Tuner::Band::AM ? "am" : "fm";
++}
++
++// Each band keeps its own station and presets
++void RadioPlayerTab::set_band(Tuner::Band band)
++{
++    const bool am = band == Tuner::Band::AM;
++    this->tuner->blockSignals(true);
++    this->tuner->set_band(band);
++    this->tuner->setValue(am ? this->settings.value("Pages/Media/Radio/am_station", 101).toInt()
++                             : int(this->config->get_radio_station()));
++    this->tuner->blockSignals(false);
++    this->fm_button->setChecked(!am);
++    this->am_button->setChecked(am);
++    this->unit->setText(am ? "kHz" : "MHz");
++    this->settings.setValue("Pages/Media/Radio/band", am ? "am" : "fm");
++    if (RadioPlugin *plugin = qobject_cast<RadioPlugin *>(this->loader.instance())) {
++        plugin->am(am);
++        plugin->freq(this->tuner->hz());
++    }
++    emit this->tuner->valueChanged(this->tuner->value());
++}
++
++void RadioPlayerTab::update_presets()
++{
++    const QStringList presets = this->settings.value("Pages/Media/Radio/Presets/" + this->band_key()).toStringList();
++    for (int i = 0; i < this->preset_buttons.size(); i++) {
++        const int station = presets.value(i).toInt();
++        QPushButton *button = this->preset_buttons[i];
++        button->setText(station > 0 ? this->tuner->label(station) : QString("+"));
++        button->setChecked(station > 0 && station == this->tuner->value());
++    }
+ }
+ 
+ RadioPlayerTab::~RadioPlayerTab()
+@@ -203,7 +241,8 @@ void RadioPlayerTab::load_plugin()
+     if (!key.isNull()) {
+         this->loader.setFileName(this->plugins[key].absoluteFilePath());
+         if (RadioPlugin *plugin = qobject_cast<RadioPlugin *>(this->loader.instance())) {
+-            plugin->freq(this->tuner->value() * 100000);
++            plugin->am(this->tuner->band() == Tuner::Band::AM);
++            plugin->freq(this->tuner->hz());
+         }
+     }
+     this->config->set_radio_plugin(key);
+@@ -227,36 +266,115 @@ QWidget *RadioPlayerTab::tuner_widget()
+     auto layout = new QHBoxLayout(widget);
+     layout->setSpacing(0);
+ 
++    auto station = new QLabel(this->tuner->label(this->tuner->value()));
++    station->setFont(this->arbiter.forge().font(36, true));
++    station->setAlignment(Qt::AlignRight | Qt::AlignBottom);
++    this->unit = new QLabel("MHz");
++    this->unit->setFont(this->arbiter.forge().font(14));
++    this->unit->setAlignment(Qt::AlignLeft | Qt::AlignBottom);
++    connect(this->tuner, &Tuner::valueChanged, [this, station](int value){
++        if (this->tuner->band() == Tuner::Band::AM)
++            this->settings.setValue("Pages/Media/Radio/am_station", value);
++        else
++            this->config->set_radio_station(value);
++        station->setText(this->tuner->label(value));
++        this->update_presets();
++        if (RadioPlugin *plugin = qobject_cast<RadioPlugin *>(this->loader.instance()))
++            plugin->freq(this->tuner->hz());
++    });
++
++    layout->addStretch(2);
++    layout->addWidget(station);
++    layout->addSpacing(8);
++    layout->addWidget(this->unit);
++    layout->addSpacing(24);
++    layout->addWidget(this->play_button);
++    layout->addStretch(2);
++
++    return widget;
++}
++
++// AM/FM switch on the left, the tuner settings (plugin) at the top right
++QWidget *RadioPlayerTab::top_widget()
++{
++    auto widget = new QWidget(this);
++    auto layout = new QHBoxLayout(widget);
++    layout->setContentsMargins(0, 0, 0, 0);
++
++    auto bands = new QButtonGroup(widget);
++    this->fm_button = new QPushButton("FM", widget);
++    this->am_button = new QPushButton("AM", widget);
++    for (QPushButton *button : {this->fm_button, this->am_button}) {
++        button->setCheckable(true);
++        button->setFont(this->arbiter.forge().font(14, true));
++        button->setMinimumWidth(QFontMetrics(button->font()).horizontalAdvance("FM") * 3);
++        bands->addButton(button);
++        layout->addWidget(button);
++    }
++    connect(this->fm_button, &QPushButton::clicked, [this]{ this->set_band(Tuner::Band::FM); });
++    connect(this->am_button, &QPushButton::clicked, [this]{ this->set_band(Tuner::Band::AM); });
++    layout->addStretch();
++
+     auto dialog = new Dialog(this->arbiter, true, this->window());
++    dialog->set_title("Radio tuner");
+     dialog->set_body(this->dialog_body());
+-
+     auto load_button = new QPushButton("load");
+     connect(load_button, &QPushButton::clicked, [this]{ this->load_plugin(); });
+     dialog->set_button(load_button);
+ 
+-    auto settings_button = new QPushButton();
++    auto settings_button = new QPushButton(widget);
+     settings_button->setFlat(true);
+     this->arbiter.forge().iconize("settings", settings_button, 24);
+     connect(settings_button, &QPushButton::clicked, [dialog]{ dialog->open(); });
++    layout->addWidget(settings_button, 0, Qt::AlignTop);
+ 
+-    auto station = new QLabel(QString::number(this->tuner->sliderPosition() / 10.0, 'f', 1));
+-    station->setFont(this->arbiter.forge().font(36, true));
+-    connect(this->tuner, &Tuner::valueChanged, [this, station](int freq){
+-        this->config->set_radio_station(freq);
+-        station->setText(QString::number(freq / 10.0, 'f', 1));
+-        if (RadioPlugin *plugin = qobject_cast<RadioPlugin *>(this->loader.instance()))
+-            plugin->freq(freq * 100000);
+-    });
+-
+-    // auto info = new QLabel("station info");
+-    // info->setWordWrap(true);
++    return widget;
++}
+ 
+-    layout->addStretch(2);
+-    layout->addWidget(settings_button);
+-    layout->addWidget(station, 2);
+-    // layout->addWidget(info, 3);
+-    layout->addWidget(this->play_button, 3);
+-    layout->addStretch(2);
++// Six presets per band. Tap: tune to it (an empty one saves the current
++// station). Hold: save the current station there.
++QWidget *RadioPlayerTab::presets_widget()
++{
++    auto widget = new QWidget(this);
++    auto layout = new QHBoxLayout(widget);
++    layout->setContentsMargins(0, 0, 0, 0);
++
++    auto save = [this](int index) {
++        const QString key = "Pages/Media/Radio/Presets/" + this->band_key();
++        QStringList presets = this->settings.value(key).toStringList();
++        while (presets.size() < PRESETS)
++            presets << QString();
++        presets[index] = QString::number(this->tuner->value());
++        this->settings.setValue(key, presets);
++        this->update_presets();
++    };
++
++    for (int i = 0; i < PRESETS; i++) {
++        auto button = new QPushButton(widget);
++        button->setCheckable(true);
++        button->setFont(this->arbiter.forge().font(14, true));
++        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++        auto hold = new QTimer(button);
++        hold->setSingleShot(true);
++        hold->setInterval(800);
++        connect(hold, &QTimer::timeout, [save, i]{ save(i); });
++        connect(button, &QPushButton::pressed, [hold]{ hold->start(); });
++        connect(button, &QPushButton::released, [this, save, hold, i]{
++            const bool held = !hold->isActive();
++            hold->stop();
++            if (held)
++                return;
++            const int station = this->settings.value("Pages/Media/Radio/Presets/" + this->band_key()).toStringList().value(i).toInt();
++            if (station > 0)
++                this->tuner->setValue(station);
++            else
++                save(i);
++        });
++        // The checked state shows the preset that is playing, not the tap
++        connect(button, &QPushButton::clicked, [this]{ this->update_presets(); });
++        this->preset_buttons.append(button);
++        layout->addWidget(button);
++    }
+ 
+     return widget;
+ }
+diff --git a/src/app/widgets/dialog.cpp b/src/app/widgets/dialog.cpp
+index c5e7866..d4445b8 100644
+--- a/src/app/widgets/dialog.cpp
++++ b/src/app/widgets/dialog.cpp
+@@ -55,7 +55,16 @@ void Dialog::fit_body()
+     this->scroll->setMinimumSize(0, 0);
+     const QSize chrome = this->sizeHint() - this->scroll->sizeHint();
+     const QSize room = parent->size() - QSize(margin, margin) - chrome;
+-    this->scroll->setMinimumSize(this->scroll->widget()->sizeHint().boundedTo(room.expandedTo(QSize(0, 0))));
++    QWidget *body = this->scroll->widget();
++    // Measure with the stylesheet applied (button padding etc.), not before
++    body->ensurePolished();
++    for (QWidget *child : body->findChildren<QWidget *>())
++        child->ensurePolished();
++    if (body->layout())
++        body->layout()->activate();
++    const int frame = this->scroll->frameWidth() * 2;
++    const QSize want = body->sizeHint().expandedTo(body->minimumSizeHint()) + QSize(frame, frame);
++    this->scroll->setMinimumSize(want.boundedTo(room.expandedTo(QSize(0, 0))));
+     this->setMinimumSize(0, 0);
+     this->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+     // Not adjustSize(): that caps a window at 2/3 of the screen
+@@ -172,15 +181,30 @@ void Dialog::showEvent(QShowEvent *event)
+     this->move(QPoint());
+     QWidget::showEvent(event);
+ 
+-    if (this->fullscreen) {
+-        if (QWidget *parent = this->area()) {
+-            int margin = std::ceil(24 * this->arbiter.layout().scale) * 2;
+-            this->setFixedWidth(std::min(this->width(), parent->width() - margin));
+-            this->setFixedHeight(std::min(this->height(), parent->height() - margin));
+-        }
++    this->constrain();
++    this->set_position();
++
++    // Some styling only reaches the body once the window is on screen, and
++    // its size grows a few pixels: measure again then, rather than scroll
++    if (this->scroll) {
++        QTimer::singleShot(0, this, [this]{
++            this->fit_body();
++            this->constrain();
++            this->set_position();
++        });
+     }
++}
+ 
+-    this->set_position();
++// Full-screen dialogs stay inside their area, with a margin
++void Dialog::constrain()
++{
++    if (!this->fullscreen)
++        return;
++    if (QWidget *parent = this->area()) {
++        int margin = std::ceil(24 * this->arbiter.layout().scale) * 2;
++        this->setFixedWidth(std::min(this->width(), parent->width() - margin));
++        this->setFixedHeight(std::min(this->height(), parent->height() - margin));
++    }
+ }
+ 
+ void Dialog::closeEvent(QCloseEvent *)
+diff --git a/src/app/widgets/selector.cpp b/src/app/widgets/selector.cpp
+index cecc4c7..e2aadba 100644
+--- a/src/app/widgets/selector.cpp
++++ b/src/app/widgets/selector.cpp
+@@ -43,8 +43,11 @@ QSize Selector::sizeHint() const
+ 
+     int base = 32 * this->arbiter.layout().scale;
+     int size = (it != this->options.end()) ? it->size() : 0;
+-    int width = (base * 2) + std::max(this->label->width(), QFontMetrics(this->label->font()).width(size)) + (12 * 4);
+-    int height = std::max(base, this->label->height()) + (12 * 2);
++    // The label's preferred size, not its current geometry: before the
++    // selector is first laid out that is Qt's default, and the selector then
++    // outgrew the space a dialog had made for it
++    int width = (base * 2) + std::max(this->label->sizeHint().width(), QFontMetrics(this->label->font()).width(size)) + (12 * 4);
++    int height = std::max(base, this->label->sizeHint().height()) + (12 * 2);
+     return QSize(width, height);
+ }
+ 
+diff --git a/src/app/widgets/tuner.cpp b/src/app/widgets/tuner.cpp
+index 9cc92d2..2a2ea2c 100644
+--- a/src/app/widgets/tuner.cpp
++++ b/src/app/widgets/tuner.cpp
+@@ -22,6 +22,23 @@ Tuner::Tuner(Arbiter &arbiter)
+     this->setTickInterval(1);
+ }
+ 
++void Tuner::set_band(Band band)
++{
++    this->band_ = band;
++    if (band == Band::FM)
++        this->setRange(880, 1080);
++    else
++        this->setRange(53, 170);
++    this->update();
++}
++
++QString Tuner::label(int value) const
++{
++    if (this->band_ == Band::FM)
++        return QString::number(value / 10.0, 'f', 1);
++    return QString::number(value * 10);
++}
++
+ QSize Tuner::sizeHint() const
+ {
+     return QSize(this->width(), this->width() / 3);
+@@ -62,7 +79,8 @@ void Tuner::paintEvent(QPaintEvent *event)
+         auto tick_color = this->color;
+         if (station % 10 == 0) {
+             if (station != this->value()) {
+-                QString num = QString::number(station / 10);
++                // whole MHz on FM, every 100 kHz on AM
++                QString num = (this->band_ == Band::FM) ? QString::number(station / 10) : QString::number(station * 10);
+                 auto pen = painter.pen();
+                 pen.setColor(this->color);
+                 painter.setPen(pen);
+-- 
+2.43.0
+

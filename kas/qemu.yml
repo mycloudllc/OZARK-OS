@@ -1,0 +1,35 @@
+# Emulator add-on: build for QEMU's generic 64-bit Arm machine instead of the Pi,
+# to try the image on the build PC with scripts/run-qemu.sh.
+#
+# Tests systemd, the splash, services and the Qt UI. Does NOT test anything
+# Pi-specific: firmware/config.txt, cmdline.txt, the vc4 display rule, Wi-Fi/BT.
+
+header:
+  version: 14
+
+machine: qemuarm64
+
+local_conf_header:
+  ozark-qemu: |
+    # Plain ext4 rootfs that QEMU boots from directly (the base config's wic
+    # image needs a Pi partition layout). The override beats its plain assignment.
+    IMAGE_FSTYPES:qemuall = "ext4"
+
+    # Guest GPU: Mesa's virgl driver renders through the host GPU (virtio-gpu-gl)
+    PACKAGECONFIG:append:pn-mesa = " virgl"
+
+    # Bluetooth subsystem in the QEMU kernel (there's no adapter, but bluetoothd
+    # needs the kernel side to run). Without it bluetoothd exits, and Dash waits
+    # out D-Bus timeouts at startup. The Pi kernel already has it.
+    KERNEL_FEATURES:append:pn-linux-yocto = " features/bluetooth/bluetooth.scc"
+
+    # Test pairing without a radio: btvirt (BlueZ's emulator, in the testing
+    # tools) creates virtual controllers through the vhci driver
+    # (meta-ozark/recipes-kernel/linux). One acts as the phone:
+    #   btvirt -l2 &  then  bluetoothctl  (select the second controller)
+    PACKAGECONFIG:append:pn-bluez5 = " testing"
+    IMAGE_INSTALL:append = " bluez5-noinst-tools"
+
+    # Keep Dash's build tree, so a rebuilt binary can be copied into a running VM:
+    #   scp -P 2222 build/build/tmp/work/cortexa57-poky-linux/opendash/*/image/usr/lib/opendash/bin/dash root@localhost:/usr/lib/opendash/bin/
+    RM_WORK_EXCLUDE += "opendash"

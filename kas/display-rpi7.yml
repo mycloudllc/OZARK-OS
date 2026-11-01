@@ -1,0 +1,13 @@
+# Display add-on: original official Raspberry Pi 7" DSI touchscreen (800x480),
+# instead of the default Waveshare 8" panel (OZARK_DISPLAY_OVERLAY in ozark.conf).
+# For the 2024 "Touch Display 2" use the vc4-kms-dsi-ili9881-7inch overlay instead.
+# HDMI screens: set OZARK_DISPLAY_OVERLAY = "" (vc4-kms-v3d is always on).
+
+header:
+  version: 14
+
+local_conf_header:
+  ozark-display-rpi7: |
+    # Every kernel overlay already ships (meta-ozark's ozark-rpi-overlays.inc);
+    # this picks which one config.txt turns on.
+    OZARK_DISPLAY_OVERLAY = "vc4-kms-dsi-7inch"

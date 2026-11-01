@@ -1,0 +1,70 @@
+From d3fc893a50f5ca96296845f25937e10d8d0f50fd Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 00:14:19 -0500
+Subject: [PATCH] Microphone: open only a microphone that exists
+
+Tapping Android Auto's microphone froze the head unit and then the app was
+killed: Qt's PulseAudio backend never returned from QAudioInput::start()
+on a missing source ("Stream error: No such entity"), on the GUI thread,
+and decoded video piled up until the kernel ran out of memory (3.6 GB in
+40 s). The device chosen when projection started can be gone by then.
+
+Now each recording uses the current default input, checked against the
+available inputs and the format first; without a usable microphone the
+phone gets "input open failed" and projection carries on.
+---
+ openauto/Projection/QtAudioInput.cpp | 29 ++++++++++++++++++++++++++++
+ 1 file changed, 29 insertions(+)
+
+diff --git a/openauto/Projection/QtAudioInput.cpp b/openauto/Projection/QtAudioInput.cpp
+index 5796c18..d475db0 100644
+--- a/openauto/Projection/QtAudioInput.cpp
++++ b/openauto/Projection/QtAudioInput.cpp
+@@ -16,7 +16,9 @@
+ *  along with openauto. If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <algorithm>
+ #include <QApplication>
++#include <QAudioDeviceInfo>
+ #include "openauto/Projection/QtAudioInput.hpp"
+ #include "OpenautoLog.hpp"
+ 
+@@ -110,7 +112,34 @@ void QtAudioInput::onStartRecording(StartPromise::Pointer promise)
+ {
+     std::lock_guard<decltype(mutex_)> lock(mutex_);
+ 
++    // Open the microphone that is the default now, and only if it exists.
++    // The device picked when projection started can be gone by the time the
++    // phone asks (e.g. a Bluetooth headset source), and Qt's PulseAudio backend
++    // never returns from start() on a missing source ("Stream error: No such
++    // entity"): this ran on the GUI thread, which froze while decoded video
++    // piled up until the kernel ran out of memory and killed the app. Without
++    // a microphone the phone is told the input is unavailable instead.
++    const QAudioDeviceInfo device = QAudioDeviceInfo::defaultInputDevice();
++    const QList<QAudioDeviceInfo> devices = QAudioDeviceInfo::availableDevices(QAudio::AudioInput);
++    const bool present = !device.isNull() && std::any_of(devices.begin(), devices.end(), [&device](const QAudioDeviceInfo &d) {
++        return d.deviceName() == device.deviceName();
++    });
++    if(!present || !device.isFormatSupported(audioFormat_))
++    {
++        OPENAUTO_LOG(error) << "[AudioInput] no usable microphone (default input: "
++                            << (device.isNull() ? std::string("none") : device.deviceName().toStdString()) << ").";
++        promise->reject();
++        return;
++    }
++    audioInput_ = std::make_unique<QAudioInput>(device, audioFormat_);
++
+     ioDevice_ = audioInput_->start();
++    if(ioDevice_ != nullptr && audioInput_->error() != QAudio::NoError)
++    {
++        OPENAUTO_LOG(error) << "[AudioInput] microphone failed to start, error " << audioInput_->error() << ".";
++        audioInput_->stop();
++        ioDevice_ = nullptr;
++    }
+ 
+     if(ioDevice_ != nullptr)
+     {
+-- 
+2.43.0
+

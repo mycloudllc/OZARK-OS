@@ -1,0 +1,10 @@
+# short-description: Ozark OS SD card for the Raspberry Pi
+# long-description: meta-raspberrypi's sdimage-raspberrypi.wks plus a third
+# vfat partition, OZARKLOGS, that ozark-logs writes plain-text boot logs to.
+# Any PC can read it. It's separate from the boot partition so a power cut
+# mid-write can only damage logs, never the files the Pi boots from.
+# No mountpoint here: ozark-logs adds its own fstab line (nofail, fsck).
+
+part /boot --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 100
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label root --align 4096
+part --ondisk mmcblk0 --fstype=vfat --label OZARKLOGS --align 4096 --size 256

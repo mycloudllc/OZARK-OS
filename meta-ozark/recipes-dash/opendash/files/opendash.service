@@ -1,0 +1,38 @@
+[Unit]
+Description=OpenDash head unit UI
+After=systemd-udevd.service systemd-user-sessions.service psplash-start.service bluetooth.service ozark-pulseaudio.service ozark-hotspot-setup.service
+Wants=bluetooth.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/ozark-display
+# Wireless Android Auto (Pi): OpenAuto reads openauto.ini from the working
+# directory; ozark-hotspot puts the hotspot's name and key there, and names
+# the hotspot's interface in opendash.env
+WorkingDirectory=/root
+EnvironmentFile=-/run/ozark-hotspot/opendash.env
+RuntimeDirectory=ozark
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/ozark
+# Dash keeps its settings (theme, plugin choice, TrailCommand hub) under $HOME/.config
+Environment=HOME=/root
+# Dash's splash is drawn exactly like the boot splash (psplash-colors.h background,
+# same logo), and Dash stops psplash once that splash is up, so the screen never
+# goes black. SIGKILL rather than "psplash-write QUIT": on QUIT psplash switches
+# the console back to text mode, which blanks the screen even after Qt has drawn.
+# psplash-systemd's own quit is masked in ozark-image.
+Environment=DASH_SPLASH_BACKGROUND=#142A1D
+Environment=DASH_SPLASH_IMAGE=/usr/share/opendash/splash.png
+Environment="DASH_SPLASH_HANDOFF=/usr/bin/killall -KILL psplash"
+# Mouse pointer appears when a mouse moves and hides after 3 s without movement;
+# touch never shows it. Dash's Settings > Cursor switch turns it off entirely.
+Environment=DASH_CURSOR_AUTOHIDE=3
+ExecStart=/usr/bin/opendash
+# If Dash exits, stop psplash anyway (no-op once it's gone)
+ExecStopPost=-/usr/bin/psplash-write QUIT
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

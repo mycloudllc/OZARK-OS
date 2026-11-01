@@ -1,0 +1,378 @@
+From cb70393f04694200d6e97822350e9659a5b3d0d1 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Fri, 30 Oct 2026 20:56:51 -0500
+Subject: [PATCH] Settings > Lighting: controller port override and strip setup
+
+The Interior and Exterior Lighting tabs only set looks; the lighting
+controller behind them (Ozark's ozark-lightd, org.ozark.Lighting1) is
+configured here: its status, a serial port override (normally 'auto'),
+each strip's data pin, LED count, colour order, RGBW, data speed,
+direction and colour test, the brightness cap and music sensitivity.
+
+Upstream-Status: Inappropriate [needs Ozark OS's lighting service]
+---
+ include/app/pages/lighting_settings.hpp |  60 ++++++
+ src/app/pages/lighting_settings.cpp     | 266 ++++++++++++++++++++++++
+ src/app/pages/settings.cpp              |   2 +
+ 3 files changed, 328 insertions(+)
+ create mode 100644 include/app/pages/lighting_settings.hpp
+ create mode 100644 src/app/pages/lighting_settings.cpp
+
+diff --git a/include/app/pages/lighting_settings.hpp b/include/app/pages/lighting_settings.hpp
+new file mode 100644
+index 0000000..7c24a58
+--- /dev/null
++++ b/include/app/pages/lighting_settings.hpp
+@@ -0,0 +1,60 @@
++#pragma once
++
++#include <functional>
++
++#include <QtDBus>
++#include <QtWidgets>
++
++class Arbiter;
++class Selector;
++class Switch;
++
++// Settings > Lighting: the Ozark lighting controller behind the Interior and
++// Exterior Lighting tabs, through ozark-lightd (org.ozark.Lighting1). Normally
++// it finds the controller itself; here the port can be overridden, and the
++// strips are set up (pins, LED counts, colour order...).
++class LightingSettingsTab : public QWidget {
++    Q_OBJECT
++
++   public:
++    LightingSettingsTab(Arbiter &arbiter, QWidget *parent = nullptr);
++
++   protected:
++    void showEvent(QShowEvent *event) override;
++
++   private slots:
++    void on_status_changed(const QVariantMap &status);
++    void on_config_changed(const QDBusMessage &message);
++    void on_config_applied(bool ok, const QString &message);
++
++   private:
++    struct StripUi {
++        Selector *pin = nullptr;
++        QSpinBox *count = nullptr;
++        Selector *order = nullptr;
++        Switch *rgbw = nullptr;
++        Selector *khz = nullptr;
++        Switch *reverse = nullptr;
++    };
++
++    QWidget *settings_widget();
++    QWidget *row(const QString &label, QWidget *control, bool stretch = false);
++    QLabel *heading(const QString &text);
++
++    void call(const QString &method, const QVariantList &args = {},
++              std::function<void(const QDBusMessage &)> done = nullptr);
++    void refresh();
++    void show_config(const QVariantMap &config);
++    void apply();
++
++    Arbiter &arbiter;
++    QVariantMap status;
++    bool loading = false;
++
++    QLabel *state;
++    Selector *port;
++    QMap<QString, StripUi> strips;
++    QSlider *max_brightness;
++    QSlider *sensitivity;
++    QLabel *result;
++};
+diff --git a/src/app/pages/lighting_settings.cpp b/src/app/pages/lighting_settings.cpp
+new file mode 100644
+index 0000000..d2e9934
+--- /dev/null
++++ b/src/app/pages/lighting_settings.cpp
+@@ -0,0 +1,266 @@
++#include "app/arbiter.hpp"
++#include "app/widgets/selector.hpp"
++#include "app/widgets/switch.hpp"
++
++#include "app/pages/lighting_settings.hpp"
++
++namespace {
++const char *kService = "org.ozark.Lighting1";
++const char *kPath = "/org/ozark/Lighting1";
++const char *kInterface = "org.ozark.Lighting1";
++
++// The controller firmware's allowed pins and colour orders (lighting/PROTOCOL.md)
++const QList<QString> kPins = {"4",  "5",  "13", "14", "16", "17", "18", "19",
++                              "21", "22", "23", "25", "26", "27", "32", "33"};
++const QList<QString> kOrders = {"RGB", "RBG", "GRB", "GBR", "BRG", "BGR"};
++const QList<QString> kSpeeds = {"800", "400"};
++const QList<QPair<QString, QString>> kZones = {
++    {"F", "Interior front strip"}, {"R", "Interior rear strip"}, {"E", "Exterior strip"}};
++
++// Nested maps arrive from D-Bus as QDBusArgument, not QVariantMap
++QVariantMap to_map(const QVariant &value)
++{
++    if (value.userType() == qMetaTypeId<QDBusArgument>())
++        return qdbus_cast<QVariantMap>(value.value<QDBusArgument>());
++    return value.toMap();
++}
++}  // namespace
++
++LightingSettingsTab::LightingSettingsTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    auto layout = new QVBoxLayout(this);
++    layout->setContentsMargins(6, 0, 6, 0);
++
++    auto scroll = new QScrollArea(this);
++    Session::Forge::to_touch_scroller(scroll);
++    scroll->setWidgetResizable(true);
++    scroll->setWidget(this->settings_widget());
++    layout->addWidget(scroll);
++
++    QDBusConnection bus = QDBusConnection::systemBus();
++    bus.connect(kService, kPath, kInterface, "StatusChanged", this, SLOT(on_status_changed(QVariantMap)));
++    bus.connect(kService, kPath, kInterface, "ConfigChanged", this, SLOT(on_config_changed(QDBusMessage)));
++    bus.connect(kService, kPath, kInterface, "ConfigApplied", this, SLOT(on_config_applied(bool, QString)));
++}
++
++QWidget *LightingSettingsTab::row(const QString &label, QWidget *control, bool stretch)
++{
++    auto widget = new QWidget(this);
++    auto layout = new QHBoxLayout(widget);
++    layout->addWidget(new QLabel(label, widget), 1);
++    if (stretch)
++        layout->addWidget(control, 1);
++    else
++        layout->addWidget(control, 1, Qt::AlignHCenter);
++    return widget;
++}
++
++QLabel *LightingSettingsTab::heading(const QString &text)
++{
++    auto label = new QLabel(text, this);
++    QFont font(label->font());
++    font.setBold(true);
++    label->setFont(font);
++    return label;
++}
++
++QWidget *LightingSettingsTab::settings_widget()
++{
++    const QFont font14 = this->arbiter.forge().font(14);
++    const double scale = this->arbiter.layout().scale;
++
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++
++    // Controller: found automatically; the port can be pinned here
++    layout->addWidget(this->heading("Controller"));
++    this->state = new QLabel("Lighting service not running", widget);
++    layout->addWidget(this->row("Status", this->state));
++    this->port = new Selector(QList<QString>{"auto"}, QString("auto"), font14, this->arbiter, widget);
++    connect(this->port, &Selector::item_changed, [this](QString port) {
++        if (!this->loading && port != this->status.value("port", "auto").toString())
++            this->call("SetPort", {port});
++    });
++    layout->addWidget(this->row("Serial port", this->port));
++
++    // Strips (applied together with "apply")
++    for (const auto &zone : kZones) {
++        layout->addWidget(Session::Forge::br());
++        layout->addWidget(this->heading(zone.second));
++
++        StripUi &s = this->strips[zone.first];
++        s.pin = new Selector(kPins, QString("16"), font14, this->arbiter, widget);
++        layout->addWidget(this->row("Data pin", s.pin));
++
++        s.count = new QSpinBox(widget);
++        s.count->setRange(1, 600);
++        s.count->setValue(60);
++        s.count->setAccelerated(true);
++        s.count->setFont(font14);
++        s.count->setMinimumHeight(int(40 * scale));
++        // Dash's stylesheet fills spin boxes with the accent colour, hiding the number
++        s.count->setStyleSheet("QSpinBox { background-color: palette(window); color: palette(text); "
++                               "border: 1px solid palette(mid); border-radius: 4px; padding: 0 8px; }");
++        layout->addWidget(this->row("LED count", s.count, true));
++
++        s.order = new Selector(kOrders, QString("GRB"), font14, this->arbiter, widget);
++        layout->addWidget(this->row("Color order", s.order));
++
++        s.rgbw = new Switch(widget);
++        s.rgbw->scale(scale);
++        layout->addWidget(this->row("RGBW strip", s.rgbw));
++
++        s.khz = new Selector(kSpeeds, QString("800"), font14, this->arbiter, widget);
++        layout->addWidget(this->row("Data speed (kHz)", s.khz));
++
++        s.reverse = new Switch(widget);
++        s.reverse->scale(scale);
++        layout->addWidget(this->row("Reverse direction", s.reverse));
++
++        auto test = new QPushButton("test", widget);
++        test->setFlat(true);
++        const QString name = zone.first;
++        connect(test, &QPushButton::clicked, [this, name] { this->call("Test", {name}); });
++        layout->addWidget(this->row("Color test", test));
++    }
++
++    auto hint = new QLabel("The test lights a strip red, green, then blue from start to end. "
++                           "If the colors are wrong, change the color order and apply.", widget);
++    hint->setWordWrap(true);
++    hint->setFont(this->arbiter.forge().font(11));
++    layout->addWidget(hint);
++
++    // General
++    layout->addWidget(Session::Forge::br());
++    layout->addWidget(this->heading("All lighting"));
++    this->max_brightness = new QSlider(Qt::Horizontal, widget);
++    this->max_brightness->setRange(1, 255);
++    this->max_brightness->setValue(200);
++    layout->addWidget(this->row("Max brightness", this->max_brightness, true));
++
++    this->sensitivity = new QSlider(Qt::Horizontal, widget);
++    this->sensitivity->setRange(25, 400);
++    this->sensitivity->setValue(100);
++    connect(this->sensitivity, &QSlider::sliderReleased, [this] {
++        this->call("SetSensitivity", {this->sensitivity->value()});
++    });
++    layout->addWidget(this->row("Music sensitivity", this->sensitivity, true));
++
++    auto apply = new QPushButton("apply strip settings", widget);
++    apply->setFont(font14);
++    connect(apply, &QPushButton::clicked, [this] { this->apply(); });
++    layout->addWidget(apply, 0, Qt::AlignRight);
++    this->result = new QLabel(widget);
++    this->result->setAlignment(Qt::AlignRight);
++    layout->addWidget(this->result);
++
++    return widget;
++}
++
++void LightingSettingsTab::call(const QString &method, const QVariantList &args,
++                               std::function<void(const QDBusMessage &)> done)
++{
++    QDBusMessage message = QDBusMessage::createMethodCall(kService, kPath, kInterface, method);
++    message.setArguments(args);
++    auto watcher = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(message), this);
++    connect(watcher, &QDBusPendingCallWatcher::finished, this, [done](QDBusPendingCallWatcher *watcher) {
++        const QDBusMessage reply = watcher->reply();
++        if (reply.type() == QDBusMessage::ReplyMessage && done)
++            done(reply);
++        watcher->deleteLater();
++    });
++}
++
++// Fresh values each time the tab is shown: ports come and go
++void LightingSettingsTab::showEvent(QShowEvent *event)
++{
++    QWidget::showEvent(event);
++    this->refresh();
++}
++
++void LightingSettingsTab::refresh()
++{
++    this->call("GetStatus", {}, [this](const QDBusMessage &reply) {
++        this->on_status_changed(to_map(reply.arguments().value(0)));
++    });
++    this->call("GetPorts", {}, [this](const QDBusMessage &reply) {
++        this->loading = true;
++        this->port->set_options(reply.arguments().value(0).toStringList());
++        this->port->set_current(this->status.value("port", "auto").toString());
++        this->loading = false;
++    });
++    this->call("GetConfig", {}, [this](const QDBusMessage &reply) {
++        this->show_config(to_map(reply.arguments().value(0)));
++    });
++}
++
++void LightingSettingsTab::on_status_changed(const QVariantMap &status)
++{
++    this->status = status;
++    const QString firmware = status.value("firmware").toString();
++    if (status.value("connected").toBool())
++        this->state->setText(firmware.isEmpty() ? "Connected" : QString("Connected (v%1)").arg(firmware));
++    else
++        this->state->setText("Searching for controller...");
++
++    this->loading = true;
++    this->port->set_current(status.value("port", "auto").toString());
++    this->loading = false;
++    if (!this->sensitivity->isSliderDown())
++        this->sensitivity->setValue(status.value("sensitivity", 100).toInt());
++
++    const int max_leds = status.value("max_leds").toInt();
++    if (max_leds > 0) {
++        for (auto &strip : this->strips)
++            strip.count->setMaximum(max_leds);
++    }
++}
++
++void LightingSettingsTab::on_config_changed(const QDBusMessage &message)
++{
++    this->show_config(to_map(message.arguments().value(0)));
++}
++
++void LightingSettingsTab::show_config(const QVariantMap &config)
++{
++    for (auto it = this->strips.begin(); it != this->strips.end(); ++it) {
++        const QVariantMap m = to_map(config.value(it.key()));
++        if (m.isEmpty())
++            continue;
++        StripUi &s = it.value();
++        s.pin->set_current(QString::number(m.value("pin").toInt()));
++        s.count->setValue(m.value("count").toInt());
++        s.order->set_current(m.value("order").toString());
++        s.rgbw->setChecked(m.value("rgbw").toInt() == 1);
++        s.khz->set_current(QString::number(m.value("khz").toInt()));
++        s.reverse->setChecked(m.value("reverse").toInt() == 1);
++    }
++
++    const QVariantMap global = to_map(config.value("G"));
++    if (global.contains("maxbri"))
++        this->max_brightness->setValue(global.value("maxbri").toInt());
++}
++
++void LightingSettingsTab::apply()
++{
++    QVariantMap config;
++    for (auto it = this->strips.begin(); it != this->strips.end(); ++it) {
++        const StripUi &s = it.value();
++        config[it.key()] = QVariantMap{{"pin", s.pin->get_current().toInt()},
++                                       {"count", s.count->value()},
++                                       {"order", s.order->get_current()},
++                                       {"rgbw", s.rgbw->isChecked() ? 1 : 0},
++                                       {"khz", s.khz->get_current().toInt()},
++                                       {"reverse", s.reverse->isChecked() ? 1 : 0}};
++    }
++    config["G"] = QVariantMap{{"maxbri", this->max_brightness->value()}};
++    this->result->setText("Applying...");
++    this->call("SetConfig", {config});
++}
++
++void LightingSettingsTab::on_config_applied(bool ok, const QString &message)
++{
++    this->result->setText(ok ? "Applied" : message);
++}
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index f91a385..47d3bb6 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -17,6 +17,7 @@
+ #include "app/session.hpp"
+ #include "app/window.hpp"
+ #include "app/pages/settings.hpp"
++#include "app/pages/lighting_settings.hpp"
+ #include "app/services/server.hpp"
+ #include "app/widgets/color_picker.hpp"
+ #include "app/widgets/selector.hpp"
+@@ -34,6 +35,7 @@ void SettingsPage::init()
+     this->addTab(new MainSettingsTab(this->arbiter), "Main");
+     this->addTab(new LayoutSettingsTab(this->arbiter), "Layout");
+     this->addTab(new BluetoothSettingsTab(this->arbiter, this), "Bluetooth");
++    this->addTab(new LightingSettingsTab(this->arbiter, this), "Lighting");
+     this->addTab(new ActionsSettingsTab(this->arbiter), "Actions");
+     this->addTab(new AboutSettingsTab(this->arbiter), "About");
+ }

@@ -1,0 +1,13 @@
+# Optional speed-up: reuse prebuilt artifacts from the Yocto Project's public
+# sstate mirror and hash-equivalence server. Only helps for recipes from poky,
+# but that is a large share of the first build. Needs internet during the build.
+
+header:
+  version: 14
+
+local_conf_header:
+  ozark-mirrors: |
+    BB_SIGNATURE_HANDLER = "OEEquivHash"
+    BB_HASHSERVE = "auto"
+    BB_HASHSERVE_UPSTREAM = "wss://hashserv.yoctoproject.org/ws"
+    SSTATE_MIRRORS ?= "file://.* http://sstate.yoctoproject.org/all/PATH;downloadfilename=PATH"

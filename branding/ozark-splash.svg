@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="420" viewBox="0 0 520 420">
+  <!-- Ozark Mountain Technologies boot splash.
+       Badge: "Technologies badge" from the Ozark Mountain Brand Adventures logo canvas.
+       Background must match PSPLASH_BACKGROUND_COLOR in psplash-colors.h (#142A1D). -->
+  <rect width="520" height="420" fill="#142A1D"/>
+  <g transform="translate(140 16) scale(0.75)">
+    <defs><clipPath id="badgeClip"><circle cx="160" cy="160" r="147"/></clipPath></defs>
+    <circle cx="160" cy="160" r="156" fill="#1F3B2D"/>
+    <g clip-path="url(#badgeClip)">
+      <rect width="320" height="320" fill="#24432F"/>
+      <polygon points="50,248 128,152 166,196 208,128 276,248" fill="#142A1D" stroke="#F1EBDD" stroke-width="5" stroke-linejoin="round"/>
+      <path d="M92 248 V222 L112 202 M166 248 V214 M232 248 V212 L216 196 M208 248 V170" fill="none" stroke="#C8602B" stroke-width="3.5" stroke-linejoin="round"/>
+      <circle cx="112" cy="202" r="5" fill="#F1EBDD"/>
+      <circle cx="166" cy="214" r="5" fill="#F1EBDD"/>
+      <circle cx="216" cy="196" r="5" fill="#F1EBDD"/>
+      <circle cx="208" cy="170" r="5" fill="#F1EBDD"/>
+      <circle cx="208" cy="128" r="9" fill="#C8602B"/>
+      <path d="M189.6 109.6 A26 26 0 0 1 226.4 109.6 M177 97 A44 44 0 0 1 239 97" fill="none" stroke="#F1EBDD" stroke-width="4" stroke-linecap="round"/>
+      <path d="M50 248 H276" stroke="#F1EBDD" stroke-width="5" stroke-linecap="round"/>
+      <path d="M64 270 H256" stroke="#C8602B" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="14 8"/>
+    </g>
+    <circle cx="160" cy="160" r="147" fill="none" stroke="#F1EBDD" stroke-width="3"/>
+  </g>
+  <text x="260" y="332" text-anchor="middle" fill="#F1EBDD" font-family="Barlow Condensed" font-weight="700" font-size="56" letter-spacing="2">OZARK MOUNTAIN</text>
+  <text x="260" y="378" text-anchor="middle" fill="#C8602B" font-family="Barlow Condensed" font-weight="600" font-size="28" letter-spacing="9">TECHNOLOGIES</text>
+</svg>

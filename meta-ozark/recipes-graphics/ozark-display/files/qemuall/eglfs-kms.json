@@ -1,0 +1,7 @@
+{
+    "hwcursor": false,
+    "pbuffers": true,
+    "outputs": [
+        { "name": "Virtual1", "format": "xrgb8888" }
+    ]
+}

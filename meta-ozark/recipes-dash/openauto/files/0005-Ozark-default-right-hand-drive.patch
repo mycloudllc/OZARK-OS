@@ -1,0 +1,45 @@
+From 9ccbb40447e460769ac0a63f34bd2bef31f56f99 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 23:15:42 -0500
+Subject: [PATCH] Ozark default: right-hand drive
+
+New units (or "reset") default to right-hand drive, which puts Android
+Auto's navigation bar on the driver's side.
+---
+ openauto/Configuration/Configuration.cpp | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/openauto/Configuration/Configuration.cpp b/openauto/Configuration/Configuration.cpp
+index 8b59bc9..4f08fad 100644
+--- a/openauto/Configuration/Configuration.cpp
++++ b/openauto/Configuration/Configuration.cpp
+@@ -34,6 +34,8 @@ namespace
+ constexpr auto kDefaultVideoResolution = aasdk::proto::enums::VideoResolution::_1080p;
+ constexpr size_t kDefaultScreenDPI = 300;
+ constexpr bool kDefaultAutoconnectBluetooth = true;
++// Right-hand drive: Android Auto puts its navigation bar on the driver's side
++constexpr auto kDefaultHandedness = HandednessOfTrafficType::RIGHT_HAND_DRIVE;
+ }
+ 
+ const std::string Configuration::cGeneralShowClockKey = "General.ShowClock";
+@@ -93,7 +95,7 @@ void Configuration::load()
+         boost::property_tree::ini_parser::read_ini(cConfigFileName, iniConfig);
+ 
+         handednessOfTrafficType_ = static_cast<HandednessOfTrafficType>(iniConfig.get<uint32_t>(cGeneralHandednessOfTrafficTypeKey,
+-                                                                                                static_cast<uint32_t>(HandednessOfTrafficType::LEFT_HAND_DRIVE)));
++                                                                                                static_cast<uint32_t>(kDefaultHandedness)));
+         showClock_ = iniConfig.get<bool>(cGeneralShowClockKey, true);
+ 
+         videoFPS_ = static_cast<aasdk::proto::enums::VideoFPS::Enum>(iniConfig.get<uint32_t>(cVideoFPSKey,
+@@ -136,7 +138,7 @@ void Configuration::load()
+ 
+ void Configuration::reset()
+ {
+-    handednessOfTrafficType_ = HandednessOfTrafficType::LEFT_HAND_DRIVE;
++    handednessOfTrafficType_ = kDefaultHandedness;
+     showClock_ = true;
+     videoFPS_ = aasdk::proto::enums::VideoFPS::_60;
+     videoResolution_ = kDefaultVideoResolution;
+-- 
+2.43.0
+

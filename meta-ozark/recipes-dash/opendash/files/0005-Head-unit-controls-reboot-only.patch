@@ -1,0 +1,99 @@
+From 27f7f2dcf73340b92308d69477cd5811bf34e37f Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 20:50:05 -0500
+Subject: [PATCH 05/10] Head unit controls: reboot only
+
+Remove the exit button from the control bar and the minimize, exit and
+shut down buttons from Settings > Controls. The control bar's power
+button opens a Restart dialog with reboot as the only action. On a head
+unit Dash must not be closed from its own UI, and powering off is left to
+the vehicle (ignition).
+
+Upstream-Status: Inappropriate [Ozark OS specific]
+---
+ src/app/pages/settings.cpp | 15 +--------------
+ src/app/window.cpp         | 29 +++++++----------------------
+ 2 files changed, 8 insertions(+), 36 deletions(-)
+
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 58d97b1..f91a385 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -228,13 +228,7 @@ QWidget *MainSettingsTab::controls_widget()
+     auto widget = new QWidget();
+     auto layout = new QVBoxLayout(widget);
+ 
+-    auto minimize_button = new QPushButton("minimize");
+-    connect(minimize_button, &QPushButton::clicked, [this]{ this->arbiter.window()->setWindowState(Qt::WindowMinimized); });
+-    layout->addWidget(minimize_button);
+-    auto exit_button = new QPushButton("exit");
+-    connect(exit_button, &QPushButton::clicked, [this]{ qApp->exit(); });
+-    layout->addWidget(exit_button);
+-    layout->addWidget(Session::Forge::br());
++    // Head unit: reboot is the only control (no minimize, exit or shut down)
+     auto reboot_button = new QPushButton("reboot");
+     connect(reboot_button, &QPushButton::clicked, [this]{
+         this->arbiter.settings().sync();
+@@ -242,13 +236,6 @@ QWidget *MainSettingsTab::controls_widget()
+         system(Session::System::REBOOT_CMD);
+     });
+     layout->addWidget(reboot_button);
+-    auto shut_down_button = new QPushButton("shut down");
+-    connect(shut_down_button, &QPushButton::clicked, [this]{
+-        this->arbiter.settings().sync();
+-        sync();
+-        system(Session::System::SHUTDOWN_CMD);
+-    });
+-    layout->addWidget(shut_down_button);
+ 
+     return widget;
+ }
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index 121e7a3..01a6643 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -150,20 +150,15 @@ QWidget *Dash::control_bar() const
+ 
+     layout->addStretch();
+ 
++    // Head unit: no exit button, and restart is the only power action
+     auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
+-    dialog->set_title("Power Off");
++    dialog->set_title("Restart");
+     dialog->set_body(this->power_control());
+-    auto shutdown = new QPushButton();
+-    shutdown->setFlat(true);
+-    this->arbiter.forge().iconize("power_settings_new", shutdown, 26);
+-    layout->addWidget(shutdown);
+-    connect(shutdown, &QPushButton::clicked, [dialog]{ dialog->open(); });
+-
+-    auto exit = new QPushButton();
+-    exit->setFlat(true);
+-    this->arbiter.forge().iconize("close", exit, 26);
+-    layout->addWidget(exit);
+-    connect(exit, &QPushButton::clicked, []{ qApp->exit(); });
++    auto restart = new QPushButton();
++    restart->setFlat(true);
++    this->arbiter.forge().iconize("power_settings_new", restart, 26);
++    layout->addWidget(restart);
++    connect(restart, &QPushButton::clicked, [dialog]{ dialog->open(); });
+ 
+     widget->setVisible(this->arbiter.layout().control_bar.enabled);
+     connect(&this->arbiter, &Arbiter::control_bar_changed, [widget](bool enabled){
+@@ -190,16 +185,6 @@ QWidget *Dash::power_control() const
+     });
+     layout->addWidget(restart);
+ 
+-    auto power_off = new QPushButton();
+-    power_off->setFlat(true);
+-    this->arbiter.forge().iconize("power_settings_new", power_off, 36);
+-    connect(power_off, &QPushButton::clicked, [this]{
+-        this->arbiter.settings().sync();
+-        sync();
+-        system(Session::System::SHUTDOWN_CMD);
+-    });
+-    layout->addWidget(power_off);
+-
+     return widget;
+ }
+ 

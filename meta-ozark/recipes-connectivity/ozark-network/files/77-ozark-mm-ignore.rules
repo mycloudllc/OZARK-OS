@@ -1,0 +1,10 @@
+# Keep ModemManager away from the lighting controller's ESP32: it probes
+# serial ports with AT commands, which would interfere with ozark-lightd.
+# USB-serial bridges ESP32 boards use: Silicon Labs CP210x, WCH CH34x,
+# FTDI, and Espressif's own USB (ESP32-S2/S3/C3).
+ACTION!="add|change|move|bind", GOTO="ozark_mm_ignore_end"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="10c4", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="1a86", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="0403", ENV{ID_MM_DEVICE_IGNORE}="1"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="303a", ENV{ID_MM_DEVICE_IGNORE}="1"
+LABEL="ozark_mm_ignore_end"

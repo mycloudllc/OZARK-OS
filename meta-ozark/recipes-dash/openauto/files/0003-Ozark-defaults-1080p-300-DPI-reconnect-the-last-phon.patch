@@ -1,0 +1,75 @@
+From ec6dc9274cce6267807ef30bdf4673cd817c7667 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 20:43:29 -0500
+Subject: [PATCH] Ozark defaults: 1080p, 300 DPI, reconnect the last phone
+
+Defaults for settings openauto.ini doesn't have (a new unit, or
+"reset"): 1080p video instead of 480p, 300 DPI instead of 140, and
+reconnecting the last wireless Android Auto phone at startup.
+---
+ openauto/Configuration/Configuration.cpp | 21 ++++++++++++++++-----
+ 1 file changed, 16 insertions(+), 5 deletions(-)
+
+diff --git a/openauto/Configuration/Configuration.cpp b/openauto/Configuration/Configuration.cpp
+index 900ec58..8b59bc9 100644
+--- a/openauto/Configuration/Configuration.cpp
++++ b/openauto/Configuration/Configuration.cpp
+@@ -26,6 +26,16 @@ namespace configuration
+ 
+ const std::string Configuration::cConfigFileName = "openauto.ini";
+ 
++// Ozark OS defaults, used for anything openauto.ini doesn't set: full HD
++// projection at a DPI that keeps Android Auto's layout readable on a 7-10"
++// screen, and reconnecting the last phone that used wireless Android Auto.
++namespace
++{
++constexpr auto kDefaultVideoResolution = aasdk::proto::enums::VideoResolution::_1080p;
++constexpr size_t kDefaultScreenDPI = 300;
++constexpr bool kDefaultAutoconnectBluetooth = true;
++}
++
+ const std::string Configuration::cGeneralShowClockKey = "General.ShowClock";
+ const std::string Configuration::cGeneralHandednessOfTrafficTypeKey = "General.HandednessOfTrafficType";
+ 
+@@ -90,8 +100,8 @@ void Configuration::load()
+                                                                                              aasdk::proto::enums::VideoFPS::_60));
+ 
+         videoResolution_ = static_cast<aasdk::proto::enums::VideoResolution::Enum>(iniConfig.get<uint32_t>(cVideoResolutionKey,
+-                                                                                                           aasdk::proto::enums::VideoResolution::_480p));
+-        screenDPI_ = iniConfig.get<size_t>(cVideoScreenDPIKey, 140);
++                                                                                                           kDefaultVideoResolution));
++        screenDPI_ = iniConfig.get<size_t>(cVideoScreenDPIKey, kDefaultScreenDPI);
+ 
+         omxLayerIndex_ = iniConfig.get<int32_t>(cVideoOMXLayerIndexKey, 1);
+         videoMargins_ = QRect(0, 0, iniConfig.get<int32_t>(cVideoMarginWidth, 0), iniConfig.get<int32_t>(cVideoMarginHeight, 0));
+@@ -112,7 +122,7 @@ void Configuration::load()
+         wifiSSID_ = iniConfig.get<std::string>(cWifiSSID, "");
+         wifiPassword_ = iniConfig.get<std::string>(cWifiPskey, "");
+         wifiMAC_ = iniConfig.get<std::string>(cWifiMAC, "");
+-        autoconnectBluetooth_ = iniConfig.get<bool>(cAutoconnectBluetooth, false);
++        autoconnectBluetooth_ = iniConfig.get<bool>(cAutoconnectBluetooth, kDefaultAutoconnectBluetooth);
+         lastBluetoothPair_ = iniConfig.get<std::string>(cLastBluetoothPair, "");
+     }
+     catch(const boost::property_tree::ini_parser_error& e)
+@@ -129,8 +139,8 @@ void Configuration::reset()
+     handednessOfTrafficType_ = HandednessOfTrafficType::LEFT_HAND_DRIVE;
+     showClock_ = true;
+     videoFPS_ = aasdk::proto::enums::VideoFPS::_60;
+-    videoResolution_ = aasdk::proto::enums::VideoResolution::_480p;
+-    screenDPI_ = 140;
++    videoResolution_ = kDefaultVideoResolution;
++    screenDPI_ = kDefaultScreenDPI;
+     omxLayerIndex_ = 1;
+     videoMargins_ = QRect(0, 0, 0, 0);
+     whitescreenWorkaround_ = true;
+@@ -138,6 +148,7 @@ void Configuration::reset()
+     buttonCodes_.clear();
+     bluetoothAdapterType_ = BluetoothAdapterType::NONE;
+     bluetoothRemoteAdapterAddress_ = "";
++    autoconnectBluetooth_ = kDefaultAutoconnectBluetooth;
+     musicAudioChannelEnabled_ = true;
+     speechAudiochannelEnabled_ = true;
+     audioOutputBackendType_ = AudioOutputBackendType::RTAUDIO;
+-- 
+2.43.0
+

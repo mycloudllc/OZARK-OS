@@ -1,0 +1,101 @@
+From 3bf60e802fb65b2a0a2678f674d0c8271609d5af Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 29 Oct 2026 20:24:54 -0500
+Subject: [PATCH 04/10] Optional cursor auto-hide
+
+DASH_CURSOR_AUTOHIDE=<seconds> shows the pointer while a real mouse moves
+and hides it after that long without movement. Touch input hides it at
+once and never shows it. The Core/cursor setting still applies: with the
+cursor turned off it stays hidden. Unset, Dash behaves as before.
+
+Upstream-Status: Pending
+---
+ src/dash.cpp | 60 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 60 insertions(+)
+
+diff --git a/src/dash.cpp b/src/dash.cpp
+index 7eb2292..7051d71 100644
+--- a/src/dash.cpp
++++ b/src/dash.cpp
+@@ -1,8 +1,11 @@
+ #include <QApplication>
+ #include <QColor>
++#include <QCursor>
+ #include <QEventLoop>
++#include <QMouseEvent>
+ #include <QPainter>
+ #include <QProcess>
++#include <QSettings>
+ #include <QStringList>
+ #include <QTimer>
+ #include <QWindow>
+@@ -10,6 +13,58 @@
+ #include "app/window.hpp"
+ #include "app/action.hpp"
+ 
++// Shows the pointer while a real mouse is in use and hides it after a period
++// without movement. Touch input hides it at once and never shows it. Works on
++// top of the Core/cursor setting: with the cursor turned off it stays hidden.
++class CursorAutoHide : public QObject {
++   public:
++    CursorAutoHide(int timeout_ms, QObject *parent)
++        : QObject(parent)
++    {
++        this->timer.setSingleShot(true);
++        this->timer.setInterval(timeout_ms);
++        QObject::connect(&this->timer, &QTimer::timeout, [this]{ this->apply(Qt::BlankCursor); });
++        this->apply(Qt::BlankCursor);
++    }
++
++   protected:
++    bool eventFilter(QObject *watched, QEvent *event) override
++    {
++        switch (event->type()) {
++            case QEvent::MouseMove:
++            case QEvent::MouseButtonPress:
++                if (static_cast<QMouseEvent *>(event)->source() == Qt::MouseEventNotSynthesized) {
++                    const bool enabled = QSettings().value("Core/cursor", true).toBool();
++                    this->apply(enabled ? Qt::ArrowCursor : Qt::BlankCursor);
++                    this->timer.start();
++                }
++                break;
++            case QEvent::TouchBegin:
++                this->timer.stop();
++                this->apply(Qt::BlankCursor);
++                break;
++            default:
++                break;
++        }
++        return QObject::eventFilter(watched, event);
++    }
++
++   private:
++    QTimer timer;
++    Qt::CursorShape shape = Qt::ArrowCursor;
++
++    void apply(Qt::CursorShape shape)
++    {
++        if (shape == this->shape && QGuiApplication::overrideCursor())
++            return;
++        this->shape = shape;
++        if (QGuiApplication::overrideCursor())
++            QGuiApplication::changeOverrideCursor(QCursor(shape));
++        else
++            QGuiApplication::setOverrideCursor(QCursor(shape));
++    }
++};
++
+ int main(int argc, char *argv[])
+ {
+     QApplication dash(argc, argv);
+@@ -88,5 +143,10 @@ int main(int argc, char *argv[])
+     window.show();
+     splash.finish(&window);
+ 
++    // DASH_CURSOR_AUTOHIDE: seconds without mouse movement before the pointer hides
++    const int autohide = qEnvironmentVariableIntValue("DASH_CURSOR_AUTOHIDE");
++    if (autohide > 0)
++        dash.installEventFilter(new CursorAutoHide(autohide * 1000, &dash));
++
+     return dash.exec();
+ }

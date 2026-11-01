@@ -1,0 +1,27 @@
+From 7ed1f30e6dda0724f7dfcae531deea752660b25b Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 21:28:34 -0500
+Subject: [PATCH] Theme colour pop-up: margins around the wheel and slider
+
+The brightness slider ran right up to the dialog's edge.
+---
+ src/app/widgets/color_picker.cpp | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/app/widgets/color_picker.cpp b/src/app/widgets/color_picker.cpp
+index 08b5dfe..431ddd1 100644
+--- a/src/app/widgets/color_picker.cpp
++++ b/src/app/widgets/color_picker.cpp
+@@ -69,7 +69,8 @@ QWidget *ColorPicker::dialog_body()
+ {
+     QWidget *widget = new QWidget();
+     QHBoxLayout *layout = new QHBoxLayout(widget);
+-    layout->setContentsMargins(0, 8, 0, 0);
++    // Room on the right so the slider's knob doesn't touch the dialog's edge
++    layout->setContentsMargins(8, 8, 16, 8);
+     layout->setSpacing(24);
+ 
+     this->wheel = new ColorWheel(widget);
+-- 
+2.43.0
+

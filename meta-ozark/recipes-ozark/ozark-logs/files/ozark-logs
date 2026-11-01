@@ -1,0 +1,42 @@
+#!/bin/sh
+# Copy this boot's system journal, as it happens, into a plain-text file on
+# the OZARKLOGS partition of the SD card: /logs/boot-NNNN.log (latest.txt
+# names the newest one). journalctl -b starts from the very first kernel
+# message, so the file has the whole boot even though this starts late.
+#
+# The Pi has no clock battery: until it gets network time, timestamps start
+# from the last shutdown's time. Boot numbers, not dates, order the files.
+
+dir=/logs
+keep=20          # boots to keep
+max_kb=65536     # stop writing this boot's file past 64 MB (runaway logging)
+
+cd "$dir" || exit 1
+
+n=$(( $(cat bootcount.txt 2>/dev/null || echo 0) + 1 ))
+echo "$n" > bootcount.txt
+log=$(printf 'boot-%04d.log' "$n")
+echo "$log" > latest.txt
+
+# Drop the oldest so this boot makes $keep at most
+old=$(( $(ls boot-*.log 2>/dev/null | wc -l) - keep + 1 ))
+for f in $(ls boot-*.log 2>/dev/null | sort); do
+    [ "$old" -gt 0 ] || break
+    rm -f "$f"; old=$(( old - 1 ))
+done
+
+journalctl -b -f -o short-precise --no-pager > "$log" 2>&1 &
+jpid=$!
+trap 'kill $jpid 2>/dev/null; wait $jpid; sync; exit 0' TERM INT
+
+# Flush to the card every few seconds, so a power cut loses at most that much
+while kill -0 $jpid 2>/dev/null; do
+    sleep 5 & wait $!
+    sync
+    if [ "$(du -k "$log" | cut -f1)" -gt "$max_kb" ]; then
+        kill $jpid
+        echo "--- ozark-logs: stopped at ${max_kb} KB, see journalctl on the Pi ---" >> "$log"
+        sync
+    fi
+done
+wait

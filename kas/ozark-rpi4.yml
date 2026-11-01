@@ -1,0 +1,64 @@
+# Ozark OS — base build configuration for Raspberry Pi 4 (64-bit), Yocto Scarthgap (5.0 LTS).
+#
+# Build:   ./scripts/build.sh            (wraps kas-container)
+# Lock:    ./scripts/build.sh lock       (pins every layer to an exact commit in ozark-rpi4.lock.yml)
+#
+# Add-on fragments live next to this file and are stacked with ':' — see scripts/build.sh.
+
+header:
+  version: 14
+
+machine: raspberrypi4-64
+distro: ozark
+target: ozark-image
+
+repos:
+  # This repository. No url: kas uses the checkout this file lives in.
+  ozark-os:
+    layers:
+      meta-ozark:
+
+  poky:
+    url: https://git.yoctoproject.org/poky
+    branch: scarthgap
+    layers:
+      meta:
+      meta-poky:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    branch: scarthgap
+    layers:
+      meta-oe:
+      meta-python:
+
+  meta-raspberrypi:
+    url: https://git.yoctoproject.org/meta-raspberrypi
+    branch: scarthgap
+
+  meta-qt5:
+    url: https://github.com/meta-qt5/meta-qt5
+    branch: scarthgap
+
+local_conf_header:
+  ozark-base: |
+    # Images flashed with bmaptool (scripts/flash.sh)
+    IMAGE_FSTYPES = "wic.bz2 wic.bmap"
+
+    # Pi firmware: no rainbow square at power-on
+    DISABLE_SPLASH = "1"
+
+    # Broadcom Wi-Fi/BT firmware on the Pi 4 sits behind this license flag
+    LICENSE_FLAGS_ACCEPTED += "synaptics-killswitch"
+
+    # Delete each recipe's work dir after it builds; saves tens of GB
+    INHERIT += "rm_work"
+
+    # Stop the build cleanly before the disk fills up
+    BB_DISKMON_DIRS = "\
+        STOPTASKS,${TMPDIR},1G,100K \
+        STOPTASKS,${DL_DIR},1G,100K \
+        STOPTASKS,${SSTATE_DIR},1G,100K \
+        HALT,${TMPDIR},100M,1K \
+        HALT,${DL_DIR},100M,1K \
+        HALT,${SSTATE_DIR},100M,1K"

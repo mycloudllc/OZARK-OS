@@ -1,0 +1,76 @@
+From 12e7e100598ed68edac7b4f8b6a7e97745661a04 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 21:27:57 -0500
+Subject: [PATCH] Crop the projection on the GPU, not with videocrop
+
+On the Raspberry Pi the V4L2 hardware decoder's frames, side-cropped by
+videocrop to fit the page, showed a green band down the side (none at
+480p, which only crops top and bottom; wider at 720p, widest at 1080p).
+Show the whole frame instead, scaled to cover the container, and let the
+container clip the overflow. Same visible area and margins, so the phone's
+layout and touch mapping don't change.
+
+Playback start applies the same geometry: it used to resize the widget to
+the container, which kept the overhang's offset and left a strip of
+background along one side.
+---
+ openauto/Projection/GSTVideoOutput.cpp | 29 +++++++++++++++++++++-----
+ 1 file changed, 24 insertions(+), 5 deletions(-)
+
+diff --git a/openauto/Projection/GSTVideoOutput.cpp b/openauto/Projection/GSTVideoOutput.cpp
+index 58776b3..137843c 100644
+--- a/openauto/Projection/GSTVideoOutput.cpp
++++ b/openauto/Projection/GSTVideoOutput.cpp
+@@ -22,6 +22,7 @@
+ #include "OpenautoLog.hpp"
+ #include "h264_stream.h"
+ #include <QTimer>
++#include <algorithm>
+ // these are needed only for pretty printing of data, to be removed
+ #include <sstream>
+ #include <string>
+@@ -292,7 +293,10 @@ void GSTVideoOutput::onStartPlayback()
+     else
+     {
+         OPENAUTO_LOG(info) << "[GSTVideoOutput] Resizing to video container";
+-        videoWidget_->resize(videoContainer_->size());
++        // Same geometry as resize(): the video widget overhangs the container
++        // on both sides. Resizing it to the container's size here kept the
++        // overhang's offset and left a strip of background on the far side.
++        this->resize();
+     }
+     videoWidget_->show();
+     QTimer::singleShot(10000, this, SLOT(dumpDot()));
+@@ -364,10 +368,25 @@ void GSTVideoOutput::resize()
+     
+ 
+     OPENAUTO_LOG(info) << "[GSTVideoOutput] Android Auto is "<< width << "x" << height << ", calculated margins of: " << marginWidth << "x" << marginHeight;
+-    g_object_set(vidCrop_, "top", (int)marginHeight, nullptr);
+-    g_object_set(vidCrop_, "bottom", (int)marginHeight, nullptr);
+-    g_object_set(vidCrop_, "left", (int)marginWidth, nullptr);
+-    g_object_set(vidCrop_, "right", (int)marginWidth, nullptr);
++
++    // Crop on the GPU, not with videocrop: the video item shows the whole
++    // frame, scaled to cover the container, and the container clips what
++    // sticks out. (videocrop's side crop on the Pi's V4L2 decoder buffers
++    // left a green band down the side, wider the more it cropped.) The
++    // visible part is the same as before, so touch mapping is unchanged:
++    // touches reach the container through the video widget, which passes
++    // them up in container coordinates.
++    g_object_set(vidCrop_, "top", 0, nullptr);
++    g_object_set(vidCrop_, "bottom", 0, nullptr);
++    g_object_set(vidCrop_, "left", 0, nullptr);
++    g_object_set(vidCrop_, "right", 0, nullptr);
++    if(videoWidget_ != nullptr)
++    {
++        const double scale = std::max(widthRatio, heightRatio);
++        const int shownWidth = qRound(width * scale);
++        const int shownHeight = qRound(height * scale);
++        videoWidget_->setGeometry((containerWidth - shownWidth) / 2, (containerHeight - shownHeight) / 2, shownWidth, shownHeight);
++    }
+     this->configuration_->setVideoMargins(QRect(0,0,(int)(marginWidth*2), (int)(marginHeight*2)));
+ }
+ 
+-- 
+2.43.0
+

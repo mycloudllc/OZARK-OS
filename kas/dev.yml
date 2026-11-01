@@ -1,0 +1,21 @@
+# Development add-on: serial console, SSH, passwordless root.
+# NEVER ship an image built with this fragment in a vehicle.
+
+header:
+  version: 14
+
+local_conf_header:
+  ozark-dev: |
+    # Serial console on GPIO 14/15 (pins 8/10), 115200 8N1
+    ENABLE_UART = "1"
+
+    EXTRA_IMAGE_FEATURES += "\
+        allow-empty-password \
+        empty-root-password \
+        allow-root-login \
+        post-install-logging \
+        ssh-server-dropbear \
+        tools-debug"
+
+    # Boot-time breakdown: systemd-analyze, systemd-analyze blame
+    IMAGE_INSTALL:append = " systemd-analyze"

@@ -1,0 +1,16 @@
+[Unit]
+Description=PulseAudio sound server (system-wide)
+Documentation=man:pulseaudio(1)
+After=dbus.service bluetooth.service ofono.service
+Wants=bluetooth.service ofono.service
+
+[Service]
+# One server for the whole head unit (Dash, OpenAuto, Bluetooth audio, RGBIC's
+# audio capture) instead of a per-user one: there's no login session here.
+# -n: skip the stock system.pa and only run Ozark's script.
+Environment=LADSPA_PATH=/usr/lib/ladspa
+ExecStart=/usr/bin/pulseaudio --system --daemonize=no --disallow-exit --log-target=journal -n --file=/etc/pulse/ozark.pa
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

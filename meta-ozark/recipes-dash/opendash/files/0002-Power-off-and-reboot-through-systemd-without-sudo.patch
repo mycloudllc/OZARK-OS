@@ -1,0 +1,27 @@
+From 7624e3fa6a6670ced5b500805fbde8d3fd3cbdf2 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Wed, 28 Oct 2026 23:05:10 -0500
+Subject: [PATCH 02/10] Power off and reboot through systemd, without sudo
+
+Ozark OS runs Dash as a system service and has no sudo.
+
+Upstream-Status: Inappropriate [Ozark OS specific]
+---
+ src/app/session.cpp | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index b7b2313..cd5873e 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -157,8 +157,8 @@ Page *Session::Layout::next_enabled_page(Page *page) const
+ }
+ 
+ const char *Session::System::VOLUME_CMD = "amixer set Master %1% --quiet";
+-const char *Session::System::SHUTDOWN_CMD = "sudo shutdown -h now";
+-const char *Session::System::REBOOT_CMD = "sudo shutdown -r now";
++const char *Session::System::SHUTDOWN_CMD = "systemctl poweroff";
++const char *Session::System::REBOOT_CMD = "systemctl reboot";
+ 
+ const char *Session::System::Brightness::AUTO_PLUGIN = "auto";
+ 

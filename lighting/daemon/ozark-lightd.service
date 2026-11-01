@@ -1,0 +1,15 @@
+[Unit]
+Description=Ozark lighting controller (org.ozark.Lighting1)
+After=dbus.service ozark-pulseaudio.service
+
+[Service]
+Type=dbus
+BusName=org.ozark.Lighting1
+ExecStart=/usr/bin/ozark-lightd
+# Looks and settings (port, music sensitivity)
+StateDirectory=ozark-lightd
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

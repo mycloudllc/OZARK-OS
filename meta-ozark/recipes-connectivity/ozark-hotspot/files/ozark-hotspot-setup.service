@@ -1,0 +1,15 @@
+[Unit]
+Description=Prepare the wireless Android Auto hotspot
+# Writes systemd-networkd's config for the hotspot, so it must run first
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target systemd-networkd.service opendash.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ozark-hotspot setup
+
+[Install]
+WantedBy=sysinit.target

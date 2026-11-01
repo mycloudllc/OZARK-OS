@@ -1,0 +1,9 @@
+# Stable name for the Raspberry Pi's display controller (vc4), regardless of
+# whether the kernel numbers it card0 or card1.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="vc4-drm", SYMLINK+="dri/ozark-display"
+
+# Let systemd see framebuffers as devices. meta-raspberrypi makes the boot
+# splash (psplash-start.service) wait for sys-devices-platform-gpu-graphics-fb0.device,
+# but nothing tags fb devices for systemd, so that unit never appears: the
+# splash never shows and Dash, ordered after it, waits out a 90 s timeout.
+SUBSYSTEM=="graphics", KERNEL=="fb[0-9]*", TAG+="systemd"

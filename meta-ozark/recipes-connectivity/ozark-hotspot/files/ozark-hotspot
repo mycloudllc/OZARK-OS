@@ -1,0 +1,159 @@
+#!/bin/sh
+# Wi-Fi hotspot for wireless Android Auto.
+#
+# The phone pairs over Bluetooth, Dash sends it this hotspot's name and key,
+# the phone joins it and connects back to Dash. Unless SHARE is on, there is
+# no internet behind it, and the phone keeps using mobile data.
+#
+#   ozark-hotspot setup   before networking and Dash: settings, configs
+#   ozark-hotspot run     the access point itself (hostapd, foreground)
+#
+# Settings live in /etc/ozark/hotspot.conf, created on first boot with a name
+# from the Pi's serial number and a random key unique to this unit:
+#   IFACE     Wi-Fi interface for the hotspot (wlan0; e.g. wlan1 for a
+#             second adapter, leaving wlan0 free for other networks)
+#   SSID, PASSWORD
+#   COUNTRY   regulatory country code; decides the allowed channels
+#   CHANNEL   36-48 or 149-165 = 5 GHz (best for video), 1-11 = 2.4 GHz
+#   SHARE     yes: share the radio's internet (Ethernet or LTE) with devices
+#             on the hotspot (NAT, DNS through the radio)
+#
+# Settings > Network in Dash edits these through ozark-net.
+
+conf=/etc/ozark/hotspot.conf
+run=/run/ozark-hotspot
+address=10.42.0.1
+
+# n random characters from the given set. (dd, not head -c: the image's
+# busybox is built without head -c, which then prints nothing.)
+random() {
+    tr -dc "$1" < /dev/urandom | dd bs=1 count="$2" 2>/dev/null
+}
+
+setup() {
+    if [ ! -f "$conf" ]; then
+        serial=$(tr -d '\0' < /proc/device-tree/serial-number 2>/dev/null)
+        [ -n "$serial" ] || serial=$(random '0-9A-F' 4)
+        id=$(echo "$serial" | tail -c 5 | tr 'a-f' 'A-F')
+        mkdir -p "$(dirname "$conf")"
+        cat > "$conf.tmp" <<CONF
+# Wireless Android Auto hotspot (see /usr/sbin/ozark-hotspot)
+IFACE=wlan0
+SSID=TrailCommand-$id
+PASSWORD=
+COUNTRY=US
+CHANNEL=36
+SHARE=no
+CONF
+        chmod 600 "$conf.tmp"
+        mv "$conf.tmp" "$conf"
+    fi
+    . "$conf"
+
+    # A new unit, or a key hostapd would reject (WPA2 needs 8-63 characters):
+    # make one. The phone gets it over Bluetooth; nobody types it.
+    if [ ${#PASSWORD} -lt 8 ] || [ ${#PASSWORD} -gt 63 ]; then
+        PASSWORD=$(random 'A-HJ-NP-Za-km-z2-9' 16)
+        [ ${#PASSWORD} -eq 16 ] || { echo "could not generate a hotspot key" >&2; exit 1; }
+        sed -i "s/^PASSWORD=.*/PASSWORD=$PASSWORD/" "$conf"
+    fi
+
+    mkdir -p "$run"
+    chmod 700 "$run"
+
+    if [ "$CHANNEL" -gt 14 ]; then
+        band="hw_mode=a
+ieee80211ac=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]"
+    else
+        band="hw_mode=g"
+    fi
+    cat > "$run/hostapd.conf" <<HOSTAPD
+interface=$IFACE
+driver=nl80211
+ssid=$SSID
+country_code=$COUNTRY
+ieee80211d=1
+channel=$CHANNEL
+$band
+ieee80211n=1
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=$PASSWORD
+HOSTAPD
+
+    # Sharing: NAT out of whichever link has the default route, and DNS
+    # through systemd-resolved, which also listens on the hotspot address
+    # (resolved.conf.d/ozark-hotspot.conf)
+    if [ "$SHARE" = yes ]; then
+        masquerade="IPMasquerade=ipv4"
+        dhcp_dns="EmitDNS=yes
+DNS=$address"
+    else
+        masquerade=
+        dhcp_dns="EmitDNS=no"
+    fi
+
+    # The hotspot's address, and DHCP for the phone (systemd-networkd reads /run)
+    mkdir -p /run/systemd/network
+    cat > /run/systemd/network/40-ozark-hotspot.network <<NETWORK
+[Match]
+Name=$IFACE
+
+[Link]
+# nothing at boot waits for the hotspot
+RequiredForOnline=no
+
+[Network]
+Address=$address/24
+DHCPServer=yes
+ConfigureWithoutCarrier=yes
+LinkLocalAddressing=no
+IPv6AcceptRA=no
+$masquerade
+
+[DHCPServer]
+PoolOffset=10
+PoolSize=40
+$dhcp_dns
+NETWORK
+
+    # Dash: which interface to advertise, and the network the phone is sent
+    echo "OPENAUTO_WIFI_INTERFACE=$IFACE" > "$run/opendash.env"
+    ini=/root/openauto.ini
+    mkdir -p "$(dirname "$ini")"
+    touch "$ini"
+    awk -v ssid="$SSID" -v key="$PASSWORD" '
+        /^\[/ { wifi = ($0 == "[WiFi]") }
+        wifi && /^(SSID|Password)=/ { next }
+        { print }
+        wifi && /^\[/ { print "SSID=" ssid; print "Password=" key; done = 1 }
+        END { if (!done) { print "[WiFi]"; print "SSID=" ssid; print "Password=" key } }
+    ' "$ini" > "$ini.tmp" && mv "$ini.tmp" "$ini"
+    chmod 600 "$ini"
+}
+
+start() {
+    . "$conf"
+    # The Wi-Fi driver loads a few seconds into boot
+    i=0
+    while [ ! -d "/sys/class/net/$IFACE" ]; do
+        i=$((i + 1))
+        [ $i -le 30 ] || { echo "no $IFACE: no Wi-Fi adapter?" >&2; exit 1; }
+        sleep 1
+    done
+    for r in /sys/class/rfkill/rfkill*; do
+        [ "$(cat "$r/type" 2>/dev/null)" = wlan ] && echo 0 > "$r/soft"
+    done
+    iw reg set "$COUNTRY" 2>/dev/null
+    exec hostapd "$run/hostapd.conf"
+}
+
+case "$1" in
+    setup) setup ;;
+    run) start ;;
+    *) echo "usage: $0 setup|run" >&2; exit 2 ;;
+esac

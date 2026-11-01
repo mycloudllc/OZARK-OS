@@ -1,0 +1,519 @@
+From e330dee392e6caeb1ff0c735a1d054c30568e864 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 23:13:21 -0500
+Subject: [PATCH] Touchscreen support for plugins: keyboard, dialog fit, input
+ styles
+
+- TouchInput (installed on the application): tapping any editable text box,
+  including plugins' QLineEdits and spin boxes, opens the on-screen
+  keyboard, titled from the box's form label and on the numbers layer for
+  numeric fields. Plain QDialogs (plugins') are sized to their contents
+  and centred with a margin, instead of Qt's default of at most 2/3 of the
+  screen, which clipped them and pushed tall ones against the top.
+- TextEntry::edit() opens the keyboard for any caller; Dialog::set_area()
+  lets a dialog owned by a plugin's dialog lay itself out over the main
+  window. Closing a Dash dialog activates the window it was opened over,
+  not always the main window (which hid a plugin's dialog behind it).
+- Spin boxes and drop-downs are styled like text boxes: unstyled, they
+  took the palette's base colour, the theme accent (black on black).
+- Keyboard: the last symbols row no longer overlaps backspace.
+---
+ assets/icons/dark/expand_more.svg   |   4 ++
+ assets/resources.qrc                |   1 +
+ assets/stylesheets/dark.qss         |  52 ++++++++++++++
+ assets/stylesheets/light.qss        |  52 ++++++++++++++
+ include/app/widgets/dialog.hpp      |   5 ++
+ include/app/widgets/text_entry.hpp  |   7 ++
+ include/app/widgets/touch_input.hpp |  31 ++++++++
+ src/app/widgets/dialog.cpp          |  13 ++--
+ src/app/widgets/text_entry.cpp      |  36 ++++++----
+ src/app/widgets/touch_input.cpp     | 108 ++++++++++++++++++++++++++++
+ src/app/window.cpp                  |   4 ++
+ 11 files changed, 296 insertions(+), 17 deletions(-)
+ create mode 100644 assets/icons/dark/expand_more.svg
+ create mode 100644 include/app/widgets/touch_input.hpp
+ create mode 100644 src/app/widgets/touch_input.cpp
+
+diff --git a/assets/icons/dark/expand_more.svg b/assets/icons/dark/expand_more.svg
+new file mode 100644
+index 0000000..6cc48a5
+--- /dev/null
++++ b/assets/icons/dark/expand_more.svg
+@@ -0,0 +1,4 @@
++<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
++    <path fill="none" d="M24 24H0V0h24v24z"/>
++    <path fill="rgb(255, 255, 255)" d="M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6-1.41-1.41z"/>
++</svg>
+diff --git a/assets/resources.qrc b/assets/resources.qrc
+index a88456a..98a4735 100644
+--- a/assets/resources.qrc
++++ b/assets/resources.qrc
+@@ -53,6 +53,7 @@
+         <file>icons/defrost.svg</file>
+         <file>icons/light/check.svg</file>
+         <file>icons/dark/check.svg</file>
++        <file>icons/dark/expand_more.svg</file>
+         <file>stylesheets/light.qss</file>
+         <file>stylesheets/dark.qss</file>
+         <file>logo.png</file>
+diff --git a/assets/stylesheets/dark.qss b/assets/stylesheets/dark.qss
+index 025ff04..2dcbe5f 100644
+--- a/assets/stylesheets/dark.qss
++++ b/assets/stylesheets/dark.qss
+@@ -249,6 +249,58 @@ QScrollBar::sub-page {
+     background: none;
+ }
+ 
++/* Spin boxes look like text boxes; without a rule they took the palette's
++   base colour, which is the theme accent (black text on black by default) */
++QAbstractSpinBox {
++    border: none;
++    border-top-left-radius: 6px;
++    border-top-right-radius: 6px;
++    padding: 6px 12px;
++    color: rgb(255, 255, 255);
++    background-color: rgb(25, 25, 25);
++    border-bottom: 1px solid rgb(66, 66, 66);
++}
++
++QAbstractSpinBox::up-button,
++QAbstractSpinBox::down-button {
++    width: 32px;
++}
++
++/* Drop-downs (plugins' dialogs) look like text boxes too */
++QComboBox {
++    border: none;
++    border-top-left-radius: 6px;
++    border-top-right-radius: 6px;
++    padding: 6px 12px;
++    color: rgb(255, 255, 255);
++    background-color: rgb(25, 25, 25);
++    border-bottom: 1px solid rgb(66, 66, 66);
++    selection-background-color: transparent;
++    selection-color: rgb(255, 255, 255);
++}
++
++QComboBox::drop-down,
++QDateTimeEdit::drop-down {
++    border: none;
++    width: 32px;
++}
++
++QComboBox::down-arrow,
++QDateTimeEdit::down-arrow {
++    image: url(:/icons/dark/expand_more.svg);
++    width: 24px;
++    height: 24px;
++}
++
++QComboBox QAbstractItemView {
++    color: rgb(255, 255, 255);
++    background-color: rgb(46, 46, 46);
++    selection-color: rgb(255, 255, 255);
++    selection-background-color: rgb(66, 66, 66);
++    border: 1px solid rgb(66, 66, 66);
++    outline: 0;
++}
++
+ QLineEdit {
+     border-top-left-radius: 6px;
+     border-top-right-radius: 6px;
+diff --git a/assets/stylesheets/light.qss b/assets/stylesheets/light.qss
+index 016aacc..5f63893 100644
+--- a/assets/stylesheets/light.qss
++++ b/assets/stylesheets/light.qss
+@@ -249,6 +249,58 @@ QScrollBar::sub-page {
+     background: none;
+ }
+ 
++/* Spin boxes look like text boxes; without a rule they took the palette's
++   base colour, which is the theme accent (black text on black by default) */
++QAbstractSpinBox {
++    border: none;
++    border-top-left-radius: 6px;
++    border-top-right-radius: 6px;
++    padding: 6px 12px;
++    color: rgba(0, 0, 0, 222);
++    background-color: rgb(231, 231, 231);
++    border-bottom: 1px solid rgb(189, 189, 189);
++}
++
++QAbstractSpinBox::up-button,
++QAbstractSpinBox::down-button {
++    width: 32px;
++}
++
++/* Drop-downs (plugins' dialogs) look like text boxes too */
++QComboBox {
++    border: none;
++    border-top-left-radius: 6px;
++    border-top-right-radius: 6px;
++    padding: 6px 12px;
++    color: rgba(0, 0, 0, 222);
++    background-color: rgb(231, 231, 231);
++    border-bottom: 1px solid rgb(189, 189, 189);
++    selection-background-color: transparent;
++    selection-color: rgba(0, 0, 0, 222);
++}
++
++QComboBox::drop-down,
++QDateTimeEdit::drop-down {
++    border: none;
++    width: 32px;
++}
++
++QComboBox::down-arrow,
++QDateTimeEdit::down-arrow {
++    image: url(:/icons/expand_more.svg);
++    width: 24px;
++    height: 24px;
++}
++
++QComboBox QAbstractItemView {
++    color: rgba(0, 0, 0, 222);
++    background-color: rgb(255, 255, 255);
++    selection-color: rgba(0, 0, 0, 222);
++    selection-background-color: rgb(189, 189, 189);
++    border: 1px solid rgb(189, 189, 189);
++    outline: 0;
++}
++
+ QLineEdit {
+     border-top-left-radius: 6px;
+     border-top-right-radius: 6px;
+diff --git a/include/app/widgets/dialog.hpp b/include/app/widgets/dialog.hpp
+index b6307ab..b9bb43d 100644
+--- a/include/app/widgets/dialog.hpp
++++ b/include/app/widgets/dialog.hpp
+@@ -24,6 +24,9 @@ class Dialog : public QDialog {
+     void set_button(QPushButton *button);
+     // Label of the button that just closes the dialog ("cancel" by default)
+     void set_cancel_text(QString text);
++    // Size and centre against this widget instead of the parent (e.g. a
++    // keyboard owned by a plugin's dialog, laid out over the whole window)
++    void set_area(QWidget *area) { this->area_ = area; }
+ 
+    protected:
+     Arbiter &arbiter;
+@@ -40,6 +43,8 @@ class Dialog : public QDialog {
+     QTimer *timer;
+     QPushButton *cancel = nullptr;
+     QScrollArea *scroll = nullptr;
++    QWidget *area_ = nullptr;
++    QWidget *area() const { return this->area_ ? this->area_ : this->parentWidget(); }
+     bool fullscreen;
+ 
+     QWidget *content_widget();
+diff --git a/include/app/widgets/text_entry.hpp b/include/app/widgets/text_entry.hpp
+index c781f53..0004378 100644
+--- a/include/app/widgets/text_entry.hpp
++++ b/include/app/widgets/text_entry.hpp
+@@ -3,6 +3,7 @@
+ #include <QtWidgets>
+ 
+ class Arbiter;
++class Dialog;
+ 
+ // On-screen keyboard that types into a line edit: letters (with shift) and a
+ // numbers/symbols layer, for touchscreens without a physical keyboard.
+@@ -38,6 +39,12 @@ class TextEntry : public QPushButton {
+     void set_value(const QString &value);
+     void set_placeholder(const QString &placeholder);
+ 
++    // Opens the keyboard dialog (deleted when closed): done(text) when the user
++    // taps "done". owner keeps it in front of a modal dialog; it's laid out
++    // over the main window.
++    static Dialog *edit(Arbiter &arbiter, QWidget *owner, const QString &title, const QString &value,
++                     bool numbers, std::function<void(const QString &)> done);
++
+    signals:
+     void edited(const QString &value);
+ 
+diff --git a/include/app/widgets/touch_input.hpp b/include/app/widgets/touch_input.hpp
+new file mode 100644
+index 0000000..c70895f
+--- /dev/null
++++ b/include/app/widgets/touch_input.hpp
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <QObject>
++#include <QPointer>
++
++class Arbiter;
++class QDialog;
++class QLineEdit;
++
++// Makes ordinary Qt widgets, the kind plugins use, work on a touchscreen with
++// no keyboard or window manager. Installed on the application:
++// - tapping an editable text box opens the on-screen keyboard for it;
++// - a plain dialog (not one of Dash's own) is sized to fit its contents and
++//   centred on the screen, instead of Qt's default of at most 2/3 of the
++//   screen, which clipped their contents and pushed tall ones to the top.
++class TouchInput : public QObject {
++    Q_OBJECT
++
++   public:
++    TouchInput(Arbiter &arbiter, QObject *parent = nullptr);
++
++   protected:
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++   private:
++    void edit(QLineEdit *line);
++    void fit(QDialog *dialog);
++
++    Arbiter &arbiter;
++    QPointer<QLineEdit> editing;
++};
+diff --git a/src/app/widgets/dialog.cpp b/src/app/widgets/dialog.cpp
+index fc498f8..c5e7866 100644
+--- a/src/app/widgets/dialog.cpp
++++ b/src/app/widgets/dialog.cpp
+@@ -48,7 +48,7 @@ void Dialog::fit_body()
+ {
+     if (!this->scroll || !this->scroll->widget())
+         return;
+-    QWidget *parent = this->parentWidget();
++    QWidget *parent = this->area();
+     if (!parent)
+         return;
+     const int margin = std::ceil(24 * this->arbiter.layout().scale) * 2;
+@@ -132,7 +132,7 @@ void Dialog::set_position()
+     if (QWidget *parent = this->parentWidget()) {
+         QPoint point;
+         if (this->fullscreen) {
+-            point = parent->geometry().center() - this->rect().center();
++            point = this->area()->geometry().center() - this->rect().center();
+         }
+         else {
+             QWidget *window = parent->window();
+@@ -173,7 +173,7 @@ void Dialog::showEvent(QShowEvent *event)
+     QWidget::showEvent(event);
+ 
+     if (this->fullscreen) {
+-        if (QWidget *parent = this->parentWidget()) {
++        if (QWidget *parent = this->area()) {
+             int margin = std::ceil(24 * this->arbiter.layout().scale) * 2;
+             this->setFixedWidth(std::min(this->width(), parent->width() - margin));
+             this->setFixedHeight(std::min(this->height(), parent->height() - margin));
+@@ -189,8 +189,11 @@ void Dialog::closeEvent(QCloseEvent *)
+     // Focus should be returned to main dash window instead, so that shortcuts work
+     // and that dash remains fullscreen
+     //
+-    // Tells the main window to grab focus
+-    this->arbiter.window()->activateWindow();
++    // Tells the window this dialog opened over to grab focus: the main window,
++    // or e.g. a plugin's dialog under a keyboard. (Activating the main window
++    // then raised it over that dialog, which seemed to vanish.)
++    QWidget *owner = this->parentWidget() ? this->parentWidget()->window() : this->arbiter.window();
++    owner->activateWindow();
+ }
+ 
+ bool Dialog::eventFilter(QObject *object, QEvent *event)
+diff --git a/src/app/widgets/text_entry.cpp b/src/app/widgets/text_entry.cpp
+index f901b1e..fcdd23a 100644
+--- a/src/app/widgets/text_entry.cpp
++++ b/src/app/widgets/text_entry.cpp
+@@ -44,6 +44,8 @@ void Keyboard::build()
+     for (int r = 0; r < rows.size(); r++) {
+         const QString &chars = rows[r];
+         int col = 10 - chars.size();
++        if (r == 3 && this->symbols)
++            col = 1;  // leave columns 17-19 to backspace
+         if (r == 3 && !this->symbols) {
+             key(this->shift ? "SHIFT" : "shift", r, 0, 3, [this] {
+                 this->shift = !this->shift;
+@@ -111,30 +113,40 @@ void TextEntry::update_text()
+ 
+ void TextEntry::open_editor()
+ {
+-    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    TextEntry::edit(this->arbiter, this->arbiter.window(), this->title, this->value_, this->kind == Number,
++                    [this](const QString &text) {
++        this->set_value(text);
++        emit edited(this->value_);
++    });
++}
++
++Dialog *TextEntry::edit(Arbiter &arbiter, QWidget *owner, const QString &title, const QString &value,
++                     bool numbers, std::function<void(const QString &)> done)
++{
++    auto dialog = new Dialog(arbiter, true, owner);
+     dialog->setAttribute(Qt::WA_DeleteOnClose);
+-    dialog->set_title(this->title);
++    dialog->set_area(arbiter.window());
++    dialog->set_title(title);
+ 
+     auto body = new QWidget(dialog);
+     auto layout = new QVBoxLayout(body);
+     layout->setContentsMargins(0, 8, 0, 0);
+     // The person editing is the owner: show what they type, passwords too
+-    auto line = new QLineEdit(this->value_, body);
+-    line->setFont(this->arbiter.forge().font(16));
+-    line->setMinimumHeight(40 * this->arbiter.layout().scale);
++    auto line = new QLineEdit(value, body);
++    line->setProperty("ozark_keyboard", true);  // TouchInput: already has a keyboard
++    line->setFont(arbiter.forge().font(16));
++    line->setMinimumHeight(40 * arbiter.layout().scale);
+     line->setStyleSheet("QLineEdit { background-color: palette(window); color: palette(text); "
+                         "border: 1px solid palette(mid); border-radius: 4px; padding: 0 8px; }");
+     layout->addWidget(line);
+-    layout->addWidget(new Keyboard(this->arbiter, line, this->kind == Number, body));
++    layout->addWidget(new Keyboard(arbiter, line, numbers, body));
+     dialog->set_body(body);
+ 
+-    auto done = new QPushButton("done");
+-    connect(done, &QPushButton::clicked, [this, line] {
+-        this->set_value(line->text().trimmed());
+-        emit edited(this->value_);
+-    });
+-    dialog->set_button(done);
++    auto ok = new QPushButton("done");
++    QObject::connect(ok, &QPushButton::clicked, [line, done] { done(line->text().trimmed()); });
++    dialog->set_button(ok);
+     dialog->open();
+     line->setFocus();
+     line->end(false);
++    return dialog;
+ }
+diff --git a/src/app/widgets/touch_input.cpp b/src/app/widgets/touch_input.cpp
+new file mode 100644
+index 0000000..811c0f3
+--- /dev/null
++++ b/src/app/widgets/touch_input.cpp
+@@ -0,0 +1,108 @@
++#include <cmath>
++
++#include <QAbstractSpinBox>
++#include <QDialog>
++#include <QDoubleValidator>
++#include <QEvent>
++#include <QFormLayout>
++#include <QIntValidator>
++#include <QLabel>
++#include <QLineEdit>
++#include <QMouseEvent>
++#include <QTimer>
++
++#include "app/arbiter.hpp"
++#include "app/widgets/dialog.hpp"
++#include "app/widgets/text_entry.hpp"
++
++#include "app/widgets/touch_input.hpp"
++
++namespace {
++// The label a form shows next to a field, for the keyboard's title
++QString form_label(QWidget *field)
++{
++    for (QWidget *w = field; w && w->parentWidget(); w = w->parentWidget()) {
++        if (auto form = qobject_cast<QFormLayout *>(w->parentWidget()->layout())) {
++            if (auto label = qobject_cast<QLabel *>(form->labelForField(w)))
++                return label->text().remove('&');
++        }
++        for (QFormLayout *form : w->parentWidget()->findChildren<QFormLayout *>()) {
++            if (auto label = qobject_cast<QLabel *>(form->labelForField(w)))
++                return label->text().remove('&');
++        }
++        if (w->isWindow())
++            break;
++    }
++    return QString();
++}
++}  // namespace
++
++TouchInput::TouchInput(Arbiter &arbiter, QObject *parent)
++    : QObject(parent)
++    , arbiter(arbiter)
++{
++}
++
++bool TouchInput::eventFilter(QObject *watched, QEvent *event)
++{
++    if (event->type() == QEvent::MouseButtonRelease) {
++        auto line = qobject_cast<QLineEdit *>(watched);
++        if (line && line->isEnabled() && !line->isReadOnly() && !line->property("ozark_keyboard").toBool() &&
++            line->rect().contains(static_cast<QMouseEvent *>(event)->pos()))
++            QTimer::singleShot(0, line, [this, line] { this->edit(line); });
++    }
++    else if (event->type() == QEvent::Show) {
++        // Dash's own dialogs (and the OSD) are frameless and place themselves
++        auto dialog = qobject_cast<QDialog *>(watched);
++        if (dialog && dialog->isWindow() && !(dialog->windowFlags() & Qt::FramelessWindowHint))
++            QTimer::singleShot(0, dialog, [this, dialog] { this->fit(dialog); });
++    }
++    return QObject::eventFilter(watched, event);
++}
++
++void TouchInput::edit(QLineEdit *line)
++{
++    if (this->editing)
++        return;
++    this->editing = line;
++
++    auto spin = qobject_cast<QAbstractSpinBox *>(line->parentWidget());
++    const QValidator *validator = line->validator();
++    const bool numbers = spin || qobject_cast<const QIntValidator *>(validator) ||
++                         qobject_cast<const QDoubleValidator *>(validator) ||
++                         (line->inputMethodHints() & (Qt::ImhDigitsOnly | Qt::ImhFormattedNumbersOnly | Qt::ImhPreferNumbers));
++    QString title = form_label(spin ? static_cast<QWidget *>(spin) : line);
++    if (title.isEmpty())
++        title = line->placeholderText();
++    if (title.isEmpty())
++        title = "Enter text";
++
++    // The text box may be gone by the time "done" is tapped (its dialog closed)
++    QPointer<QLineEdit> target(line);
++    QPointer<QAbstractSpinBox> target_spin(spin);
++    Dialog *dialog = TextEntry::edit(this->arbiter, line->window(), title, line->text(), numbers, [target, target_spin](const QString &text) {
++        if (!target)
++            return;
++        QLineEdit *line = target;
++        QAbstractSpinBox *spin = target_spin;
++        line->setText(text);
++        if (spin)
++            spin->interpretText();
++        QMetaObject::invokeMethod(line, "editingFinished");
++    });
++    // The keyboard dialog deletes itself on close: the next tap may open one
++    connect(dialog, &QObject::destroyed, this, [this] { this->editing = nullptr; });
++}
++
++void TouchInput::fit(QDialog *dialog)
++{
++    QWidget *window = this->arbiter.window();
++    if (!dialog->isVisible() || !window)
++        return;
++    const int margin = std::ceil(24 * this->arbiter.layout().scale);
++    const QRect room = window->geometry().adjusted(margin, margin, -margin, -margin);
++    const QSize size = dialog->sizeHint().expandedTo(dialog->minimumSizeHint()).boundedTo(room.size());
++    QRect frame(QPoint(), size);
++    frame.moveCenter(room.center());
++    dialog->setGeometry(frame);
++}
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index f39b5d2..b24c706 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -7,6 +7,7 @@
+ #include "app/widgets/dialog.hpp"
+ 
+ #include "app/widgets/osd.hpp"
++#include "app/widgets/touch_input.hpp"
+ #include "app/window.hpp"
+ 
+ Dash::NavRail::NavRail()
+@@ -174,6 +175,9 @@ MainWindow::MainWindow(QRect geometry)
+ 
+     new Osd(this->arbiter, this);
+ 
++    // On-screen keyboard and dialog sizing for plain Qt widgets (plugins)
++    qApp->installEventFilter(new TouchInput(this->arbiter, this));
++
+     if (this->arbiter.layout().fullscreen.on_start)
+         this->arbiter.set_fullscreen(true);
+ }
+-- 
+2.43.0
+

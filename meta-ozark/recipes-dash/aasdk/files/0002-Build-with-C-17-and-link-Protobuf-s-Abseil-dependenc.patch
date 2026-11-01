@@ -1,0 +1,45 @@
+From 3c0313bb926afb53467f8ca96f90a1f2c41d9a5b Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Wed, 28 Oct 2026 21:40:18 -0500
+Subject: [PATCH 2/2] Build with C++17 and link Protobuf's Abseil dependencies
+
+Protobuf 22+ needs Abseil, which Yocto builds as C++17; mixing standards
+changes absl::string_view and breaks linking.
+
+Upstream-Status: Inappropriate [Yocto Scarthgap toolchain specific]
+---
+ CMakeLists.txt                   |  2 +-
+ cmake_modules/FindProtobuf.cmake | 11 +++++++++++
+ 2 files changed, 12 insertions(+), 1 deletion(-)
+ create mode 100644 cmake_modules/FindProtobuf.cmake
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 86de9bf..4acb632 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -37,7 +37,7 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${base_directory}/lib)
+ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${base_directory}/bin)
+ set(EXECUTABLE_OUTPUT_PATH ${base_directory}/bin)
+ 
+-SET(CMAKE_CXX_STANDARD 14)
++SET(CMAKE_CXX_STANDARD 17)
+ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${PROJECT_SOURCE_DIR}/cmake_modules/")
+ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS_INIT} -fPIC -Wall -pedantic")
+ set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
+diff --git a/cmake_modules/FindProtobuf.cmake b/cmake_modules/FindProtobuf.cmake
+new file mode 100644
+index 0000000..b4d27ab
+--- /dev/null
++++ b/cmake_modules/FindProtobuf.cmake
+@@ -0,0 +1,11 @@
++# Protobuf 22+ (Yocto Scarthgap ships 4.25) splits its runtime into Abseil
++# libraries that CMake's stock FindProtobuf does not link. Keep the stock
++# module for protoc and protobuf_generate_cpp, and take the libraries from
++# protobuf.pc, which lists the Abseil dependencies.
++include(${CMAKE_ROOT}/Modules/FindProtobuf.cmake)
++
++find_package(PkgConfig REQUIRED)
++pkg_check_modules(PROTOBUF_PC REQUIRED IMPORTED_TARGET GLOBAL protobuf)
++
++set(Protobuf_LIBRARIES PkgConfig::PROTOBUF_PC)
++set(PROTOBUF_LIBRARIES PkgConfig::PROTOBUF_PC)

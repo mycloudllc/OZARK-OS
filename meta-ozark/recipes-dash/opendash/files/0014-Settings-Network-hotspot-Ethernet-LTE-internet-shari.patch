@@ -1,0 +1,714 @@
+From 1b771fbda8f38b765f35f4d858c890c3ead6ff11 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 20:29:40 -0500
+Subject: [PATCH] Settings > Network: hotspot, Ethernet, LTE, internet sharing
+
+A Network tab for the Ozark OS network settings, all read and changed
+through the ozark-net command:
+- Hotspot (wireless Android Auto): name, password, band, country, and
+  sharing the radio's internet with devices on it. A new name or password
+  is also handed to OpenAuto, so phones get it without a restart.
+- Ethernet: automatic (DHCP) or static address, gateway and DNS.
+- LTE (ModemManager): on/off, APN, SIM PIN; status shows the carrier,
+  technology, signal and address.
+Status refreshes every 3 s while the tab is on screen.
+
+TextEntry and Keyboard: text settings on a touchscreen with no physical
+keyboard. A TextEntry shows its value; tapping it opens a dialog with an
+on-screen keyboard (letters with shift, numbers and symbols).
+---
+ include/app/pages/network_settings.hpp |  73 +++++
+ include/app/widgets/text_entry.hpp     |  53 ++++
+ src/app/pages/network_settings.cpp     | 372 +++++++++++++++++++++++++
+ src/app/pages/settings.cpp             |   2 +
+ src/app/widgets/text_entry.cpp         | 139 +++++++++
+ 5 files changed, 639 insertions(+)
+ create mode 100644 include/app/pages/network_settings.hpp
+ create mode 100644 include/app/widgets/text_entry.hpp
+ create mode 100644 src/app/pages/network_settings.cpp
+ create mode 100644 src/app/widgets/text_entry.cpp
+
+diff --git a/include/app/pages/network_settings.hpp b/include/app/pages/network_settings.hpp
+new file mode 100644
+index 0000000..f7cc6d4
+--- /dev/null
++++ b/include/app/pages/network_settings.hpp
+@@ -0,0 +1,73 @@
++#pragma once
++
++#include <functional>
++
++#include <QMap>
++#include <QtWidgets>
++
++class Arbiter;
++class Selector;
++class Switch;
++class TextEntry;
++
++// Settings > Network: the Wi-Fi hotspot (wireless Android Auto, and sharing
++// the internet with devices on it), Ethernet and LTE. Reads and changes
++// everything through the ozark-net command (meta-ozark ozark-network).
++class NetworkSettingsTab : public QWidget {
++    Q_OBJECT
++
++   public:
++    NetworkSettingsTab(Arbiter &arbiter, QWidget *parent = nullptr);
++
++   protected:
++    void showEvent(QShowEvent *event) override;
++    void hideEvent(QHideEvent *event) override;
++
++   private:
++    QWidget *settings_widget();
++    QWidget *row(const QString &label, QWidget *control, bool stretch = false);
++    QLabel *heading(const QString &text);
++    QPushButton *apply_button(const QString &text, std::function<void()> apply);
++
++    // Runs ozark-net; done(ok, message) gets stderr's last line on failure
++    void run(const QStringList &args, std::function<void(bool, const QString &)> done);
++    void refresh();
++    void show_status(const QMap<QString, QString> &status);
++    void fill_fields(const QMap<QString, QString> &status);
++    void set_busy(bool busy);
++    void report(bool ok, const QString &message);
++
++    void apply_hotspot();
++    void apply_ethernet();
++    void apply_lte();
++
++    Arbiter &arbiter;
++    QTimer *timer;
++    bool filled = false;
++    bool busy = false;
++    bool loading = false;
++
++    QLabel *hotspot_state;
++    TextEntry *ssid;
++    TextEntry *password;
++    Selector *band;
++    TextEntry *country;
++    Switch *share;
++    QString channel;
++
++    QLabel *ethernet_state;
++    Selector *ethernet_mode;
++    QWidget *static_rows;
++    TextEntry *ethernet_address;
++    TextEntry *ethernet_gateway;
++    TextEntry *ethernet_dns;
++
++    QLabel *lte_state;
++    Switch *lte_enabled;
++    TextEntry *apn;
++    TextEntry *pin;
++
++    QLabel *internet;
++    QLabel *result;
++    QList<QPushButton *> buttons;
++};
+diff --git a/include/app/widgets/text_entry.hpp b/include/app/widgets/text_entry.hpp
+new file mode 100644
+index 0000000..c781f53
+--- /dev/null
++++ b/include/app/widgets/text_entry.hpp
+@@ -0,0 +1,53 @@
++#pragma once
++
++#include <QtWidgets>
++
++class Arbiter;
++
++// On-screen keyboard that types into a line edit: letters (with shift) and a
++// numbers/symbols layer, for touchscreens without a physical keyboard.
++class Keyboard : public QWidget {
++    Q_OBJECT
++
++   public:
++    Keyboard(Arbiter &arbiter, QLineEdit *target, bool numbers_first = false, QWidget *parent = nullptr);
++
++   private:
++    void build();
++    void type(const QString &text);
++
++    Arbiter &arbiter;
++    QLineEdit *target;
++    QGridLayout *grid;
++    bool symbols;
++    bool shift = false;
++};
++
++// A setting typed in on the touchscreen. Shows the value (dots for a
++// password); tapping it opens a dialog with a Keyboard. edited() fires when
++// the user taps "done".
++class TextEntry : public QPushButton {
++    Q_OBJECT
++
++   public:
++    enum Kind { Text, Password, Number };
++
++    TextEntry(Arbiter &arbiter, const QString &title, Kind kind = Text, QWidget *parent = nullptr);
++
++    QString value() const { return this->value_; }
++    void set_value(const QString &value);
++    void set_placeholder(const QString &placeholder);
++
++   signals:
++    void edited(const QString &value);
++
++   private:
++    void open_editor();
++    void update_text();
++
++    Arbiter &arbiter;
++    QString title;
++    Kind kind;
++    QString value_;
++    QString placeholder;
++};
+diff --git a/src/app/pages/network_settings.cpp b/src/app/pages/network_settings.cpp
+new file mode 100644
+index 0000000..84ac8fb
+--- /dev/null
++++ b/src/app/pages/network_settings.cpp
+@@ -0,0 +1,372 @@
++#include "app/arbiter.hpp"
++#include "app/config.hpp"
++#include "app/widgets/selector.hpp"
++#include "app/widgets/switch.hpp"
++#include "app/widgets/text_entry.hpp"
++
++#include "app/pages/network_settings.hpp"
++
++namespace {
++const char *kTool = "/usr/sbin/ozark-net";
++const QString kBand5 = "5 GHz";
++const QString kBand24 = "2.4 GHz";
++const QString kDhcp = "automatic (DHCP)";
++const QString kStatic = "static";
++
++QString interface_name(const QString &iface)
++{
++    if (iface.isEmpty())
++        return "none";
++    if (iface.startsWith("eth") || iface.startsWith("en"))
++        return "Ethernet";
++    if (iface.startsWith("wwan") || iface.startsWith("ww"))
++        return "LTE";
++    if (iface.startsWith("wl"))
++        return "Wi-Fi";
++    return iface;
++}
++}  // namespace
++
++NetworkSettingsTab::NetworkSettingsTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++    , timer(new QTimer(this))
++{
++    auto layout = new QVBoxLayout(this);
++    layout->setContentsMargins(6, 0, 6, 0);
++
++    auto scroll = new QScrollArea(this);
++    Session::Forge::to_touch_scroller(scroll);
++    scroll->setWidgetResizable(true);
++    scroll->setWidget(this->settings_widget());
++    layout->addWidget(scroll);
++
++    // Status (connections, signal) refreshes while the tab is on screen
++    this->timer->setInterval(3000);
++    connect(this->timer, &QTimer::timeout, [this] { this->refresh(); });
++}
++
++void NetworkSettingsTab::showEvent(QShowEvent *event)
++{
++    QWidget::showEvent(event);
++    this->refresh();
++    this->timer->start();
++}
++
++void NetworkSettingsTab::hideEvent(QHideEvent *event)
++{
++    QWidget::hideEvent(event);
++    this->timer->stop();
++}
++
++QWidget *NetworkSettingsTab::row(const QString &label, QWidget *control, bool stretch)
++{
++    auto widget = new QWidget(this);
++    auto layout = new QHBoxLayout(widget);
++    layout->addWidget(new QLabel(label, widget), 1);
++    if (stretch)
++        layout->addWidget(control, 1);
++    else
++        layout->addWidget(control, 1, Qt::AlignHCenter);
++    return widget;
++}
++
++QLabel *NetworkSettingsTab::heading(const QString &text)
++{
++    auto label = new QLabel(text, this);
++    QFont font(label->font());
++    font.setBold(true);
++    label->setFont(font);
++    return label;
++}
++
++QPushButton *NetworkSettingsTab::apply_button(const QString &text, std::function<void()> apply)
++{
++    auto button = new QPushButton(text, this);
++    button->setFont(this->arbiter.forge().font(14));
++    connect(button, &QPushButton::clicked, apply);
++    this->buttons.append(button);
++    return button;
++}
++
++QWidget *NetworkSettingsTab::settings_widget()
++{
++    const QFont font14 = this->arbiter.forge().font(14);
++    const QFont font11 = this->arbiter.forge().font(11);
++    const double scale = this->arbiter.layout().scale;
++
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++
++    this->internet = new QLabel(widget);
++    layout->addWidget(this->row("Internet", this->internet));
++    this->result = new QLabel(widget);
++    this->result->setWordWrap(true);
++    this->result->setFont(font11);
++    this->result->hide();
++    layout->addWidget(this->result);
++
++    // Hotspot
++    layout->addWidget(Session::Forge::br());
++    layout->addWidget(this->heading("Hotspot"));
++    this->hotspot_state = new QLabel(widget);
++    layout->addWidget(this->row("Status", this->hotspot_state));
++    this->ssid = new TextEntry(this->arbiter, "Hotspot name", TextEntry::Text, widget);
++    layout->addWidget(this->row("Name", this->ssid, true));
++    this->password = new TextEntry(this->arbiter, "Hotspot password", TextEntry::Password, widget);
++    layout->addWidget(this->row("Password", this->password, true));
++    this->band = new Selector({kBand5, kBand24}, kBand5, font14, this->arbiter, widget);
++    layout->addWidget(this->row("Band", this->band));
++    this->country = new TextEntry(this->arbiter, "Country code (two letters, e.g. US)", TextEntry::Text, widget);
++    layout->addWidget(this->row("Country", this->country, true));
++    layout->addWidget(this->apply_button("apply hotspot settings", [this] { this->apply_hotspot(); }), 0, Qt::AlignRight);
++
++    this->share = new Switch(widget);
++    this->share->scale(scale);
++    connect(this->share, &Switch::stateChanged, [this](bool on) {
++        if (this->loading)
++            return;
++        this->set_busy(true);
++        this->run({"share", on ? "yes" : "no"}, [this, on](bool ok, const QString &message) {
++            this->set_busy(false);
++            this->report(ok, ok ? (on ? "Sharing the internet on the hotspot." : "Stopped sharing the internet.") : message);
++            this->refresh();
++        });
++    });
++    layout->addWidget(this->row("Share internet", this->share));
++    auto hint = new QLabel("Android Auto phones get a new name and password automatically. "
++                           "Sharing gives devices on the hotspot the radio's internet (Ethernet or LTE).", widget);
++    hint->setWordWrap(true);
++    hint->setFont(font11);
++    layout->addWidget(hint);
++
++    // Ethernet
++    layout->addWidget(Session::Forge::br());
++    layout->addWidget(this->heading("Ethernet"));
++    this->ethernet_state = new QLabel(widget);
++    layout->addWidget(this->row("Status", this->ethernet_state));
++    this->ethernet_mode = new Selector({kDhcp, kStatic}, kDhcp, font14, this->arbiter, widget);
++    layout->addWidget(this->row("Address", this->ethernet_mode));
++    this->static_rows = new QWidget(widget);
++    auto static_layout = new QVBoxLayout(this->static_rows);
++    static_layout->setContentsMargins(0, 0, 0, 0);
++    this->ethernet_address = new TextEntry(this->arbiter, "IP address / prefix", TextEntry::Number, this->static_rows);
++    this->ethernet_address->set_placeholder("e.g. 192.168.1.50/24");
++    static_layout->addWidget(this->row("IP address", this->ethernet_address, true));
++    this->ethernet_gateway = new TextEntry(this->arbiter, "Gateway", TextEntry::Number, this->static_rows);
++    this->ethernet_gateway->set_placeholder("e.g. 192.168.1.1");
++    static_layout->addWidget(this->row("Gateway", this->ethernet_gateway, true));
++    this->ethernet_dns = new TextEntry(this->arbiter, "DNS server", TextEntry::Number, this->static_rows);
++    this->ethernet_dns->set_placeholder("optional");
++    static_layout->addWidget(this->row("DNS server", this->ethernet_dns, true));
++    layout->addWidget(this->static_rows);
++    connect(this->ethernet_mode, &Selector::item_changed, [this](QString mode) {
++        this->static_rows->setVisible(mode == kStatic);
++    });
++    this->static_rows->hide();
++    layout->addWidget(this->apply_button("apply ethernet settings", [this] { this->apply_ethernet(); }), 0, Qt::AlignRight);
++
++    // LTE
++    layout->addWidget(Session::Forge::br());
++    layout->addWidget(this->heading("LTE"));
++    this->lte_state = new QLabel(widget);
++    this->lte_state->setWordWrap(true);
++    layout->addWidget(this->row("Status", this->lte_state, true));
++    this->lte_enabled = new Switch(widget);
++    this->lte_enabled->scale(scale);
++    layout->addWidget(this->row("Use LTE", this->lte_enabled));
++    this->apn = new TextEntry(this->arbiter, "APN (from your carrier)", TextEntry::Text, widget);
++    this->apn->set_placeholder("carrier default");
++    layout->addWidget(this->row("APN", this->apn, true));
++    this->pin = new TextEntry(this->arbiter, "SIM PIN", TextEntry::Password, widget);
++    this->pin->set_placeholder("none");
++    layout->addWidget(this->row("SIM PIN", this->pin, true));
++    layout->addWidget(this->apply_button("apply LTE settings", [this] { this->apply_lte(); }), 0, Qt::AlignRight);
++
++    layout->addStretch();
++    return widget;
++}
++
++void NetworkSettingsTab::run(const QStringList &args, std::function<void(bool, const QString &)> done)
++{
++    auto process = new QProcess(this);
++    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
++            [process, done](int code, QProcess::ExitStatus exit_status) {
++        const QString err = QString::fromUtf8(process->readAllStandardError()).trimmed().split('\n').last();
++        const bool ok = exit_status == QProcess::NormalExit && code == 0;
++        done(ok, ok ? QString() : (err.isEmpty() ? QString("Failed (exit code %1)").arg(code) : err));
++        process->deleteLater();
++    });
++    connect(process, &QProcess::errorOccurred, [process, done](QProcess::ProcessError error) {
++        if (error == QProcess::FailedToStart) {
++            done(false, "Network settings are not available on this system.");
++            process->deleteLater();
++        }
++    });
++    process->start(kTool, args);
++}
++
++void NetworkSettingsTab::refresh()
++{
++    auto process = new QProcess(this);
++    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), [this, process](int, QProcess::ExitStatus) {
++        QMap<QString, QString> status;
++        for (const QString &line : QString::fromUtf8(process->readAllStandardOutput()).split('\n')) {
++            const int eq = line.indexOf('=');
++            if (eq > 0)
++                status[line.left(eq)] = line.mid(eq + 1);
++        }
++        process->deleteLater();
++        this->show_status(status);
++        if (!this->filled && !this->busy) {
++            this->fill_fields(status);
++            this->filled = true;
++        }
++    });
++    connect(process, &QProcess::errorOccurred, [this, process](QProcess::ProcessError error) {
++        if (error == QProcess::FailedToStart) {
++            this->internet->setText("unknown");
++            this->report(false, "Network settings are not available on this system.");
++            for (auto button : this->buttons)
++                button->setEnabled(false);
++            this->timer->stop();
++            process->deleteLater();
++        }
++    });
++    process->start(kTool, {"status"});
++}
++
++void NetworkSettingsTab::show_status(const QMap<QString, QString> &s)
++{
++    this->internet->setText(QString("via %1").arg(interface_name(s.value("internet.via"))));
++
++    if (s.value("hotspot.running") == "active") {
++        const int clients = s.value("hotspot.clients").toInt();
++        this->hotspot_state->setText(QString("on, %1 %2 connected%3")
++            .arg(clients).arg(clients == 1 ? "device" : "devices")
++            .arg(s.value("hotspot.share") == "yes" ? ", sharing internet" : ""));
++    }
++    else {
++        this->hotspot_state->setText("off");
++    }
++
++    const QString link = s.value("ethernet.link");
++    if (link == "none")
++        this->ethernet_state->setText("no Ethernet port");
++    else if (link == "down")
++        this->ethernet_state->setText("no cable");
++    else if (s.value("ethernet.address").isEmpty())
++        this->ethernet_state->setText("connected, waiting for an address");
++    else
++        this->ethernet_state->setText(QString("connected, %1").arg(s.value("ethernet.address")));
++
++    QStringList lte;
++    if (s.value("lte.modem").trimmed().isEmpty() && s.value("lte.state") != "off") {
++        lte << "no modem found";
++    }
++    else {
++        lte << s.value("lte.message", "off").toLower();
++        if (!s.value("lte.operator").isEmpty())
++            lte << s.value("lte.operator");
++        if (!s.value("lte.technology").isEmpty())
++            lte << s.value("lte.technology").toUpper();
++        if (!s.value("lte.signal").isEmpty())
++            lte << QString("signal %1%").arg(s.value("lte.signal"));
++        if (!s.value("lte.address").isEmpty())
++            lte << s.value("lte.address");
++    }
++    this->lte_state->setText(lte.join(", "));
++}
++
++void NetworkSettingsTab::fill_fields(const QMap<QString, QString> &s)
++{
++    this->loading = true;
++    this->ssid->set_value(s.value("hotspot.ssid"));
++    this->password->set_value(s.value("hotspot.password"));
++    this->channel = s.value("hotspot.channel", "36");
++    this->band->set_current(this->channel.toInt() > 14 ? kBand5 : kBand24);
++    this->country->set_value(s.value("hotspot.country", "US"));
++    this->share->setChecked(s.value("hotspot.share") == "yes");
++
++    const bool fixed = s.value("ethernet.mode") == "static";
++    this->ethernet_mode->set_current(fixed ? kStatic : kDhcp);
++    this->static_rows->setVisible(fixed);
++    this->ethernet_address->set_value(s.value("ethernet.static_address"));
++    this->ethernet_gateway->set_value(s.value("ethernet.static_gateway"));
++    this->ethernet_dns->set_value(s.value("ethernet.static_dns"));
++
++    this->lte_enabled->setChecked(s.value("lte.enabled") == "yes");
++    this->apn->set_value(s.value("lte.apn"));
++    this->pin->set_value(s.value("lte.pin"));
++    this->loading = false;
++}
++
++void NetworkSettingsTab::set_busy(bool busy)
++{
++    this->busy = busy;
++    for (auto button : this->buttons)
++        button->setEnabled(!busy);
++    if (busy)
++        this->report(true, "Applying...");
++}
++
++void NetworkSettingsTab::report(bool ok, const QString &message)
++{
++    this->result->setText(message);
++    this->result->setStyleSheet(ok ? QString() : QString("color: rgb(211, 47, 47);"));
++    this->result->setVisible(!message.isEmpty());
++}
++
++void NetworkSettingsTab::apply_hotspot()
++{
++    const QString ssid = this->ssid->value();
++    const QString password = this->password->value();
++    // Keep a 5 GHz channel other than 36 (e.g. 149) if the band didn't change
++    QString channel = (this->band->get_current() == kBand5) ? "36" : "6";
++    if ((this->channel.toInt() > 14) == (channel.toInt() > 14))
++        channel = this->channel;
++    this->set_busy(true);
++    this->run({"hotspot", ssid, password, channel, this->country->value().toUpper()},
++              [this, ssid, password, channel](bool ok, const QString &message) {
++        this->set_busy(false);
++        if (ok) {
++            this->channel = channel;
++            // OpenAuto sends these to the phone; it read them at startup
++            auto config = Config::get_instance()->openauto_config;
++            config->setWifiSSID(ssid.toStdString());
++            config->setWifiPassword(password.toStdString());
++        }
++        this->report(ok, ok ? "Hotspot updated." : message);
++        this->refresh();
++    });
++}
++
++void NetworkSettingsTab::apply_ethernet()
++{
++    QStringList args{"ethernet"};
++    if (this->ethernet_mode->get_current() == kStatic) {
++        args << "static" << this->ethernet_address->value() << this->ethernet_gateway->value();
++        if (!this->ethernet_dns->value().isEmpty())
++            args << this->ethernet_dns->value();
++    }
++    else {
++        args << "dhcp";
++    }
++    this->set_busy(true);
++    this->run(args, [this](bool ok, const QString &message) {
++        this->set_busy(false);
++        this->report(ok, ok ? "Ethernet updated." : message);
++        this->refresh();
++    });
++}
++
++void NetworkSettingsTab::apply_lte()
++{
++    this->set_busy(true);
++    this->run({"lte", this->lte_enabled->isChecked() ? "yes" : "no", this->apn->value(), this->pin->value()},
++              [this](bool ok, const QString &message) {
++        this->set_busy(false);
++        this->report(ok, ok ? "LTE updated." : message);
++        this->refresh();
++    });
++}
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 1619d09..e3e56e4 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -22,6 +22,7 @@
+ #include "app/widgets/color_picker.hpp"
+ #include "app/widgets/selector.hpp"
+ #include "app/widgets/switch.hpp"
++#include "app/pages/network_settings.hpp"
+ #include "app/pages/phone.hpp"
+ #include "gitversion.h"
+ 
+@@ -36,6 +37,7 @@ void SettingsPage::init()
+     this->addTab(new MainSettingsTab(this->arbiter), "Main");
+     this->addTab(new LayoutSettingsTab(this->arbiter), "Layout");
+     this->addTab(new PhoneSettingsTab(this->arbiter, this), "Phone");
++    this->addTab(new NetworkSettingsTab(this->arbiter, this), "Network");
+     this->addTab(new LightingSettingsTab(this->arbiter, this), "Lighting");
+     this->addTab(new ActionsSettingsTab(this->arbiter), "Actions");
+     this->addTab(new AboutSettingsTab(this->arbiter), "About");
+diff --git a/src/app/widgets/text_entry.cpp b/src/app/widgets/text_entry.cpp
+new file mode 100644
+index 0000000..47f9033
+--- /dev/null
++++ b/src/app/widgets/text_entry.cpp
+@@ -0,0 +1,139 @@
++#include "app/arbiter.hpp"
++#include "app/widgets/dialog.hpp"
++
++#include "app/widgets/text_entry.hpp"
++
++namespace {
++const QList<QString> kLetters = {"1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"};
++// The last row leaves room for shift (letters) and backspace: 8 keys at most
++const QList<QString> kSymbols = {"1234567890", "@#$%&*-+()", "!\"':;/?_=", ",~[]{}<>"};
++}  // namespace
++
++Keyboard::Keyboard(Arbiter &arbiter, QLineEdit *target, bool numbers_first, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++    , target(target)
++    , grid(new QGridLayout(this))
++    , symbols(numbers_first)
++{
++    this->grid->setContentsMargins(0, 8, 0, 0);
++    this->grid->setSpacing(4);
++    this->build();
++}
++
++void Keyboard::build()
++{
++    while (QLayoutItem *item = this->grid->takeAt(0)) {
++        delete item->widget();
++        delete item;
++    }
++
++    const QFont font = this->arbiter.forge().font(14);
++    auto key = [this, font](const QString &label, int row, int col, int span, std::function<void()> action) {
++        auto button = new QPushButton(label, this);
++        button->setFont(font);
++        button->setMinimumSize(56, 48);
++        button->setFocusPolicy(Qt::NoFocus);
++        connect(button, &QPushButton::clicked, action);
++        this->grid->addWidget(button, row, col, 1, span);
++    };
++
++    // Each row centred on a 20-column grid; a key spans two columns
++    const QList<QString> &rows = this->symbols ? kSymbols : kLetters;
++    for (int r = 0; r < rows.size(); r++) {
++        const QString &chars = rows[r];
++        int col = 10 - chars.size();
++        if (r == 3 && !this->symbols) {
++            key(this->shift ? "SHIFT" : "shift", r, 0, 3, [this] {
++                this->shift = !this->shift;
++                this->build();
++            });
++            col = 3;
++        }
++        for (QChar c : chars) {
++            const QString text = (this->shift && !this->symbols) ? QString(c).toUpper() : QString(c);
++            key(text == "&" ? "&&" : text, r, col, 2, [this, text] { this->type(text); });
++            col += 2;
++        }
++        if (r == 3)
++            key("⌫", r, 17, 3, [this] { this->target->backspace(); });
++    }
++    key(this->symbols ? "abc" : "?123", 4, 0, 4, [this] {
++        this->symbols = !this->symbols;
++        this->build();
++    });
++    key("space", 4, 4, 12, [this] { this->type(" "); });
++    key(".", 4, 16, 4, [this] { this->type("."); });
++}
++
++void Keyboard::type(const QString &text)
++{
++    this->target->insert(text);
++    if (this->shift) {
++        this->shift = false;
++        this->build();
++    }
++}
++
++TextEntry::TextEntry(Arbiter &arbiter, const QString &title, Kind kind, QWidget *parent)
++    : QPushButton(parent)
++    , arbiter(arbiter)
++    , title(title)
++    , kind(kind)
++{
++    this->setFont(arbiter.forge().font(14));
++    connect(this, &QPushButton::clicked, [this] { this->open_editor(); });
++    this->update_text();
++}
++
++void TextEntry::set_value(const QString &value)
++{
++    this->value_ = value;
++    this->update_text();
++}
++
++void TextEntry::set_placeholder(const QString &placeholder)
++{
++    this->placeholder = placeholder;
++    this->update_text();
++}
++
++void TextEntry::update_text()
++{
++    if (this->value_.isEmpty())
++        this->setText(this->placeholder.isEmpty() ? "tap to set" : this->placeholder);
++    else if (this->kind == Password)
++        this->setText(QString(this->value_.size(), QChar(0x2022)));
++    else
++        this->setText(this->value_);
++}
++
++void TextEntry::open_editor()
++{
++    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    dialog->setAttribute(Qt::WA_DeleteOnClose);
++    dialog->set_title(this->title);
++
++    auto body = new QWidget(dialog);
++    auto layout = new QVBoxLayout(body);
++    layout->setContentsMargins(0, 8, 0, 0);
++    // The person editing is the owner: show what they type, passwords too
++    auto line = new QLineEdit(this->value_, body);
++    line->setFont(this->arbiter.forge().font(16));
++    line->setMinimumHeight(48);
++    line->setStyleSheet("QLineEdit { background-color: palette(window); color: palette(text); "
++                        "border: 1px solid palette(mid); border-radius: 4px; padding: 0 8px; }");
++    layout->addWidget(line);
++    layout->addWidget(new Keyboard(this->arbiter, line, this->kind == Number, body));
++    dialog->set_body(body);
++
++    auto done = new QPushButton("done");
++    connect(done, &QPushButton::clicked, [this, line] {
++        this->set_value(line->text().trimmed());
++        emit edited(this->value_);
++    });
++    dialog->set_button(done);
++    dialog->open();
++    line->setFocus();
++    line->end(false);
++}
+-- 
+2.43.0
+

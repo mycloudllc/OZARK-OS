@@ -1,0 +1,56 @@
+From 8d3f8d9f09cb8eefd35e9a04410dd567f02b693e Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 31 Oct 2026 22:44:52 -0500
+Subject: [PATCH] AA quick view: draw the turn arrow, not a black square
+
+The next-turn image was tinted to the theme colour through its alpha
+channel, but Android Auto sends an arrow on a solid, opaque background, so
+the whole square was painted. Opaque images now get their mask from
+brightness, with the corner pixel taken as the background.
+---
+ src/app/quick_views/android_auto.cpp | 29 +++++++++++++++++++++++++++-
+ 1 file changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/src/app/quick_views/android_auto.cpp b/src/app/quick_views/android_auto.cpp
+index a542e2c..48d8088 100644
+--- a/src/app/quick_views/android_auto.cpp
++++ b/src/app/quick_views/android_auto.cpp
+@@ -205,7 +205,34 @@ void AndroidAutoQuickView::update_turn_icon()
+         return;
+     }
+ 
+-    QImage icon = this->turn_image.convertToFormat(QImage::Format_ARGB32_Premultiplied)
++    // Tint through a mask. Android Auto's turn images are an arrow on a solid
++    // background, fully opaque, so masking with their alpha painted a solid
++    // square. Without transparency, take the mask from brightness instead,
++    // with the corner pixel as the background (light arrow on dark, or the
++    // other way round).
++    QImage mask = this->turn_image.convertToFormat(QImage::Format_ARGB32);
++    bool opaque = true;
++    for (int y = 0; y < mask.height() && opaque; y++) {
++        const QRgb *line = reinterpret_cast<const QRgb *>(mask.constScanLine(y));
++        for (int x = 0; x < mask.width(); x++) {
++            if (qAlpha(line[x]) < 255) {
++                opaque = false;
++                break;
++            }
++        }
++    }
++    if (opaque && !mask.isNull()) {
++        const bool dark_background = qGray(mask.pixel(0, 0)) < 128;
++        for (int y = 0; y < mask.height(); y++) {
++            QRgb *line = reinterpret_cast<QRgb *>(mask.scanLine(y));
++            for (int x = 0; x < mask.width(); x++) {
++                const int level = qGray(line[x]);
++                line[x] = qRgba(0, 0, 0, dark_background ? level : 255 - level);
++            }
++        }
++    }
++
++    QImage icon = mask.convertToFormat(QImage::Format_ARGB32_Premultiplied)
+                       .scaled(this->icon_size, this->icon_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+     QPainter painter(&icon);
+     painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+-- 
+2.43.0
+

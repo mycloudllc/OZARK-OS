@@ -104,7 +104,7 @@ two plugins built straight from this repo, both on by default
 **TrailCommand** (`opendash-trailcommand/`, Vehicle page) and **Interior Lighting** +
 **Exterior Lighting** (launcher page). The lighting tabs talk over D-Bus to `ozark-lightd`, which
 drives one ESP32 with three LED outputs (interior front/rear, exterior): see [lighting/](../lighting/README.md),
-including the firmware.
+including the firmware. It can drive a WLED controller instead (Settings > Lighting).
 
 Ozark additions to Dash (patches `0001`–`0011` in `recipes-dash/opendash/files/`):
 
@@ -174,12 +174,21 @@ Android Auto: pair the phone over Bluetooth and Dash sends it the network
 details. Each unit makes its own name (`TrailCommand-XXXX`) and key on first
 boot, in `/etc/ozark/hotspot.conf`. Change `COUNTRY` there to match where the
 unit is used (it decides the legal channels), and `CHANNEL` to a 2.4 GHz one
-(1-11) if the 5 GHz default (36) won't come up. To run the hotspot on a second
-USB Wi-Fi adapter instead, set `IFACE=wlan1`. Then reboot.
+(1-11) if the 5 GHz default (36) won't come up. Then reboot.
+
+**Dual band:** the built-in radio serves 5 GHz. Plug in a USB Wi-Fi adapter
+that supports AP mode (MediaTek MT7610U, MT7612U and MT7921AU, and Ralink
+chips, have firmware in the image) and it serves the same network on 2.4 GHz
+for devices that can't do 5 GHz, such as WLED controllers. Both radios share
+the `ozarkap` bridge, so they share one address and DHCP. `IFACE2` picks the
+adapter (`auto`, a name, or `none` to turn it off) and `CHANNEL2` its channel
+(empty: 6, or 36 if the main radio is moved to 2.4 GHz). Settings → Network
+shows which bands are up.
 
 ```bash
-systemctl status ozark-hotspot      # access point (hostapd)
-networkctl status wlan0             # hotspot address 10.42.0.1, DHCP for the phone
+systemctl status ozark-hotspot      # access point (hostapd), built-in radio
+systemctl status 'ozark-hotspot-radio@*'   # the USB adapter's access point
+networkctl status ozarkap           # hotspot bridge: 10.42.0.1, DHCP for the phone
 journalctl -u opendash -b | grep -i bluetoothserver   # the phone handshake
 ```
 

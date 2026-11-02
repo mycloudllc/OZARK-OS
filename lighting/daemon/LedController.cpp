@@ -22,7 +22,7 @@ QVariantMap parseKv(const QStringList& toks, int from) {
 }
 }  // namespace
 
-LedController::LedController(QObject* parent) : QObject(parent) {
+LedController::LedController(QObject* parent) : Controller(parent) {
     connect(&m_port, &QSerialPort::readyRead, this, &LedController::onReadyRead);
     connect(&m_port, &QSerialPort::errorOccurred, this, &LedController::onError);
     m_timer.setInterval(500);
@@ -61,7 +61,7 @@ static int usbVendorId(const QString& tty) {
 // Called every 500 ms while no controller is connected, so it has to be cheap:
 // QSerialPortInfo::availablePorts() enumerates every tty through udev, which
 // kept Dash's UI thread busy. USB serial adapters are always ttyUSB*/ttyACM*.
-QStringList LedController::autoDetectPorts() const {
+QStringList LedController::autoDetectPorts() {
     QStringList ports;
     const QStringList ttys = QDir("/dev").entryList({"ttyUSB*", "ttyACM*"}, QDir::System);
     for (const QString& tty : ttys) {
@@ -223,12 +223,12 @@ void LedController::setBrightness(char zone, int value) {
 
 void LedController::saveLook() { send("SAVE"); }
 
-void LedController::sendAudio(std::array<quint8, 8> bands, bool beat) {
+void LedController::sendAudio(const AudioFrame& frame) {
     // Drop frames rather than queue them if the link is backed up
     if (!m_ready || m_port.bytesToWrite() > 256) return;
     QString s = "AUD";
-    for (quint8 b : bands) s += ' ' + QString::number(b);
-    s += beat ? " 1" : " 0";
+    for (quint8 b : frame.bands) s += ' ' + QString::number(b);
+    s += frame.beat ? " 1" : " 0";
     send(s);
 }
 

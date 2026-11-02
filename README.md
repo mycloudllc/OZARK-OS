@@ -17,10 +17,12 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
   Plays MP3, FLAC, Ogg/Opus and WAV.
 - **TrailCommand**: live vehicle data and controls from the TrailCommand hub. Covers
   switches, tyres, service log and power flow.
-- **Lighting**: interior front, interior rear and exterior RGBIC zones, driven by an ESP32,
-  with patterns and music sync.
+- **Lighting**: interior front, interior rear and exterior RGBIC zones, with patterns and music
+  sync. Drives the Ozark ESP32 firmware or a [WLED](https://kno.wled.ge) controller over Wi-Fi,
+  USB (JSON) or USB (Adalight).
 - **Phone**: pair, connect and forget phones, all from the touchscreen.
-- **Network**: Wi-Fi hotspot (used by wireless Android Auto), Ethernet, LTE modem and internet sharing.
+- **Network**: Wi-Fi hotspot (used by wireless Android Auto) on 5 GHz, plus 2.4 GHz with a USB
+  Wi-Fi adapter; Ethernet, LTE modem and internet sharing.
 - **Equalizer**: 10-band, system-wide.
 - **On-screen keyboard**: works for every text box, plugin settings included.
 - **Boot**: a branded splash from power-on until Dash is drawn, then quiet.
@@ -67,7 +69,8 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
 | Raspberry Pi 4 | Use a solid 5 V / 3 A supply; undervoltage causes glitches. |
 | Waveshare 8" DSI touchscreen | 1280×800, Goodix touch (default). The official 7" display works with `--rpi7`. |
 | RTL-SDR USB dongle | FM/AM radio |
-| ESP32 dev board | Lighting controller, on USB serial ([lighting/](lighting/)) |
+| ESP32 dev board | Lighting controller: the Ozark firmware on USB serial ([lighting/](lighting/)), or WLED over Wi-Fi or USB |
+| USB Wi-Fi adapter (optional) | Adds a 2.4 GHz hotspot. AP mode needed: MT7610U, MT7612U, MT7921AU or Ralink |
 | LTE modem (optional) | Any ModemManager-supported USB modem, such as Quectel or Sierra |
 | USB microphone (optional) | For Android Auto voice. Without one, the mic is skipped. |
 | TrailCommand hub | Vehicle data and controls, over the network |
@@ -78,7 +81,7 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
 kas/                    kas build configs (Pi 4, dev add-on, 7" display, QEMU, sstate mirror)
 meta-ozark/             The Yocto layer: distro, image, Dash/OpenAuto recipes and patches, services
   recipes-dash/         OpenDash, OpenAuto, aasdk and their libraries (patches in */files/)
-  recipes-connectivity/ ozark-hotspot, ozark-network, BlueZ setup
+  recipes-connectivity/ ozark-hotspot, ozark-network, USB Wi-Fi firmware, BlueZ setup
   recipes-multimedia/   ozark-audio (PulseAudio), ozark-eq10 (equalizer)
   recipes-ozark/        ozark-lightd (lighting daemon), ozark-logs
   recipes-graphics/     ozark-display (Qt/EGLFS environment), Barlow Condensed font
@@ -138,6 +141,8 @@ Everything is in `meta-ozark/recipes-dash/*/files/`, applied in order.
 | 0021 | Radio: AM/FM switch, six presets per band, settings gear at the top right |
 | 0022 | About page: Ozark Mountain Technologies branding, OS version, OpenDash credit |
 | 0023 | New Bluetooth and Local players: album art, progress, folder browser, cover art from tags |
+| 0024 | Settings → Network: show the hotspot's bands (5 GHz + 2.4 GHz) |
+| 0025 | Settings → Lighting: WLED controllers (network, USB, Adalight), find on the network, zone → segment |
 
 ### OpenAuto
 
@@ -160,12 +165,15 @@ Beyond Dash, the layer adds:
 - **Display**: `vc4-kms-dsi-waveshare-panel,8_0_inch` overlay by default. The `ili210x` touch
   driver is blacklisted, and `QT_FONT_DPI=180` pins text size because the panel reports a 7" size.
 - **ozark-hotspot**: hostapd and systemd-networkd DHCP, with a per-unit SSID and passphrase.
-  Wireless Android Auto uses it.
+  Wireless Android Auto uses it. The built-in radio serves 5 GHz; a USB adapter, when plugged
+  in, serves 2.4 GHz on the same bridged network (`ozarkap`).
 - **ozark-network**: the `ozark-net` CLI behind Settings → Network, `ozark-lte` (ModemManager),
   and NAT internet sharing.
 - **ozark-audio / ozark-eq10**: PulseAudio setup and a 10-band equalizer.
-- **ozark-lightd**: owns the ESP32 serial link, keeps each zone's look, analyses music for sync,
-  and serves D-Bus to the lighting plugins ([lighting/](lighting/)).
+- **ozark-lightd**: owns the link to the lighting controller, keeps each zone's look, analyses
+  music for sync, and serves D-Bus to the lighting plugins ([lighting/](lighting/)). For WLED it
+  maps patterns to WLED effects and streams audio sync packets (network), or draws every LED
+  itself and streams Adalight frames (USB).
 - **ozark-logs**: keeps logs on an `OZARKLOGS` partition on the SD card, so you can read them on a PC.
 - **TrailCommand plugin**: a Dash vehicle plugin for the TrailCommand hub
   ([opendash-trailcommand/](opendash-trailcommand/)).

@@ -1,0 +1,2 @@
+# A Wi-Fi adapter appears (also at boot): maybe the hotspot's second radio
+ACTION=="add", SUBSYSTEM=="net", ENV{DEVTYPE}=="wlan", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ozark-hotspot-radio@$name.service"

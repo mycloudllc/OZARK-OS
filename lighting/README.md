@@ -2,7 +2,8 @@
 
 One ESP32 on the head unit drives three addressable (RGBIC) LED outputs:
 **interior front**, **interior rear** and **exterior**, each on its own GPIO.
-The head unit talks to it over one serial link.
+The head unit talks to it over one serial link. The ESP32 runs either the Ozark
+firmware here, or [WLED](#wled).
 
 ```
 Dash: Interior Lighting tab ─┐                           ┌─ GPIO 16 → interior front (F)
@@ -37,19 +38,65 @@ Pins, LED counts, colour order, RGBW, data speed and direction are set in Dash's
 (USB serial: CP210x, CH340/CH9102, FTDI, ESP32 native USB); Settings > Lighting can pin
 a port instead.
 
+## WLED
+
+Instead of the Ozark firmware, the controller can be a stock
+[WLED](https://kno.wled.ge) board (0.14 or later). Choose **Controller: WLED** in
+Dash's **Settings > Lighting**, then the connection:
+
+- **Network** (Wi-Fi or Ethernet): everything works, music included. Join the WLED to
+  the head unit's hotspot (its name and password are in Settings > Network), or plug an
+  Ethernet WLED board into the head unit. **find** looks for WLED boards (mDNS); or type
+  the address. ESP32s only do 2.4 GHz Wi-Fi: with the hotspot on 5 GHz for Android Auto,
+  plug in a USB Wi-Fi adapter to add the 2.4 GHz band (see `ozark-hotspot`).
+- **USB**: the same cable as the Ozark firmware, WLED's JSON API over serial.
+  Music patterns only react if the WLED board has its own microphone.
+- **USB (Adalight)**: the same cable, but ozark-lightd draws every LED itself, with the Ozark
+  firmware's patterns (`daemon/PixelRenderer.cpp`), and streams them as Adalight frames. Every
+  pattern looks as on the Ozark controller, music included, with no microphone. JSON on the
+  same line still reads WLED's LED count and segments (including reversed ones). The frame
+  rate follows the baud rate: 200 LEDs run at about 16 frames/s at 115200 baud and 40
+  (the maximum) at 921600. Settings > Lighting shows it.
+
+For both USB connections, **USB speed** in Settings > Lighting must match WLED's serial baud
+rate (WLED: Config > Sync Interfaces > Serial; 115200 unless changed).
+
+Each zone (interior front, interior rear, exterior) is one WLED **segment**, chosen in
+Settings > Lighting (by default 0, 1, 2). Set up the LEDs, outputs and segments in WLED's
+own web page; Max brightness sets WLED's brightness.
+
+Over the network and USB (JSON), the tabs' patterns map to WLED effects:
+
+| Pattern | WLED effect | Pattern | WLED effect |
+|---|---|---|---|
+| Off | segment off | Twinkle | Twinkle |
+| Solid | Solid | Comet | Lighthouse |
+| Rainbow | Rainbow | VU Meter | Gravimeter |
+| Chase | Chase | Spectrum | Freqmatrix |
+| Breathe | Breathe | Beat Pulse | Puddlepeak |
+| Gradient | Gradient | | |
+
+Music: ozark-lightd's analysis of what's playing goes to WLED as **audio sync** packets
+(UDP port 11988), which WLED's sound-reactive effects follow. That needs the
+**AudioReactive** usermod, included in the official ESP32 builds; ozark-lightd switches
+its sync mode to *receive* by itself. Settings > Lighting says so if the usermod is missing.
+
 ## D-Bus API (`org.ozark.Lighting1`, system bus)
 
 `/org/ozark/Lighting1`, interface `org.ozark.Lighting1`:
 
 | Method / signal | |
 |---|---|
-| `GetStatus() → a{sv}` | `connected`, `firmware`, `max_leds`, `pins` (as), `orders` (as), `port`, `sensitivity` |
+| `GetStatus() → a{sv}` | `connected`, `firmware`, `max_leds`, `pins` (as), `orders` (as), `port`, `sensitivity`, `type` (`ozark`/`wled`); for WLED also `link` (`network`/`serial`/`adalight`), `host`, `baud`, `fps` (Adalight), `name`, `segments` (as, `"0: name"`), `map` ({`F`,`R`,`E` → segment id, -1 = none}), `audio` (`""`/`on`/`missing`) |
 | `GetConfig() → a{sv}` | `F`/`R`/`E` → {`pin`, `count`, `order`, `rgbw`, `khz`, `reverse`}, `G` → {`maxbri`} |
 | `SetConfig(a{sv})` | Same shape, any subset. Result arrives as `ConfigApplied` |
 | `Test(s zone)` | Red, green, blue sweep on `F`, `R` or `E` |
 | `GetPorts() → as` | `auto`, `/dev/serial/by-id/…`, then device names |
 | `SetPort(s)` | `auto` or a device path (stored) |
 | `SetSensitivity(i)` | Music sensitivity, 25–400 % (stored) |
+| `SetController(a{sv})` | Any subset of `type` (`ozark`/`wled`), `link` (`network`/`serial`/`adalight`), `host` (`address[:port]`), `baud` (WLED's serial baud rate), `F`/`R`/`E` (WLED segment id, -1 = none). Stored, applied at once |
+| `FindWled()` | Look for WLED boards on the network (mDNS); the answer is `WledFound` about 2 s later |
+| `WledFound(as)` | `"address name"` for each WLED found |
 | `StatusChanged(a{sv})`, `ConfigChanged(a{sv})`, `ConfigApplied(b ok, s message)` | |
 
 `/org/ozark/Lighting1/F`, `/R`, `/E`, interface `org.ozark.Lighting1.Zone`:

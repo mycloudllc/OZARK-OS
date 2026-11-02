@@ -1,55 +1,45 @@
 #pragma once
 
-#include <QColor>
-#include <QObject>
 #include <QSerialPort>
-#include <QString>
 #include <QTimer>
-#include <QVariantMap>
-#include <array>
 
-// Talks to the lighting controller firmware over serial (../PROTOCOL.md, v3).
-// Handles auto-detect, reconnect, handshake and response parsing.
-//
-// Zones: 'F' interior front, 'R' interior rear, 'E' exterior, 'G' global (CFG).
-class LedController : public QObject {
+#include "Controller.h"
+
+// Talks to the Ozark lighting controller firmware over serial
+// (../PROTOCOL.md, v3). Handles auto-detect, reconnect, handshake and
+// response parsing.
+class LedController : public Controller {
     Q_OBJECT
 public:
     explicit LedController(QObject* parent = nullptr);
 
-    // Empty name = auto-detect (CP210x, CH340, FTDI, ESP32 native USB)
-    void setPortName(const QString& name);
-    void start();  // begin connect / auto-reconnect loop
-    void stop();
-    bool isConnected() const { return m_ready; }
+    // USB serial adapters an ESP32 board may be on
+    static QStringList autoDetectPorts();
+
+    void setPortName(const QString& name) override;
+    void start() override;
+    void stop() override;
+    bool isConnected() const override { return m_ready; }
 
     // ---- look ----
-    void setColor(char zone, const QColor& c);
-    void setColor2(char zone, const QColor& c);
-    void setPattern(char zone, int id);
-    void setSpeed(char zone, int value);       // 0-255
-    void setBrightness(char zone, int value);  // 0-255
-    void saveLook();                           // persist look on the board
-    void sendAudio(std::array<quint8, 8> bands, bool beat);
+    void setColor(char zone, const QColor& c) override;
+    void setColor2(char zone, const QColor& c) override;
+    void setPattern(char zone, int id) override;
+    void setSpeed(char zone, int value) override;
+    void setBrightness(char zone, int value) override;
+    void saveLook() override;
+    void sendAudio(const AudioFrame& frame) override;
 
     // ---- hardware config (staged, then applied) ----
-    void requestInfo();
-    void requestConfig();
-    // keys: PIN COUNT ORDER RGBW KHZ REVERSE (zone F/R/A), MAXBRI (zone 'G')
-    void stageConfig(char zone, const QString& key, const QString& value);
-    void applyConfig();   // validates, applies, saves on the board
+    void requestInfo() override;
+    void requestConfig() override;
+    void stageConfig(char zone, const QString& key, const QString& value) override;
+    void applyConfig() override;
     void revertConfig();
-    void test(char zone); // 3 s red / green / blue test
+    void test(char zone) override;
     void factoryReset();
 
 signals:
-    void connectedChanged(bool connected);
-    void boardReady();  // every READY/PONG, also after a board reboot
-    // {fw, max_leds, pins: [int], orders: [string]}
-    void infoReceived(const QVariantMap& info);
-    // {F: {pin,count,order,rgbw,khz,reverse}, R: {...}, G: {maxbri}}
-    void configReceived(const QVariantMap& config);
-    void commandResult(bool ok, const QString& message);
     void lineReceived(const QString& line);
 
 private:
@@ -61,7 +51,6 @@ private:
     void onError(QSerialPort::SerialPortError error);
     void handleLine(const QString& line);
     void send(const QString& cmd);
-    QStringList autoDetectPorts() const;
 
     QSerialPort m_port;
     QTimer m_timer;

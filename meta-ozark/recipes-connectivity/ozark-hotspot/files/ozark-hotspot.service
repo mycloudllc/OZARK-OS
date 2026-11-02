@@ -3,6 +3,7 @@ Description=Wi-Fi hotspot for wireless Android Auto
 Requires=ozark-hotspot-setup.service
 After=ozark-hotspot-setup.service
 Wants=systemd-networkd.service
+After=systemd-networkd.service
 
 [Service]
 ExecStart=/usr/sbin/ozark-hotspot run

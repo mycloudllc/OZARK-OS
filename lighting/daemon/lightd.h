@@ -1,5 +1,6 @@
-// ozark-lightd: owns the lighting controller's serial link and serves it on
-// the system D-Bus as org.ozark.Lighting1 (see ../README.md for the API).
+// ozark-lightd: owns the link to the lighting controller (the Ozark firmware
+// over serial, or WLED over the network or serial) and serves it on the
+// system D-Bus as org.ozark.Lighting1 (see ../README.md for the API).
 #pragma once
 
 #include <QColor>
@@ -10,7 +11,8 @@
 #include <QVariantMap>
 
 #include "AudioAnalyzer.h"
-#include "LedController.h"
+#include "Controller.h"
+#include "WledFinder.h"
 
 class Lighting;
 
@@ -53,12 +55,15 @@ class Lighting : public QObject {
     explicit Lighting(QObject *parent = nullptr);
     bool start();  // register on the system bus
 
-    LedController controller;
+    Controller *controller = nullptr;
     QSettings settings;
     void look_changed();  // a zone's look changed: maybe music, save soon
 
    public slots:
-    // {connected, firmware, max_leds, pins: [s], orders: [s], port, sensitivity}
+    // {connected, firmware, max_leds, pins: [s], orders: [s], port, sensitivity,
+    //  type: "ozark"|"wled", and for WLED: link: "network"|"serial"|"adalight", host,
+    //  baud, name, segments: ["0: name", ...], map: {F, R, E: segment id or -1},
+    //  audio: ""|"on"|"missing", fps (Adalight frames a second)}
     QVariantMap GetStatus() const;
     // {F|R|E: {pin, count, order, rgbw, khz, reverse}, G: {maxbri}} as the controller reports it
     QVariantMap GetConfig() const;
@@ -72,20 +77,33 @@ class Lighting : public QObject {
     void SetPort(const QString &port);
     // Music sensitivity in percent, 25-400
     void SetSensitivity(int percent);
+    // Which controller: any subset of {type: "ozark"|"wled",
+    // link: "network"|"serial"|"adalight", host, baud (WLED's serial baud rate),
+    // F, R, E: WLED segment id or -1}
+    void SetController(const QVariantMap &changes);
+    // Look for WLED controllers on the network; the answer is WledFound
+    void FindWled();
 
    signals:
     void StatusChanged(const QVariantMap &status);
     void ConfigChanged(const QVariantMap &config);
     void ConfigApplied(bool ok, const QString &message);
+    // "address name" for each WLED found
+    void WledFound(const QStringList &found);
 
    private:
+    void make_controller();
+    QMap<char, int> segments() const;
+    bool wled() const;
     void refresh_audio();
     void status_changed();
 
     AudioAnalyzer audio;
+    WledFinder finder;
     QList<Zone *> zones;
     QTimer save_timer;
     QVariantMap info;
     QVariantMap config;
     bool applying = false;
+    bool started = false;
 };

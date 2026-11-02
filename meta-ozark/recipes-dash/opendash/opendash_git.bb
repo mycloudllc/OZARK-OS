@@ -41,6 +41,8 @@ SRC_URI = " \
     file://0021-Radio-AM-FM-switch-presets-settings-at-the-top-right.patch \
     file://0022-About-Ozark-branding-built-with-OpenDash.patch \
     file://0023-Bluetooth-and-Local-players-now-playing-view-library.patch \
+    file://0024-Network-show-the-hotspot-s-bands.patch \
+    file://0025-Settings-Lighting-WLED-controllers.patch \
     file://trailcommand;subdir=git/plugins/vehicle \
     file://lighting/common \
     file://lighting/interior_lighting \

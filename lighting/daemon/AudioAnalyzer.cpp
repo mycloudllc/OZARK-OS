@@ -118,6 +118,22 @@ void AudioAnalyzer::onReadyRead() {
     while (m_samples.size() >= size_t(kFft)) process();
 }
 
+// Band levels between log-spaced edges: count bands from 40 Hz to 10240 Hz
+template <int N>
+static std::array<float, N> bandLevels(const std::vector<std::complex<float>>& buf, float binHz) {
+    std::array<float, N> band{};
+    for (int k = 0; k < N; ++k) {
+        const float loHz = 40.0f * std::pow(2.0f, 8.0f * k / N);
+        const float hiHz = 40.0f * std::pow(2.0f, 8.0f * (k + 1) / N);
+        const int lo = std::max(1, int(loHz / binHz));
+        const int hi = std::max(lo + 1, int(hiHz / binHz));
+        float sum = 0.0f;
+        for (int b = lo; b < hi; ++b) sum += std::abs(buf[b]);
+        band[k] = (sum / (hi - lo)) * kTilt[k * 8 / N];
+    }
+    return band;
+}
+
 void AudioAnalyzer::process() {
     for (int i = 0; i < kFft; ++i) m_buf[i] = {m_samples[i] * m_window[i], 0.0f};
     fft(m_buf.data(), kFft);
@@ -138,11 +154,30 @@ void AudioAnalyzer::process() {
     m_gpeak = std::max(mx, m_gpeak * kPeakDecay);
     const float denom = std::max(m_gpeak, kNoiseFloor);
 
-    std::array<quint8, 8> out{};
-    for (int k = 0; k < 8; ++k) {
-        const float v = 255.0f * std::pow(band[k] / denom, kCurve) * m_gain;
-        out[k] = quint8(qBound(0.0f, v, 255.0f));
+    auto level = [&](float magnitude) {
+        return quint8(qBound(0.0f, 255.0f * std::pow(magnitude / denom, kCurve) * m_gain, 255.0f));
+    };
+    AudioFrame f;
+    std::array<quint8, 8>& out = f.bands;
+    for (int k = 0; k < 8; ++k) out[k] = level(band[k]);
+    const std::array<float, 16> band16 = bandLevels<16>(m_buf, binHz);
+    float sum = 0.0f;
+    for (int k = 0; k < 16; ++k) {
+        f.fft[k] = level(band16[k]);
+        sum += f.fft[k];
     }
+    f.volume = sum / 16;
+    m_smoothVolume = 0.8f * m_smoothVolume + 0.2f * f.volume;
+    f.smooth_volume = m_smoothVolume;
+
+    // Loudest frequency in the analysed range
+    int peak = 1;
+    const int last = std::min(kFft / 2 - 1, int(kEdgesHz[8] / binHz));
+    for (int b = int(kEdgesHz[0] / binHz); b <= last; ++b) {
+        if (std::abs(m_buf[b]) > std::abs(m_buf[peak])) peak = b;
+    }
+    f.peak_hz = peak * binHz;
+    f.peak_magnitude = level(std::abs(m_buf[peak]));
 
     const float bass = (out[0] + out[1]) * 0.5f;
     m_bassAvg = 0.95f * m_bassAvg + 0.05f * bass;
@@ -152,5 +187,6 @@ void AudioAnalyzer::process() {
         m_beatTimer.restart();
     }
 
-    emit frame(out, beat);
+    f.beat = beat;
+    emit frame(f);
 }

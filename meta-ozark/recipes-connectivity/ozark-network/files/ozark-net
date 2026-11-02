@@ -42,7 +42,7 @@ mmget() {
 }
 
 load_hotspot() {
-    IFACE=wlan0 SSID= PASSWORD= COUNTRY=US CHANNEL=36 SHARE=no
+    IFACE=auto IFACE2=auto SSID= PASSWORD= COUNTRY=US CHANNEL=36 CHANNEL2= SHARE=no
     [ -f "$hotspot_conf" ] && . "$hotspot_conf"
 }
 
@@ -51,21 +51,40 @@ save_hotspot() {
     cat > "$hotspot_conf.tmp" <<CONF
 # Wireless Android Auto hotspot (see /usr/sbin/ozark-hotspot)
 IFACE='$IFACE'
+IFACE2='$IFACE2'
 SSID='$SSID'
 PASSWORD='$PASSWORD'
 COUNTRY='$COUNTRY'
 CHANNEL='$CHANNEL'
+CHANNEL2='$CHANNEL2'
 SHARE='$SHARE'
 CONF
     chmod 600 "$hotspot_conf.tmp"
     mv "$hotspot_conf.tmp" "$hotspot_conf"
 }
 
+bridge=ozarkap
+
+# The hotspot's radios: the bridge's ports
+radios() {
+    ls "/sys/class/net/$bridge/brif" 2>/dev/null
+}
+
 apply_hotspot() {
     systemctl restart ozark-hotspot-setup.service || fail "Could not apply the hotspot settings"
     networkctl reload
-    networkctl reconfigure "$IFACE" 2>/dev/null
+    networkctl reconfigure "$bridge" 2>/dev/null
     systemctl restart ozark-hotspot.service
+    for i in /sys/class/net/*; do
+        [ -d "$i/wireless" ] && systemctl restart "ozark-hotspot-radio@${i##*/}.service"
+    done
+}
+
+# "5 GHz" or "2.4 GHz" for an interface running an access point
+band() {
+    freq=$(iw dev "$1" info 2>/dev/null | awk '$1 == "channel" { gsub(/[(]/, "", $3); print $3; exit }')
+    [ -n "$freq" ] || return
+    if [ "$freq" -gt 3000 ]; then echo "5 GHz"; else echo "2.4 GHz"; fi
 }
 
 status() {
@@ -77,7 +96,15 @@ status() {
     echo "hotspot.country=$COUNTRY"
     echo "hotspot.share=$SHARE"
     echo "hotspot.running=$(systemctl is-active ozark-hotspot.service)"
-    echo "hotspot.clients=$(iw dev "$IFACE" station dump 2>/dev/null | grep -c '^Station')"
+    clients=0 bands=
+    for radio in $(radios); do
+        clients=$((clients + $(iw dev "$radio" station dump 2>/dev/null | grep -c '^Station')))
+        b=$(band "$radio")
+        [ -n "$b" ] && bands="${bands:+$bands + }$b"
+    done
+    echo "hotspot.clients=$clients"
+    # What's on the air, e.g. "5 GHz + 2.4 GHz" with a second radio
+    echo "hotspot.bands=$bands"
 
     ETH_MODE=dhcp ETH_ADDRESS= ETH_GATEWAY= ETH_DNS=
     [ -f "$eth_conf" ] && . "$eth_conf"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Second hotspot radio on %I
+# udev starts this for every Wi-Fi interface (90-ozark-hotspot-radio.rules);
+# ozark-hotspot decides whether this one is the second radio, else exits
+BindsTo=sys-subsystem-net-devices-%i.device
+After=sys-subsystem-net-devices-%i.device ozark-hotspot-setup.service systemd-networkd.service
+Requires=ozark-hotspot-setup.service
+
+[Service]
+ExecStart=/usr/sbin/ozark-hotspot radio %I
+Restart=on-failure
+RestartSec=5

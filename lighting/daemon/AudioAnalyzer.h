@@ -9,9 +9,12 @@
 #include <complex>
 #include <vector>
 
+#include "Controller.h"
+
 // Captures whatever the head unit is playing (Bluetooth, Android Auto, local
 // files...) by reading the default output's monitor source through `parec`,
-// then emits 8 log-spaced band levels (0-255) and a beat flag at ~43 Hz.
+// then emits frames at ~43 Hz: 8 and 16 log-spaced band levels (0-255), a beat
+// flag, the volume and the loudest frequency.
 //
 // Needs: pulseaudio-utils (parec). Works with PipeWire via pipewire-pulse.
 // Emits from the object's own thread, so connect with a direct/auto connection.
@@ -29,7 +32,7 @@ public:
     bool isRunning() const { return m_wanted; }
 
 signals:
-    void frame(std::array<quint8, 8> bands, bool beat);
+    void frame(const AudioFrame& frame);
 
 private:
     void launch();
@@ -54,5 +57,6 @@ private:
 
     float m_gpeak = 0.0f;
     float m_bassAvg = 0.0f;
+    float m_smoothVolume = 0.0f;
     QElapsedTimer m_beatTimer;
 };

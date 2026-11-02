@@ -1,20 +1,32 @@
 #!/bin/sh
-# Wi-Fi hotspot for wireless Android Auto.
+# Wi-Fi hotspot for wireless Android Auto, and for Wi-Fi accessories on the
+# head unit (WLED lighting controllers and other ESP32s).
 #
 # The phone pairs over Bluetooth, Dash sends it this hotspot's name and key,
 # the phone joins it and connects back to Dash. Unless SHARE is on, there is
 # no internet behind it, and the phone keeps using mobile data.
 #
-#   ozark-hotspot setup   before networking and Dash: settings, configs
-#   ozark-hotspot run     the access point itself (hostapd, foreground)
+# The Pi's own Wi-Fi runs one access point, on one band. A USB Wi-Fi adapter
+# adds the other band at the same time: same name and key, same network
+# (both radios are ports of the bridge ozarkap, which has the address and the
+# DHCP server). The built-in radio stays on 5 GHz for Android Auto; the
+# adapter serves 2.4 GHz, which ESP32s need. It starts when plugged in.
+#
+#   ozark-hotspot setup         before networking and Dash: settings, configs
+#   ozark-hotspot run           the main radio's access point (hostapd)
+#   ozark-hotspot radio IFACE   a second radio's access point, if IFACE is
+#                               the one to use (ozark-hotspot-radio@.service,
+#                               started by udev for every Wi-Fi interface)
 #
 # Settings live in /etc/ozark/hotspot.conf, created on first boot with a name
 # from the Pi's serial number and a random key unique to this unit:
-#   IFACE     Wi-Fi interface for the hotspot (wlan0; e.g. wlan1 for a
-#             second adapter, leaving wlan0 free for other networks)
+#   IFACE     main radio: auto (the Pi's built-in Wi-Fi) or an interface name
+#   IFACE2    second radio: auto (any other Wi-Fi adapter that can be an
+#             access point), an interface name, or none
 #   SSID, PASSWORD
 #   COUNTRY   regulatory country code; decides the allowed channels
 #   CHANNEL   36-48 or 149-165 = 5 GHz (best for video), 1-11 = 2.4 GHz
+#   CHANNEL2  the second radio's channel; empty: the other band (6 or 36)
 #   SHARE     yes: share the radio's internet (Ethernet or LTE) with devices
 #             on the hotspot (NAT, DNS through the radio)
 #
@@ -23,6 +35,7 @@
 conf=/etc/ozark/hotspot.conf
 run=/run/ozark-hotspot
 address=10.42.0.1
+bridge=ozarkap
 
 # n random characters from the given set. (dd, not head -c: the image's
 # busybox is built without head -c, which then prints nothing.)
@@ -38,17 +51,25 @@ setup() {
         mkdir -p "$(dirname "$conf")"
         cat > "$conf.tmp" <<CONF
 # Wireless Android Auto hotspot (see /usr/sbin/ozark-hotspot)
-IFACE=wlan0
+IFACE=auto
+IFACE2=auto
 SSID=TrailCommand-$id
 PASSWORD=
 COUNTRY=US
 CHANNEL=36
+CHANNEL2=
 SHARE=no
 CONF
         chmod 600 "$conf.tmp"
         mv "$conf.tmp" "$conf"
     fi
-    . "$conf"
+    load
+    # Before the second radio, IFACE was wlan0 by default. With an adapter
+    # plugged in at boot, the names can swap: find the built-in one instead.
+    if grep -q "^IFACE='\\?wlan0'\\?$" "$conf"; then
+        sed -i "s/^IFACE=.*/IFACE=auto/" "$conf"
+        IFACE=auto
+    fi
 
     # A new unit, or a key hostapd would reject (WPA2 needs 8-63 characters):
     # make one. The phone gets it over Bluetooth; nobody types it.
@@ -60,30 +81,6 @@ CONF
 
     mkdir -p "$run"
     chmod 700 "$run"
-
-    if [ "$CHANNEL" -gt 14 ]; then
-        band="hw_mode=a
-ieee80211ac=1
-ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]"
-    else
-        band="hw_mode=g"
-    fi
-    cat > "$run/hostapd.conf" <<HOSTAPD
-interface=$IFACE
-driver=nl80211
-ssid=$SSID
-country_code=$COUNTRY
-ieee80211d=1
-channel=$CHANNEL
-$band
-ieee80211n=1
-wmm_enabled=1
-auth_algs=1
-wpa=2
-wpa_key_mgmt=WPA-PSK
-rsn_pairwise=CCMP
-wpa_passphrase=$PASSWORD
-HOSTAPD
 
     # Sharing: NAT out of whichever link has the default route, and DNS
     # through systemd-resolved, which also listens on the hotspot address
@@ -97,11 +94,22 @@ DNS=$address"
         dhcp_dns="EmitDNS=no"
     fi
 
-    # The hotspot's address, and DHCP for the phone (systemd-networkd reads /run)
+    # The hotspot's network: a bridge with the address and DHCP; hostapd adds
+    # each radio to it (systemd-networkd reads /run). The radios themselves
+    # match no .network: networkd leaves them alone.
     mkdir -p /run/systemd/network
+    cat > /run/systemd/network/40-ozark-hotspot.netdev <<NETDEV
+[NetDev]
+Name=$bridge
+Kind=bridge
+
+[Bridge]
+STP=no
+ForwardDelaySec=0
+NETDEV
     cat > /run/systemd/network/40-ozark-hotspot.network <<NETWORK
 [Match]
-Name=$IFACE
+Name=$bridge
 
 [Link]
 # nothing at boot waits for the hotspot
@@ -121,8 +129,9 @@ PoolSize=40
 $dhcp_dns
 NETWORK
 
-    # Dash: which interface to advertise, and the network the phone is sent
-    echo "OPENAUTO_WIFI_INTERFACE=$IFACE" > "$run/opendash.env"
+    # Dash: which interface to advertise (the bridge has the address, and the
+    # main radio's MAC, which the phone is sent), and the network's name and key
+    echo "OPENAUTO_WIFI_INTERFACE=$bridge" > "$run/opendash.env"
     ini=/root/openauto.ini
     mkdir -p "$(dirname "$ini")"
     touch "$ini"
@@ -136,24 +145,148 @@ NETWORK
     chmod 600 "$ini"
 }
 
-start() {
+load() {
+    IFACE=auto IFACE2=auto CHANNEL2=
     . "$conf"
-    # The Wi-Fi driver loads a few seconds into boot
+}
+
+builtin() {
+    case "$(readlink "/sys/class/net/$1/device/driver")" in */brcmfmac) return 0 ;; esac
+    return 1
+}
+
+# The main radio, once it's there: IFACE, or for auto the Pi's built-in
+# Wi-Fi (brcmfmac). Fails if it isn't there (yet).
+main_radio() {
+    if [ "$IFACE" != auto ]; then
+        [ -d "/sys/class/net/$IFACE" ] && echo "$IFACE"
+        return
+    fi
+    for i in /sys/class/net/*; do
+        [ -d "$i/wireless" ] && builtin "${i##*/}" && { echo "${i##*/}"; return 0; }
+    done
+    return 1
+}
+
+phy() {
+    cat "/sys/class/net/$1/phy80211/name" 2>/dev/null
+}
+
+can_ap() {
+    iw phy "$(phy "$1")" info 2>/dev/null |
+        awk '/Supported interface modes/ { m = 1; next } m && !/^[\t ]+\*/ { m = 0 } m && /\* AP$/ { ok = 1 } END { exit !ok }'
+}
+
+# Channel usable on the radio (after iw reg set)
+has_channel() {
+    iw phy "$(phy "$1")" info 2>/dev/null | grep -F "[$2]" | grep -qv -e disabled -e "no IR"
+}
+
+# hostapd config for a radio: IFACE CHANNEL FILE [main]
+write_hostapd() {
+    if [ "$2" -gt 14 ]; then
+        band="hw_mode=a"
+        # 802.11ac and 40 MHz on the built-in radio (known to support them);
+        # an adapter gets 802.11ac if it has it, and hostapd's 20 MHz default
+        if [ "$4" = main ]; then
+            band="$band
+ieee80211ac=1
+ht_capab=[HT40+][SHORT-GI-20][SHORT-GI-40]"
+        elif iw phy "$(phy "$1")" info 2>/dev/null | grep -q "VHT Capabilities"; then
+            band="$band
+ieee80211ac=1"
+        fi
+    else
+        band="hw_mode=g"
+    fi
+    cat > "$3" <<HOSTAPD
+interface=$1
+bridge=$bridge
+driver=nl80211
+ssid=$SSID
+country_code=$COUNTRY
+ieee80211d=1
+channel=$2
+$band
+ieee80211n=1
+wmm_enabled=1
+auth_algs=1
+wpa=2
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+wpa_passphrase=$PASSWORD
+HOSTAPD
+}
+
+# Wait up to 30 s for a network interface
+wait_for() {
     i=0
-    while [ ! -d "/sys/class/net/$IFACE" ]; do
+    while [ ! -d "/sys/class/net/$1" ]; do
         i=$((i + 1))
-        [ $i -le 30 ] || { echo "no $IFACE: no Wi-Fi adapter?" >&2; exit 1; }
+        [ $i -le 30 ] || return 1
         sleep 1
     done
+}
+
+unblock() {
     for r in /sys/class/rfkill/rfkill*; do
         [ "$(cat "$r/type" 2>/dev/null)" = wlan ] && echo 0 > "$r/soft"
     done
     iw reg set "$COUNTRY" 2>/dev/null
+}
+
+start() {
+    load
+    # The Wi-Fi driver loads a few seconds into boot
+    i=0
+    until radio=$(main_radio); do
+        i=$((i + 1))
+        [ $i -le 30 ] || { echo "no Wi-Fi for the hotspot (IFACE=$IFACE)" >&2; exit 1; }
+        sleep 1
+    done
+    wait_for "$bridge" || { echo "no $bridge: is systemd-networkd running?" >&2; exit 1; }
+    unblock
+    # Phones are sent the bridge's MAC as the access point's: make it the
+    # main radio's, so it is the 5 GHz network they join
+    ip link set dev "$bridge" address "$(cat "/sys/class/net/$radio/address")"
+    write_hostapd "$radio" "$CHANNEL" "$run/hostapd.conf" main
     exec hostapd "$run/hostapd.conf"
+}
+
+# A second radio: exits quietly (0) if IFACE isn't the one to use
+radio() {
+    load
+    iface=$1
+    [ -d "/sys/class/net/$iface/wireless" ] || exit 0
+    case "$IFACE2" in
+        none|"") exit 0 ;;
+        auto)
+            if [ "$IFACE" = auto ]; then
+                ! builtin "$iface" || exit 0
+            else
+                [ "$iface" != "$IFACE" ] || exit 0
+            fi ;;
+        *) [ "$iface" = "$IFACE2" ] || exit 0 ;;
+    esac
+    can_ap "$iface" || { echo "$iface can't run an access point" >&2; exit 0; }
+    channel=$CHANNEL2
+    if [ -z "$channel" ]; then
+        if [ "$CHANNEL" -gt 14 ]; then channel=6; else channel=36; fi
+    fi
+    wait_for "$bridge" || { echo "no $bridge: is systemd-networkd running?" >&2; exit 1; }
+    unblock
+    sleep 1  # the regulatory domain applies asynchronously
+    has_channel "$iface" "$channel" || { echo "$iface can't use channel $channel" >&2; exit 0; }
+    # One second radio: the first adapter that qualifies
+    exec 9> "$run/radio2.lock"
+    flock -n 9 || { echo "a second radio is already running" >&2; exit 0; }
+    write_hostapd "$iface" "$channel" "$run/hostapd-$iface.conf"
+    exec hostapd "$run/hostapd-$iface.conf"
 }
 
 case "$1" in
     setup) setup ;;
     run) start ;;
-    *) echo "usage: $0 setup|run" >&2; exit 2 ;;
+    radio) radio "$2" ;;
+    *) echo "usage: $0 setup|run|radio IFACE" >&2; exit 2 ;;
 esac

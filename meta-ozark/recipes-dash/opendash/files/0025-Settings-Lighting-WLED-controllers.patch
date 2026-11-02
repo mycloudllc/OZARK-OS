@@ -1,0 +1,471 @@
+From 67b224dc54e00fd3f60a746ac3f27e17ccce628f Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 15:25:41 -0600
+Subject: [PATCH] Settings > Lighting: WLED controllers
+
+ozark-lightd can drive WLED instead of the Ozark controller firmware,
+over the network or USB. Settings > Lighting chooses which:
+
+- Controller: Ozark or WLED; for WLED, the connection: Network, USB
+  (WLED's JSON API) or USB (Adalight: the lighting service draws every
+  LED and streams them, music patterns included)
+- for the network, WLED's address, and a search for WLED on the hotspot
+  and Ethernet (mDNS); for USB, the port and WLED's baud rate
+- each zone's WLED segment, in place of the strip setup, which WLED
+  does in its own web page
+- hints for music (audio sync, the AudioReactive usermod), the baud
+  rate and 2.4 GHz, and Adalight's frame rate in the status
+
+Every choice applies at once (SetController); max brightness still
+applies with "apply".
+
+Upstream-Status: Inappropriate [needs Ozark OS's lighting service]
+---
+ include/app/pages/lighting_settings.hpp |  34 ++-
+ src/app/pages/lighting_settings.cpp     | 270 ++++++++++++++++++++++--
+ 2 files changed, 278 insertions(+), 26 deletions(-)
+
+diff --git a/include/app/pages/lighting_settings.hpp b/include/app/pages/lighting_settings.hpp
+index 7c24a58..ed8834b 100644
+--- a/include/app/pages/lighting_settings.hpp
++++ b/include/app/pages/lighting_settings.hpp
+@@ -8,11 +8,15 @@
+ class Arbiter;
+ class Selector;
+ class Switch;
++class TextEntry;
+ 
+-// Settings > Lighting: the Ozark lighting controller behind the Interior and
+-// Exterior Lighting tabs, through ozark-lightd (org.ozark.Lighting1). Normally
+-// it finds the controller itself; here the port can be overridden, and the
+-// strips are set up (pins, LED counts, colour order...).
++// Settings > Lighting: the lighting controller behind the Interior and
++// Exterior Lighting tabs, through ozark-lightd (org.ozark.Lighting1). Either
++// the Ozark controller firmware, found on USB by itself (the port can be
++// overridden; the strips are set up here: pins, LED counts, colour order...),
++// or WLED, on the network or USB (its JSON API, or Adalight: Dash's lighting
++// service draws every LED and streams them), with each zone one of its
++// segments (its LEDs are set up in WLED's own web page).
+ class LightingSettingsTab : public QWidget {
+     Q_OBJECT
+ 
+@@ -26,6 +30,7 @@ class LightingSettingsTab : public QWidget {
+     void on_status_changed(const QVariantMap &status);
+     void on_config_changed(const QDBusMessage &message);
+     void on_config_applied(bool ok, const QString &message);
++    void on_wled_found(const QStringList &found);
+ 
+    private:
+     struct StripUi {
+@@ -35,6 +40,9 @@ class LightingSettingsTab : public QWidget {
+         Switch *rgbw = nullptr;
+         Selector *khz = nullptr;
+         Switch *reverse = nullptr;
++        QList<QWidget *> rows;  // the Ozark firmware's strip setup
++        Selector *segment = nullptr;
++        QWidget *segment_row = nullptr;  // WLED
+     };
+ 
+     QWidget *settings_widget();
+@@ -46,13 +54,31 @@ class LightingSettingsTab : public QWidget {
+     void refresh();
+     void show_config(const QVariantMap &config);
+     void apply();
++    void set_controller(const QVariantMap &changes);
++    void show_mode();
+ 
+     Arbiter &arbiter;
+     QVariantMap status;
+     bool loading = false;
+ 
+     QLabel *state;
++    Selector *type;
++    Selector *link;
++    QWidget *link_row;
++    TextEntry *host;
++    QWidget *host_row;
++    QPushButton *find;
++    QWidget *find_row;
++    Selector *found;
++    QWidget *found_row;
++    QStringList found_hosts;
+     Selector *port;
++    QWidget *port_row;
++    Selector *baud;
++    QWidget *baud_row;
++    QLabel *wled_hint;
++    QLabel *strip_hint;
++    QPushButton *apply_button;
+     QMap<QString, StripUi> strips;
+     QSlider *max_brightness;
+     QSlider *sensitivity;
+diff --git a/src/app/pages/lighting_settings.cpp b/src/app/pages/lighting_settings.cpp
+index d2e9934..a2e904e 100644
+--- a/src/app/pages/lighting_settings.cpp
++++ b/src/app/pages/lighting_settings.cpp
+@@ -1,6 +1,7 @@
+ #include "app/arbiter.hpp"
+ #include "app/widgets/selector.hpp"
+ #include "app/widgets/switch.hpp"
++#include "app/widgets/text_entry.hpp"
+ 
+ #include "app/pages/lighting_settings.hpp"
+ 
+@@ -17,6 +18,28 @@ const QList<QString> kSpeeds = {"800", "400"};
+ const QList<QPair<QString, QString>> kZones = {
+     {"F", "Interior front strip"}, {"R", "Interior rear strip"}, {"E", "Exterior strip"}};
+ 
++const QString kOzark = "Ozark";
++const QString kWled = "WLED";
++const QString kNetwork = "Network";
++const QString kUsb = "USB";
++const QString kAdalight = "USB (Adalight)";
++// WLED's serial baud rates (Config > Sync Interfaces > Serial)
++const QList<QString> kBauds = {"115200", "230400", "460800", "500000", "576000", "921600", "1000000", "1500000"};
++
++QString link_option(const QString &link)
++{
++    return link == "serial" ? kUsb : link == "adalight" ? kAdalight : kNetwork;
++}
++const QString kNoSegment = "none";
++
++// "3: Dash" -> 3, "none" -> -1
++int segment_id(const QString &option)
++{
++    bool ok = false;
++    const int id = option.section(':', 0, 0).toInt(&ok);
++    return ok ? id : -1;
++}
++
+ // Nested maps arrive from D-Bus as QDBusArgument, not QVariantMap
+ QVariantMap to_map(const QVariant &value)
+ {
+@@ -43,6 +66,7 @@ LightingSettingsTab::LightingSettingsTab(Arbiter &arbiter, QWidget *parent)
+     bus.connect(kService, kPath, kInterface, "StatusChanged", this, SLOT(on_status_changed(QVariantMap)));
+     bus.connect(kService, kPath, kInterface, "ConfigChanged", this, SLOT(on_config_changed(QDBusMessage)));
+     bus.connect(kService, kPath, kInterface, "ConfigApplied", this, SLOT(on_config_applied(bool, QString)));
++    bus.connect(kService, kPath, kInterface, "WledFound", this, SLOT(on_wled_found(QStringList)));
+ }
+ 
+ QWidget *LightingSettingsTab::row(const QString &label, QWidget *control, bool stretch)
+@@ -74,16 +98,74 @@ QWidget *LightingSettingsTab::settings_widget()
+     auto widget = new QWidget(this);
+     auto layout = new QVBoxLayout(widget);
+ 
+-    // Controller: found automatically; the port can be pinned here
++    // Controller: the Ozark firmware (found automatically; the port can be
++    // pinned here) or WLED. Each choice applies at once.
+     layout->addWidget(this->heading("Controller"));
+     this->state = new QLabel("Lighting service not running", widget);
++    this->state->setWordWrap(true);
+     layout->addWidget(this->row("Status", this->state));
++
++    this->type = new Selector({kOzark, kWled}, kOzark, font14, this->arbiter, widget);
++    connect(this->type, &Selector::item_changed, [this](QString type) {
++        if (!this->loading)
++            this->set_controller({{"type", type == kWled ? "wled" : "ozark"}});
++    });
++    layout->addWidget(this->row("Controller", this->type));
++
++    this->link = new Selector({kNetwork, kUsb, kAdalight}, kNetwork, font14, this->arbiter, widget);
++    connect(this->link, &Selector::item_changed, [this](QString link) {
++        if (!this->loading)
++            this->set_controller({{"link", link == kUsb ? "serial" : link == kAdalight ? "adalight" : "network"}});
++    });
++    this->link_row = this->row("Connection", this->link);
++    layout->addWidget(this->link_row);
++
++    this->host = new TextEntry(this->arbiter, "WLED address (e.g. 10.42.0.23)", TextEntry::Text, widget);
++    this->host->set_placeholder("not set");
++    connect(this->host, &TextEntry::edited, [this](const QString &host) { this->set_controller({{"host", host}}); });
++    this->host_row = this->row("Address", this->host, true);
++    layout->addWidget(this->host_row);
++
++    this->find = new QPushButton("find", widget);
++    this->find->setFlat(true);
++    connect(this->find, &QPushButton::clicked, [this] {
++        this->find->setEnabled(false);
++        this->find->setText("searching...");
++        this->call("FindWled");
++    });
++    this->find_row = this->row("Find WLED on the network", this->find);
++    layout->addWidget(this->find_row);
++
++    this->found = new Selector(QList<QString>{}, QString(), font14, this->arbiter, widget);
++    connect(this->found, &Selector::idx_changed, [this](int index) {
++        if (!this->loading && index >= 0 && index < this->found_hosts.size())
++            this->set_controller({{"host", this->found_hosts[index]}});
++    });
++    this->found_row = this->row("Found", this->found);
++    this->found_row->hide();
++    layout->addWidget(this->found_row);
++
+     this->port = new Selector(QList<QString>{"auto"}, QString("auto"), font14, this->arbiter, widget);
+     connect(this->port, &Selector::item_changed, [this](QString port) {
+         if (!this->loading && port != this->status.value("port", "auto").toString())
+             this->call("SetPort", {port});
+     });
+-    layout->addWidget(this->row("Serial port", this->port));
++    this->port_row = this->row("Serial port", this->port);
++    layout->addWidget(this->port_row);
++
++    // Must match WLED's serial baud rate
++    this->baud = new Selector(kBauds, kBauds.first(), font14, this->arbiter, widget);
++    connect(this->baud, &Selector::item_changed, [this](QString baud) {
++        if (!this->loading)
++            this->set_controller({{"baud", baud.toInt()}});
++    });
++    this->baud_row = this->row("USB speed (baud)", this->baud);
++    layout->addWidget(this->baud_row);
++
++    this->wled_hint = new QLabel(widget);
++    this->wled_hint->setWordWrap(true);
++    this->wled_hint->setFont(this->arbiter.forge().font(11));
++    layout->addWidget(this->wled_hint);
+ 
+     // Strips (applied together with "apply")
+     for (const auto &zone : kZones) {
+@@ -91,8 +173,18 @@ QWidget *LightingSettingsTab::settings_widget()
+         layout->addWidget(this->heading(zone.second));
+ 
+         StripUi &s = this->strips[zone.first];
++        const QString name = zone.first;
++        s.segment = new Selector({kNoSegment}, kNoSegment, font14, this->arbiter, widget);
++        connect(s.segment, &Selector::item_changed, [this, name](QString option) {
++            if (!this->loading)
++                this->set_controller({{name, segment_id(option)}});
++        });
++        s.segment_row = this->row("WLED segment", s.segment);
++        layout->addWidget(s.segment_row);
++
+         s.pin = new Selector(kPins, QString("16"), font14, this->arbiter, widget);
+-        layout->addWidget(this->row("Data pin", s.pin));
++        s.rows.append(this->row("Data pin", s.pin));
++        layout->addWidget(s.rows.last());
+ 
+         s.count = new QSpinBox(widget);
+         s.count->setRange(1, 600);
+@@ -103,34 +195,37 @@ QWidget *LightingSettingsTab::settings_widget()
+         // Dash's stylesheet fills spin boxes with the accent colour, hiding the number
+         s.count->setStyleSheet("QSpinBox { background-color: palette(window); color: palette(text); "
+                                "border: 1px solid palette(mid); border-radius: 4px; padding: 0 8px; }");
+-        layout->addWidget(this->row("LED count", s.count, true));
++        s.rows.append(this->row("LED count", s.count, true));
++        layout->addWidget(s.rows.last());
+ 
+         s.order = new Selector(kOrders, QString("GRB"), font14, this->arbiter, widget);
+-        layout->addWidget(this->row("Color order", s.order));
++        s.rows.append(this->row("Color order", s.order));
++        layout->addWidget(s.rows.last());
+ 
+         s.rgbw = new Switch(widget);
+         s.rgbw->scale(scale);
+-        layout->addWidget(this->row("RGBW strip", s.rgbw));
++        s.rows.append(this->row("RGBW strip", s.rgbw));
++        layout->addWidget(s.rows.last());
+ 
+         s.khz = new Selector(kSpeeds, QString("800"), font14, this->arbiter, widget);
+-        layout->addWidget(this->row("Data speed (kHz)", s.khz));
++        s.rows.append(this->row("Data speed (kHz)", s.khz));
++        layout->addWidget(s.rows.last());
+ 
+         s.reverse = new Switch(widget);
+         s.reverse->scale(scale);
+-        layout->addWidget(this->row("Reverse direction", s.reverse));
++        s.rows.append(this->row("Reverse direction", s.reverse));
++        layout->addWidget(s.rows.last());
+ 
+         auto test = new QPushButton("test", widget);
+         test->setFlat(true);
+-        const QString name = zone.first;
+         connect(test, &QPushButton::clicked, [this, name] { this->call("Test", {name}); });
+         layout->addWidget(this->row("Color test", test));
+     }
+ 
+-    auto hint = new QLabel("The test lights a strip red, green, then blue from start to end. "
+-                           "If the colors are wrong, change the color order and apply.", widget);
+-    hint->setWordWrap(true);
+-    hint->setFont(this->arbiter.forge().font(11));
+-    layout->addWidget(hint);
++    this->strip_hint = new QLabel(widget);
++    this->strip_hint->setWordWrap(true);
++    this->strip_hint->setFont(this->arbiter.forge().font(11));
++    layout->addWidget(this->strip_hint);
+ 
+     // General
+     layout->addWidget(Session::Forge::br());
+@@ -148,17 +243,104 @@ QWidget *LightingSettingsTab::settings_widget()
+     });
+     layout->addWidget(this->row("Music sensitivity", this->sensitivity, true));
+ 
+-    auto apply = new QPushButton("apply strip settings", widget);
+-    apply->setFont(font14);
+-    connect(apply, &QPushButton::clicked, [this] { this->apply(); });
+-    layout->addWidget(apply, 0, Qt::AlignRight);
++    this->apply_button = new QPushButton("apply strip settings", widget);
++    this->apply_button->setFont(font14);
++    connect(this->apply_button, &QPushButton::clicked, [this] { this->apply(); });
++    layout->addWidget(this->apply_button, 0, Qt::AlignRight);
+     this->result = new QLabel(widget);
+     this->result->setAlignment(Qt::AlignRight);
+     layout->addWidget(this->result);
+ 
++    this->show_mode();
+     return widget;
+ }
+ 
++void LightingSettingsTab::set_controller(const QVariantMap &changes)
++{
++    this->call("SetController", {changes});
++}
++
++// Show what applies to the controller in use
++void LightingSettingsTab::show_mode()
++{
++    const bool wled = this->status.value("type").toString() == "wled";
++    const QString link = this->status.value("link", "network").toString();
++    const bool network = link == "network";
++    const bool adalight = link == "adalight";
++    this->link_row->setVisible(wled);
++    this->baud_row->setVisible(wled && !network);
++    this->host_row->setVisible(wled && network);
++    this->find_row->setVisible(wled && network);
++    if (!(wled && network))
++        this->found_row->hide();
++    this->port_row->setVisible(!wled || !network);
++    this->wled_hint->setVisible(wled);
++    for (auto &strip : this->strips) {
++        strip.segment_row->setVisible(wled);
++        for (QWidget *row : strip.rows)
++            row->setVisible(!wled);
++    }
++    this->apply_button->setText(wled ? "apply" : "apply strip settings");
++
++    if (wled) {
++        const QString host = this->status.value("host").toString();
++        QString hint = QString("Set up the LEDs (pins, counts, segments) in WLED's own web page%1. "
++                               "Each zone here is one WLED segment.")
++                           .arg(network && !host.isEmpty() ? QString(", http://%1").arg(host) : QString());
++        if (!network)
++            hint += " USB speed must match WLED's serial baud rate (Config > Sync Interfaces).";
++        if (adalight)
++            hint += " With Adalight the head unit draws every LED and streams them, so the patterns, "
++                    "music included, look as on the Ozark controller. More LEDs need a higher speed "
++                    "for a smooth frame rate.";
++        else if (!network)
++            hint += " Music patterns follow the music over a network connection or Adalight; over "
++                    "USB they only react if the WLED board has its own microphone.";
++        else if (this->status.value("audio").toString() == "missing")
++            hint += " This WLED build has no AudioReactive usermod, so music patterns won't follow the "
++                    "music: install a WLED build that includes it.";
++        else
++            hint += " Music patterns use WLED's sound-reactive effects, fed with what's playing (audio sync).";
++        if (network)
++            hint += " On Wi-Fi, WLED needs the hotspot's 2.4 GHz band: a USB Wi-Fi adapter adds it.";
++        this->wled_hint->setText(hint);
++        this->strip_hint->setText("The test lights a segment red, green, then blue.");
++    }
++    else {
++        this->strip_hint->setText("The test lights a strip red, green, then blue from start to end. "
++                                  "If the colors are wrong, change the color order and apply.");
++    }
++}
++
++void LightingSettingsTab::on_wled_found(const QStringList &found)
++{
++    this->find->setEnabled(true);
++    this->find->setText("find");
++    this->found_hosts.clear();
++    QList<QString> options;
++    for (const QString &entry : found) {
++        const QString address = entry.section(' ', 0, 0);
++        this->found_hosts.append(address);
++        options.append(QString("%1 (%2)").arg(entry.section(' ', 1), address));
++    }
++    if (options.isEmpty()) {
++        this->found_row->hide();
++        this->result->setText("No WLED found. Is it on the hotspot or Ethernet?");
++        return;
++    }
++    this->result->clear();
++    this->loading = true;
++    this->found->set_options(options);
++    const int current = this->found_hosts.indexOf(this->status.value("host").toString());
++    if (current >= 0)
++        this->found->set_current(options[current]);
++    this->loading = false;
++    this->found_row->show();
++    // One found and none chosen yet: take it
++    if (this->found_hosts.size() == 1 && this->status.value("host").toString().isEmpty())
++        this->set_controller({{"host", this->found_hosts.first()}});
++}
++
+ void LightingSettingsTab::call(const QString &method, const QVariantList &args,
+                                std::function<void(const QDBusMessage &)> done)
+ {
+@@ -200,14 +382,58 @@ void LightingSettingsTab::on_status_changed(const QVariantMap &status)
+ {
+     this->status = status;
+     const QString firmware = status.value("firmware").toString();
+-    if (status.value("connected").toBool())
+-        this->state->setText(firmware.isEmpty() ? "Connected" : QString("Connected (v%1)").arg(firmware));
+-    else
+-        this->state->setText("Searching for controller...");
++    const bool wled = status.value("type").toString() == "wled";
++    const bool network = status.value("link", "network").toString() == "network";
++    const QString host = status.value("host").toString();
++    if (status.value("connected").toBool()) {
++        if (wled) {
++            const QString name = status.value("name").toString();
++            QString text = QString("Connected to %1 (%2)").arg(name.isEmpty() ? QString("WLED") : name, firmware);
++            const int fps = status.value("fps").toInt();
++            if (status.value("link").toString() == "adalight" && fps > 0)
++                text += QString(", %1 frames/s").arg(fps);
++            this->state->setText(text);
++        }
++        else {
++            this->state->setText(firmware.isEmpty() ? "Connected" : QString("Connected (v%1)").arg(firmware));
++        }
++    }
++    else if (wled && network) {
++        this->state->setText(host.isEmpty() ? "Set WLED's address, or find it" : QString("Connecting to %1...").arg(host));
++    }
++    else {
++        this->state->setText(wled ? "Searching for WLED on USB..." : "Searching for controller...");
++    }
+ 
+     this->loading = true;
+     this->port->set_current(status.value("port", "auto").toString());
++    this->type->set_current(wled ? kWled : kOzark);
++    this->link->set_current(link_option(status.value("link", "network").toString()));
++    this->baud->set_current(QString::number(status.value("baud", 115200).toInt()));
++    this->host->set_value(host);
++
++    // Segment choices: what WLED reports, plus any chosen one it doesn't (offline)
++    const QStringList segments = status.value("segments").toStringList();
++    const QVariantMap map = to_map(status.value("map"));
++    for (auto it = this->strips.begin(); it != this->strips.end(); ++it) {
++        QList<QString> options{kNoSegment};
++        for (const QString &segment : segments)
++            options.append(segment);
++        const int id = map.value(it.key(), -1).toInt();
++        QString current = kNoSegment;
++        for (const QString &option : options) {
++            if (option != kNoSegment && segment_id(option) == id)
++                current = option;
++        }
++        if (id >= 0 && current == kNoSegment) {
++            current = QString::number(id);
++            options.append(current);
++        }
++        it->segment->set_options(options);
++        it->segment->set_current(current);
++    }
+     this->loading = false;
++    this->show_mode();
+     if (!this->sensitivity->isSliderDown())
+         this->sensitivity->setValue(status.value("sensitivity", 100).toInt());
+ 
+-- 
+2.43.0
+

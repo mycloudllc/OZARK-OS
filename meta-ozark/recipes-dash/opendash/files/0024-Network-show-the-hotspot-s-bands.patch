@@ -1,0 +1,34 @@
+From 37cb3deec6254310a79d4a005fa742922a65675a Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 15:16:46 -0600
+Subject: [PATCH 24/25] Network: show the hotspot's bands
+
+With a USB Wi-Fi adapter as a second radio, ozark-hotspot runs both
+bands at once; ozark-net status reports them (hotspot.bands), and the
+hotspot's status shows them, e.g. "on (5 GHz + 2.4 GHz)".
+
+Upstream-Status: Inappropriate [needs Ozark OS's ozark-net]
+---
+ src/app/pages/network_settings.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/app/pages/network_settings.cpp b/src/app/pages/network_settings.cpp
+index 84ac8fb..0b12ef1 100644
+--- a/src/app/pages/network_settings.cpp
++++ b/src/app/pages/network_settings.cpp
+@@ -241,8 +241,11 @@ void NetworkSettingsTab::show_status(const QMap<QString, QString> &s)
+     this->internet->setText(QString("via %1").arg(interface_name(s.value("internet.via"))));
+ 
+     if (s.value("hotspot.running") == "active") {
++        // bands: "5 GHz", or "5 GHz + 2.4 GHz" with a USB adapter as a second radio
+         const int clients = s.value("hotspot.clients").toInt();
+-        this->hotspot_state->setText(QString("on, %1 %2 connected%3")
++        const QString bands = s.value("hotspot.bands");
++        this->hotspot_state->setText(QString("on%1, %2 %3 connected%4")
++            .arg(bands.isEmpty() ? QString() : QString(" (%1)").arg(bands))
+             .arg(clients).arg(clients == 1 ? "device" : "devices")
+             .arg(s.value("hotspot.share") == "yes" ? ", sharing internet" : ""));
+     }
+-- 
+2.43.0
+

@@ -24,6 +24,9 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
 - **Network**: Wi-Fi hotspot (used by wireless Android Auto) on 5 GHz, plus 2.4 GHz with a USB
   Wi-Fi adapter; Ethernet, LTE modem and internet sharing.
 - **Equalizer**: 10-band, system-wide.
+- **Software updates**: install a new version from Settings, online or from a USB drive. Updates are
+  signed, install alongside the running system, keep every setting, and roll back by themselves
+  if the new version doesn't start.
 - **On-screen keyboard**: works for every text box, plugin settings included.
 - **Boot**: a branded splash from power-on until Dash is drawn, then quiet.
 - **Light and dark mode**, plus any accent colour from a colour wheel.
@@ -61,12 +64,15 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
 | ![Network](docs/screenshots/settings-network.png) | ![Keyboard](docs/screenshots/keyboard.png) |
 | **Theme colour** | **About** |
 | ![Theme colour](docs/screenshots/theme-color.png) | ![About](docs/screenshots/about.png) |
+| **Update** | **Installing an update** |
+| ![Update](docs/screenshots/settings-update.png) | ![Installing](docs/screenshots/settings-update-installing.png) |
 
 ## Hardware
 
 | Part | Notes |
 |---|---|
 | Raspberry Pi 4 | Use a solid 5 V / 3 A supply; undervoltage causes glitches. |
+| microSD card, 8 GB or more | Two system slots for updates, plus a data partition that fills the rest |
 | Waveshare 8" DSI touchscreen | 1280×800, Goodix touch (default). The official 7" display works with `--rpi7`. |
 | RTL-SDR USB dongle | FM/AM radio |
 | ESP32 dev board | Lighting controller: the Ozark firmware on USB serial ([lighting/](lighting/)), or WLED over Wi-Fi or USB |
@@ -83,12 +89,14 @@ meta-ozark/             The Yocto layer: distro, image, Dash/OpenAuto recipes an
   recipes-dash/         OpenDash, OpenAuto, aasdk and their libraries (patches in */files/)
   recipes-connectivity/ ozark-hotspot, ozark-network, USB Wi-Fi firmware, BlueZ setup
   recipes-multimedia/   ozark-audio (PulseAudio), ozark-eq10 (equalizer)
-  recipes-ozark/        ozark-lightd (lighting daemon), ozark-logs
+  recipes-ozark/        ozark-lightd (lighting daemon), ozark-logs, ozark-update, ozark-data, ozark-swu
+  recipes-support/      SWUpdate configuration (signed updates, no U-Boot)
+  classes/              ozark-slots: the A/B system slot layout
   recipes-graphics/     ozark-display (Qt/EGLFS environment), Barlow Condensed font
 opendash-trailcommand/  TrailCommand vehicle plugin for Dash
 lighting/               Lighting plugins, ozark-lightd daemon, ESP32 firmware
 branding/               Logo, badge and splash sources
-scripts/                build.sh, flash.sh, run-qemu.sh, make-splash.sh
+scripts/                build.sh, flash.sh, run-qemu.sh, make-splash.sh, make-keys.sh, make-release.sh
 docs/                   Build guide and screenshots
 ```
 
@@ -102,10 +110,15 @@ builds take minutes.
 git init && git add -A && git commit -m "initial"   # kas finds meta-ozark through git
 ./scripts/build.sh                 # Ozark OS with Dash, TrailCommand and lighting
 ./scripts/flash.sh /dev/sdX        # write the image to an SD card
+./scripts/make-release.sh          # an update for Settings > Update (.swu + feed)
 ```
 
+The first build makes the key that signs updates, in `keys/` (not in git). **Back it up**: radios
+only install updates signed with the key their image was built with.
+
 See **[docs/BUILDING.md](docs/BUILDING.md)** for options (`--rpi7`, `--release`,
-`--mirrors`), QEMU testing, debugging over SSH and serial, and iterating without reflashing.
+`--mirrors`), QEMU testing, software updates and releases, debugging over SSH and serial, and
+iterating without reflashing.
 For the lighting firmware, see [lighting/README.md](lighting/README.md).
 
 ## Changes to OpenDash
@@ -143,6 +156,8 @@ Everything is in `meta-ozark/recipes-dash/*/files/`, applied in order.
 | 0023 | New Bluetooth and Local players: album art, progress, folder browser, cover art from tags |
 | 0024 | Settings → Network: show the hotspot's bands (5 GHz + 2.4 GHz) |
 | 0025 | Settings → Lighting: WLED controllers (network, USB, Adalight), find on the network, zone → segment |
+| 0026 | Settings → Update: install software updates online or from USB, with progress and restart |
+| 0027 | Bluetooth player: follow the phone's track and play/pause (it only updated when the device changed) |
 
 ### OpenAuto
 
@@ -154,6 +169,7 @@ Everything is in `meta-ozark/recipes-dash/*/files/`, applied in order.
 | 0004 | Crop the projection on the GPU instead of with `videocrop` (fixes green and gray bars) |
 | 0005 | Right-hand drive by default |
 | 0006 | Microphone: only open one that exists (fixes a freeze, then out-of-memory, when tapping the mic) |
+| 0007 | Wireless Android Auto: phones no longer stick on "Connecting to Android Auto" (handshake framing, one socket per phone, a reconnecting phone replaces its stale session) |
 
 ## Ozark OS components
 
@@ -174,6 +190,11 @@ Beyond Dash, the layer adds:
   music for sync, and serves D-Bus to the lighting plugins ([lighting/](lighting/)). For WLED it
   maps patterns to WLED effects and streams audio sync packets (network), or draws every LED
   itself and streams Adalight frames (USB).
+- **Software updates** (SWUpdate): two system slots on the SD card. `ozark-update` installs a
+  signed `.swu` into the slot that isn't running, and the Pi boots it once with the firmware's
+  tryboot. It's kept once Dash has run for 30 s, otherwise the old system comes back.
+  `ozark-data` keeps settings, pairings and Dash's files on a data partition across updates.
+  `ozark-swu` builds the update and `scripts/make-release.sh` writes the feed radios check.
 - **ozark-logs**: keeps logs on an `OZARKLOGS` partition on the SD card, so you can read them on a PC.
 - **TrailCommand plugin**: a Dash vehicle plugin for the TrailCommand hub
   ([opendash-trailcommand/](opendash-trailcommand/)).

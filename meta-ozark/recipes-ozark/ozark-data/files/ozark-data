@@ -1,0 +1,48 @@
+#!/bin/sh
+# The data partition (ozarkdata, mounted at /data): settings, pairings and
+# Dash's files, kept when a software update replaces the system.
+#
+#   ozark-data grow    before /data is mounted: grow the partition to the end
+#                      of the SD card (the image makes it small to fit any card;
+#                      systemd then grows the filesystem, x-systemd.growfs)
+#   ozark-data mount   once /data is mounted: put the directories below over
+#                      the system's own (overlayfs). Files the system ships
+#                      there still come from the system, so an update can
+#                      change them, unless they were changed on this unit.
+
+# Directories with settings or state worth keeping
+dirs="/etc/ozark /etc/systemd/network /root /var/lib/bluetooth /var/lib/ozark-lightd /var/lib/systemd/timesync"
+overlay=/data/overlay
+
+grow() {
+    dev=$(readlink -f /dev/disk/by-label/ozarkdata) || exit 0
+    name=$(basename "$dev")
+    sys=/sys/class/block/$name
+    [ -f "$sys/partition" ] || exit 0
+    disk=/dev/$(basename "$(readlink -f "$sys/..")")
+    part=$(cat "$sys/partition")
+    end=$(($(cat "$sys/start") + $(cat "$sys/size")))
+    total=$(cat "/sys/class/block/$(basename "$disk")/size")
+    # Already reaches the end (the backup GPT takes the last few sectors)
+    [ "$end" -lt $((total - 16384)) ] || exit 0
+    echo "Growing $dev to the end of $disk"
+    echo ", +" | sfdisk --quiet --no-reread --no-tell-kernel -N "$part" "$disk" || exit 1
+    partx -u --nr "$part" "$disk"
+}
+
+mount_dirs() {
+    for dir in $dirs; do
+        name=$(echo "${dir#/}" | tr / -)
+        mkdir -p "$overlay/$name/upper" "$overlay/$name/work" "$dir"
+        mountpoint -q "$dir" && continue
+        mount -t overlay "data-$name" \
+            -o "lowerdir=$dir,upperdir=$overlay/$name/upper,workdir=$overlay/$name/work" "$dir" ||
+            echo "Can't keep $dir on /data: changes there won't survive an update" >&2
+    done
+}
+
+case "$1" in
+    grow) grow ;;
+    mount) mount_dirs ;;
+    *) sed -n '2,/^$/{s/^# \{0,1\}//;p}' "$0" >&2; exit 2 ;;
+esac

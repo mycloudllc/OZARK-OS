@@ -1,0 +1,14 @@
+[Unit]
+Description=Keep a new system once it runs, or go back to the old one
+Documentation=file:///usr/sbin/ozark-update
+# Only after an update (it leaves its state here)
+ConditionPathExists=|/data/ozark-update/state
+ConditionPathExists=|/var/lib/ozark-update/state
+After=local-fs.target opendash.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ozark-update boot
+
+[Install]
+WantedBy=multi-user.target

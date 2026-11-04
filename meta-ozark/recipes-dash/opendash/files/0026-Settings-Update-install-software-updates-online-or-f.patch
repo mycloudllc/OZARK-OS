@@ -1,0 +1,566 @@
+From 68bace36acfbc2564b056c53a0a9b3fe7410d99b Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 19:56:33 -0600
+Subject: [PATCH] Settings > Update: install software updates online or from
+ USB
+
+A new Settings tab for ozark-update (meta-ozark): the radio's version
+and build, the update address (an update feed, checked by hand or every
+few hours), and installing a newer version from it or from a .swu file
+on a USB drive. Installing shows its progress, then offers to restart
+into the new version; the status says when an update is waiting, has
+started, or didn't work and the radio went back.
+---
+ include/app/pages/update_settings.hpp |  80 +++++
+ src/app/pages/settings.cpp            |   2 +
+ src/app/pages/update_settings.cpp     | 431 ++++++++++++++++++++++++++
+ 3 files changed, 513 insertions(+)
+ create mode 100644 include/app/pages/update_settings.hpp
+ create mode 100644 src/app/pages/update_settings.cpp
+
+diff --git a/include/app/pages/update_settings.hpp b/include/app/pages/update_settings.hpp
+new file mode 100644
+index 0000000..6583c1b
+--- /dev/null
++++ b/include/app/pages/update_settings.hpp
+@@ -0,0 +1,80 @@
++#pragma once
++
++#include <functional>
++
++#include <QMap>
++#include <QtWidgets>
++
++class Arbiter;
++class Dialog;
++class Selector;
++class Switch;
++class TextEntry;
++
++// Settings > Update: the radio's version, and installing a newer one from the
++// update address (online) or a USB drive. Everything goes through the
++// ozark-update command (meta-ozark ozark-update): it installs into the system
++// slot that isn't running, and the radio restarts into it.
++class UpdateSettingsTab : public QWidget {
++    Q_OBJECT
++
++   public:
++    UpdateSettingsTab(Arbiter &arbiter, QWidget *parent = nullptr);
++
++   protected:
++    void showEvent(QShowEvent *event) override;
++    void hideEvent(QHideEvent *event) override;
++
++   private:
++    QWidget *settings_widget();
++    QWidget *row(const QString &label, QWidget *control, bool stretch = false);
++    QLabel *heading(const QString &text);
++    QPushButton *button(const QString &text, std::function<void()> clicked);
++
++    // Runs ozark-update; line(text) for each line it prints as it goes,
++    // done(ok, message) at the end with stderr's last line on failure
++    void run(const QStringList &args, std::function<void(const QString &)> line,
++             std::function<void(bool, const QString &)> done);
++    // A long job (check, download, install): progress bar, buttons off
++    void job(const QStringList &args, std::function<void(bool, const QString &)> done);
++    void refresh();
++    void show_status(const QMap<QString, QString> &status);
++    void set_busy(bool busy);
++    void report(bool ok, const QString &message);
++
++    void check();
++    void download_and_install();
++    void install(const QString &file);
++    void find_usb();
++    void restart();
++
++    Arbiter &arbiter;
++    QTimer *timer;
++    QScrollArea *scroll;
++    bool busy = false;
++    bool filled = false;
++    bool loading = false;
++    QMap<QString, QString> status;
++
++    QLabel *version;
++    QLabel *state;
++    QLabel *step;
++    QProgressBar *progress;
++    QLabel *result;
++    QPushButton *restart_button;
++    Dialog *restart_dialog;
++    QLabel *restart_question;
++
++    TextEntry *feed;
++    Switch *auto_check;
++    QLabel *available;
++    QLabel *notes;
++    QPushButton *install_online;
++
++    Selector *usb_files;
++    QMap<QString, QString> usb_paths;  // Selector text -> file
++    QWidget *usb_row;
++    QPushButton *install_usb;
++
++    QList<QPushButton *> buttons;
++};
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index c9493f2..7eb09e0 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -25,6 +25,7 @@
+ #include "app/widgets/switch.hpp"
+ #include "app/pages/network_settings.hpp"
+ #include "app/pages/phone.hpp"
++#include "app/pages/update_settings.hpp"
+ #include "gitversion.h"
+ 
+ SettingsPage::SettingsPage(Arbiter &arbiter, QWidget *parent)
+@@ -41,6 +42,7 @@ void SettingsPage::init()
+     this->addTab(new NetworkSettingsTab(this->arbiter, this), "Network");
+     this->addTab(new LightingSettingsTab(this->arbiter, this), "Lighting");
+     this->addTab(new ActionsSettingsTab(this->arbiter), "Actions");
++    this->addTab(new UpdateSettingsTab(this->arbiter, this), "Update");
+     this->addTab(new AboutSettingsTab(this->arbiter), "About");
+ }
+ 
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+new file mode 100644
+index 0000000..694c7df
+--- /dev/null
++++ b/src/app/pages/update_settings.cpp
+@@ -0,0 +1,431 @@
++#include "app/arbiter.hpp"
++#include "app/session.hpp"
++#include "app/widgets/dialog.hpp"
++#include "app/widgets/selector.hpp"
++#include "app/widgets/switch.hpp"
++#include "app/widgets/text_entry.hpp"
++
++#include "app/pages/update_settings.hpp"
++
++#include <unistd.h>
++
++namespace {
++const char *kTool = "/usr/sbin/ozark-update";
++const QString kNoUsb = "no update files found";
++
++// "0.2.0, built 1 Nov 2026 19:27" from a version and a build stamp (YYYYMMDDHHMMSS)
++QString describe(const QString &version, const QString &build)
++{
++    const QDateTime built = QDateTime::fromString(build.left(12), "yyyyMMddHHmm");
++    if (!built.isValid())
++        return version;
++    return QString("%1, built %2").arg(version, built.toString("d MMM yyyy HH:mm"));
++}
++}  // namespace
++
++UpdateSettingsTab::UpdateSettingsTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++    , timer(new QTimer(this))
++{
++    auto layout = new QVBoxLayout(this);
++    layout->setContentsMargins(6, 0, 6, 0);
++
++    this->scroll = new QScrollArea(this);
++    Session::Forge::to_touch_scroller(this->scroll);
++    this->scroll->setWidgetResizable(true);
++    this->scroll->setWidget(this->settings_widget());
++    layout->addWidget(this->scroll);
++
++    this->timer->setInterval(5000);
++    connect(this->timer, &QTimer::timeout, [this] {
++        if (!this->busy)
++            this->refresh();
++    });
++}
++
++void UpdateSettingsTab::showEvent(QShowEvent *event)
++{
++    QWidget::showEvent(event);
++    if (!this->busy)
++        this->refresh();
++    this->timer->start();
++}
++
++void UpdateSettingsTab::hideEvent(QHideEvent *event)
++{
++    QWidget::hideEvent(event);
++    this->timer->stop();
++}
++
++QWidget *UpdateSettingsTab::row(const QString &label, QWidget *control, bool stretch)
++{
++    auto widget = new QWidget(this);
++    auto layout = new QHBoxLayout(widget);
++    layout->addWidget(new QLabel(label, widget), 1);
++    if (stretch)
++        layout->addWidget(control, 1);
++    else
++        layout->addWidget(control, 1, Qt::AlignHCenter);
++    return widget;
++}
++
++QLabel *UpdateSettingsTab::heading(const QString &text)
++{
++    auto label = new QLabel(text, this);
++    QFont font(label->font());
++    font.setBold(true);
++    label->setFont(font);
++    return label;
++}
++
++QPushButton *UpdateSettingsTab::button(const QString &text, std::function<void()> clicked)
++{
++    auto button = new QPushButton(text, this);
++    button->setFont(this->arbiter.forge().font(14));
++    connect(button, &QPushButton::clicked, clicked);
++    this->buttons.append(button);
++    return button;
++}
++
++QWidget *UpdateSettingsTab::settings_widget()
++{
++    const QFont font14 = this->arbiter.forge().font(14);
++    const QFont font11 = this->arbiter.forge().font(11);
++
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++
++    // This radio
++    this->version = new QLabel(widget);
++    layout->addWidget(this->row("Version", this->version));
++    this->state = new QLabel(widget);
++    this->state->setWordWrap(true);
++    layout->addWidget(this->row("Status", this->state, true));
++
++    this->step = new QLabel(widget);
++    this->step->setFont(font11);
++    this->step->hide();
++    layout->addWidget(this->step);
++    this->progress = new QProgressBar(widget);
++    this->progress->setRange(0, 100);
++    this->progress->setTextVisible(false);
++    this->progress->setFixedHeight(8);
++    this->progress->setStyleSheet(
++        // Dash keeps the accent colour in palette(base) (as the volume OSD does)
++        "QProgressBar { background-color: rgba(128, 128, 128, 70); border: none; border-radius: 4px; }"
++        "QProgressBar::chunk { background-color: palette(base); border-radius: 4px; }");
++    this->progress->hide();
++    layout->addWidget(this->progress);
++    this->result = new QLabel(widget);
++    this->result->setWordWrap(true);
++    this->result->setFont(font11);
++    this->result->hide();
++    layout->addWidget(this->result);
++
++    this->restart_dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    this->restart_dialog->set_title("Restart");
++    this->restart_question = new QLabel();
++    this->restart_question->setFont(font14);
++    this->restart_question->setContentsMargins(0, 8, 0, 8);
++    this->restart_dialog->set_body(this->restart_question);
++    this->restart_dialog->set_cancel_text("No");
++    auto yes = new QPushButton("Yes");
++    connect(yes, &QPushButton::clicked, [this] { this->restart(); });
++    this->restart_dialog->set_button(yes);
++    this->restart_button = this->button("restart to finish", [this] { this->restart_dialog->open(); });
++    this->restart_button->hide();
++    layout->addWidget(this->restart_button, 0, Qt::AlignRight);
++
++    // Online
++    layout->addWidget(Session::Forge::br());
++    layout->addWidget(this->heading("Online"));
++    this->feed = new TextEntry(this->arbiter, "Update address (https://...)", TextEntry::Text, widget);
++    this->feed->set_placeholder("none");
++    connect(this->feed, &TextEntry::edited, [this](const QString &url) {
++        this->run({"feed", url.trimmed()}, nullptr, [this](bool ok, const QString &message) {
++            this->report(ok, ok ? QString() : message);
++            this->refresh();
++        });
++    });
++    layout->addWidget(this->row("Update address", this->feed, true));
++    this->auto_check = new Switch(widget);
++    this->auto_check->scale(this->arbiter.layout().scale);
++    connect(this->auto_check, &Switch::stateChanged, [this](bool on) {
++        if (this->loading)
++            return;
++        this->run({"auto", on ? "yes" : "no"}, nullptr, [this](bool ok, const QString &message) {
++            if (!ok)
++                this->report(false, message);
++        });
++    });
++    layout->addWidget(this->row("Check automatically", this->auto_check));
++    this->available = new QLabel(widget);
++    this->available->setWordWrap(true);
++    layout->addWidget(this->row("Newest", this->available, true));
++    this->notes = new QLabel(widget);
++    this->notes->setWordWrap(true);
++    this->notes->setFont(font11);
++    this->notes->hide();
++    layout->addWidget(this->notes);
++    auto online_buttons = new QHBoxLayout();
++    online_buttons->addStretch();
++    online_buttons->addWidget(this->button("check now", [this] { this->check(); }));
++    this->install_online = this->button("download and install", [this] { this->download_and_install(); });
++    this->install_online->hide();
++    online_buttons->addWidget(this->install_online);
++    layout->addLayout(online_buttons);
++
++    // USB
++    layout->addWidget(Session::Forge::br());
++    layout->addWidget(this->heading("USB drive"));
++    this->usb_files = new Selector({}, QString(), font14, this->arbiter, widget, kNoUsb);
++    this->usb_row = this->row("Update file", this->usb_files);
++    this->usb_row->hide();
++    layout->addWidget(this->usb_row);
++    auto usb_buttons = new QHBoxLayout();
++    usb_buttons->addStretch();
++    usb_buttons->addWidget(this->button("look on USB", [this] { this->find_usb(); }));
++    this->install_usb = this->button("install from USB", [this] {
++        const QString file = this->usb_paths.value(this->usb_files->get_current());
++        if (!file.isEmpty())
++            this->install(file);
++    });
++    this->install_usb->hide();
++    usb_buttons->addWidget(this->install_usb);
++    layout->addLayout(usb_buttons);
++
++    auto hint = new QLabel("Updates install alongside the running system, which keeps working until you restart. "
++                           "Settings, phones and music are kept. If the new version doesn't start properly, "
++                           "the radio goes back to this one by itself. For USB, put the .swu file on the drive "
++                           "(top folder). Only updates signed for this radio install.", widget);
++    hint->setWordWrap(true);
++    hint->setFont(font11);
++    layout->addWidget(hint);
++
++    layout->addStretch();
++    return widget;
++}
++
++void UpdateSettingsTab::run(const QStringList &args, std::function<void(const QString &)> line,
++                            std::function<void(bool, const QString &)> done)
++{
++    auto process = new QProcess(this);
++    auto partial = std::make_shared<QByteArray>();
++    connect(process, &QProcess::readyReadStandardOutput, [process, line, partial] {
++        partial->append(process->readAllStandardOutput());
++        int nl;
++        while ((nl = partial->indexOf('\n')) >= 0) {
++            const QString text = QString::fromUtf8(partial->left(nl));
++            partial->remove(0, nl + 1);
++            if (line)
++                line(text);
++        }
++    });
++    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
++            [process, done](int code, QProcess::ExitStatus exit_status) {
++        const QString err = QString::fromUtf8(process->readAllStandardError()).trimmed().split('\n').last();
++        const bool ok = exit_status == QProcess::NormalExit && code == 0;
++        done(ok, ok ? QString() : (err.isEmpty() ? QString("Failed (exit code %1)").arg(code) : err));
++        process->deleteLater();
++    });
++    connect(process, &QProcess::errorOccurred, [process, done](QProcess::ProcessError error) {
++        if (error == QProcess::FailedToStart) {
++            done(false, "Software updates are not available on this system.");
++            process->deleteLater();
++        }
++    });
++    process->start(kTool, args);
++}
++
++void UpdateSettingsTab::job(const QStringList &args, std::function<void(bool, const QString &)> done)
++{
++    this->set_busy(true);
++    this->report(true, QString());
++    this->progress->setValue(0);
++    this->progress->show();
++    this->step->show();
++    this->step->clear();
++    this->restart_button->hide();
++    this->state->setText("Working on it: the radio keeps running meanwhile.");
++    // The buttons are further down: bring the progress into view
++    QTimer::singleShot(0, this, [this] { this->scroll->ensureWidgetVisible(this->state, 0, 40); });
++    this->run(args, [this](const QString &line) {
++        if (line.startsWith("step "))
++            this->step->setText(line.mid(5) + "...");
++        else if (line.startsWith("progress "))
++            this->progress->setValue(line.mid(9).toInt());
++    }, [this, done](bool ok, const QString &message) {
++        this->progress->hide();
++        this->step->hide();
++        this->set_busy(false);
++        done(ok, message);
++    });
++}
++
++void UpdateSettingsTab::refresh()
++{
++    auto process = new QProcess(this);
++    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), [this, process](int, QProcess::ExitStatus) {
++        QMap<QString, QString> status;
++        for (const QString &line : QString::fromUtf8(process->readAllStandardOutput()).split('\n')) {
++            const int eq = line.indexOf('=');
++            if (eq > 0)
++                status[line.left(eq)] = line.mid(eq + 1);
++        }
++        process->deleteLater();
++        this->show_status(status);
++    });
++    connect(process, &QProcess::errorOccurred, [this, process](QProcess::ProcessError error) {
++        if (error == QProcess::FailedToStart) {
++            this->version->setText("unknown");
++            this->state->setText("Software updates are not available on this system.");
++            for (auto button : this->buttons)
++                button->setEnabled(false);
++            this->timer->stop();
++            process->deleteLater();
++        }
++    });
++    process->start(kTool, {"status"});
++}
++
++void UpdateSettingsTab::show_status(const QMap<QString, QString> &s)
++{
++    this->status = s;
++    this->version->setText(describe(s.value("version"), s.value("build")));
++
++    const QString state = s.value("state");
++    const QString target = s.value("state.version");
++    const bool supported = s.value("supported") == "yes";
++    QString text;
++    if (!supported)
++        text = "This SD card can't take updates: flash it with an Ozark OS image that has two system slots (0.2 or later).";
++    else if (s.value("busy") == "yes")
++        text = "Installing an update...";
++    else if (state == "pending")
++        text = QString("Version %1 is installed. Restart to start it.").arg(target);
++    else if (state == "trying")
++        text = QString("Starting version %1 for the first time...").arg(target);
++    else if (state == "failed")
++        text = QString("The update to %1 didn't work: %2. Still on %3.")
++                   .arg(target, s.value("state.reason").toLower(), s.value("version"));
++    else if (state == "committed" && target == s.value("version"))
++        text = QString("Updated from %1.").arg(s.value("state.from"));
++    else
++        text = "Up to date with what this radio knows of.";
++    this->state->setText(text);
++
++    const bool pending = state == "pending";
++    this->restart_button->setVisible(pending);
++    this->restart_question->setText(QString("Restart into version %1 now?").arg(target));
++
++    if (!this->filled) {
++        this->loading = true;
++        this->feed->set_value(s.value("feed"));
++        this->auto_check->setChecked(s.value("auto") != "no");
++        this->loading = false;
++        this->filled = true;
++    }
++
++    const QString checked = s.value("available.checked");
++    const bool newer = s.value("available.newer") == "yes";
++    if (s.value("feed").isEmpty())
++        this->available->setText("set an update address to check");
++    else if (checked.isEmpty())
++        this->available->setText("not checked yet");
++    else {
++        const QString when = QDateTime::fromSecsSinceEpoch(checked.toLongLong()).toString("d MMM HH:mm");
++        this->available->setText(newer
++            ? QString("%1 (checked %2)").arg(describe(s.value("available.version"), s.value("available.build")), when)
++            : QString("this version is the newest (checked %1)").arg(when));
++    }
++    const QString notes = QString(s.value("available.notes")).replace("\\n", "\n");
++    this->notes->setText(notes);
++    this->notes->setVisible(newer && !notes.isEmpty());
++    this->install_online->setVisible(supported && newer);
++    this->install_online->setText(s.value("downloaded") == "yes" ? "install" : "download and install");
++}
++
++void UpdateSettingsTab::set_busy(bool busy)
++{
++    this->busy = busy;
++    for (auto button : this->buttons)
++        button->setEnabled(!busy);
++    this->feed->setEnabled(!busy);
++}
++
++void UpdateSettingsTab::report(bool ok, const QString &message)
++{
++    this->result->setText(message);
++    this->result->setStyleSheet(ok ? QString() : QString("color: rgb(211, 47, 47);"));
++    this->result->setVisible(!message.isEmpty());
++}
++
++void UpdateSettingsTab::check()
++{
++    this->job({"check"}, [this](bool ok, const QString &message) {
++        this->report(ok, ok ? QString() : message);
++        this->refresh();
++    });
++}
++
++void UpdateSettingsTab::download_and_install()
++{
++    this->job({"download"}, [this](bool ok, const QString &message) {
++        if (!ok) {
++            this->report(false, message);
++            this->refresh();
++            return;
++        }
++        this->install(QString());
++    });
++}
++
++void UpdateSettingsTab::install(const QString &file)
++{
++    QStringList args{"install"};
++    if (!file.isEmpty())
++        args << file;
++    this->job(args, [this](bool ok, const QString &message) {
++        this->report(ok, ok ? "Installed. Restart the radio to start the new version." : message);
++        this->refresh();
++        if (ok)
++            this->restart_dialog->open();
++    });
++}
++
++void UpdateSettingsTab::find_usb()
++{
++    this->set_busy(true);
++    this->report(true, "Looking on USB drives...");
++    auto found = std::make_shared<QStringList>();
++    this->usb_paths.clear();
++    this->run({"usb"}, [this, found](const QString &line) {
++        // swu=PATH|VERSION
++        if (!line.startsWith("swu="))
++            return;
++        const QString entry = line.mid(4);
++        const int bar = entry.lastIndexOf('|');
++        const QString path = entry.left(bar);
++        const QString text = QString("%1 (%2)").arg(QFileInfo(path).fileName(), entry.mid(bar + 1));
++        this->usb_paths[text] = path;
++        found->append(text);
++    }, [this, found](bool ok, const QString &message) {
++        this->set_busy(false);
++        this->usb_files->set_options(*found);
++        this->usb_row->setVisible(true);
++        const bool any = !found->isEmpty();
++        this->install_usb->setVisible(any && this->status.value("supported") == "yes");
++        if (!ok)
++            this->report(false, message);
++        else
++            this->report(true, any ? QString() : "No .swu update files on the USB drives plugged in.");
++    });
++}
++
++void UpdateSettingsTab::restart()
++{
++    this->arbiter.settings().sync();
++    sync();
++    QProcess::startDetached(kTool, {"reboot"});
++}
+-- 
+2.43.0
+

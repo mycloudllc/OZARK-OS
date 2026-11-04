@@ -10,7 +10,10 @@ header:
 
 machine: raspberrypi4-64
 distro: ozark
-target: ozark-image
+# The SD card image, and the same system as a signed update (.swu)
+target:
+  - ozark-image
+  - ozark-swu
 
 repos:
   # This repository. No url: kas uses the checkout this file lives in.
@@ -38,6 +41,11 @@ repos:
 
   meta-qt5:
     url: https://github.com/meta-qt5/meta-qt5
+    branch: scarthgap
+
+  # Software updates (Settings > Update): SWUpdate and the .swu image class
+  meta-swupdate:
+    url: https://github.com/sbabic/meta-swupdate
     branch: scarthgap
 
 local_conf_header:

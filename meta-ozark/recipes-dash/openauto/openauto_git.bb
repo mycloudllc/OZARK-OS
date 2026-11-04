@@ -14,6 +14,7 @@ SRC_URI = " \
     file://0004-Crop-the-projection-on-the-GPU-not-with-videocrop.patch \
     file://0005-Ozark-default-right-hand-drive.patch \
     file://0006-Microphone-open-only-a-microphone-that-exists.patch \
+    file://0007-Wireless-AA-phones-no-longer-get-stuck-on-Connecting.patch \
 "
 SRCREV = "e7caeb4d49186af867c1d4693c9f3bf9e9ef99e0"
 PV = "2.1.0+git"

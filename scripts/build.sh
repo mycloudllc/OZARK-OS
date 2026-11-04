@@ -84,6 +84,9 @@ if [ "$avail_gb" -lt 100 ]; then
     echo "WARNING: only ${avail_gb} GB free here; a first build needs roughly 100 GB." >&2
 fi
 
+# Updates (.swu) are signed: make the key pair on the first build
+"$ROOT/scripts/make-keys.sh"
+
 # --- kas-container -------------------------------------------------------------
 
 KAS_CONTAINER="$(command -v kas-container || true)"

@@ -5,7 +5,7 @@
 #
 # Options:
 #   --base       Boot ozark-image-base instead of ozark-image
-#   --size WxH   Screen size (default 800x480, the official 7" Pi touchscreen)
+#   --size WxH   Screen size (default 1920x1080; 1280x800 matches the Waveshare 8" panel)
 #   --no-gl      Plain 2D virtio-gpu, for hosts where GTK OpenGL doesn't work
 #   --persist    Keep changes to the rootfs (default: every boot starts clean)
 #   -h|--help    Show this help
@@ -24,7 +24,7 @@ DEPLOY="$ROOT/build/build/tmp/deploy/images/qemuarm64"
 usage() { sed -n '2,/^$/{s/^# \{0,1\}//;p}' "$0"; }
 
 image="ozark-image"
-size="800x480"
+size="1920x1080"
 gl=1
 snapshot=(-snapshot)
 
@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-[[ "$size" =~ ^([0-9]+)x([0-9]+)$ ]] || { echo "--size must look like 800x480" >&2; exit 2; }
+[[ "$size" =~ ^([0-9]+)x([0-9]+)$ ]] || { echo "--size must look like 1920x1080" >&2; exit 2; }
 xres="${BASH_REMATCH[1]}" yres="${BASH_REMATCH[2]}"
 
 command -v qemu-system-aarch64 >/dev/null 2>&1 || {

@@ -1,0 +1,376 @@
+From 70e931c38b33a42b4d6a3946f2cac1bc018fb883 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 3 Nov 2026 20:43:21 -0600
+Subject: [PATCH] Wireless AA: phones no longer get stuck on "Connecting to
+ Android Auto"
+
+Two ways a phone waited forever:
+
+- The Bluetooth handshake took each read as exactly one message. RFCOMM
+  can deliver two messages in one read, or one in two; the extra or partial
+  message was lost and the phone never got its answer. Messages are now
+  framed by their length, and each phone has its own socket and buffer (a
+  second phone, or the same one reconnecting, took over the first's socket).
+
+- A phone that came back over Wi-Fi while its old session hadn't timed out
+  yet was turned away, and port 5000 then stopped listening for good. A new
+  wireless connection now replaces the old wireless session, the port keeps
+  listening during a session, and a failed accept listens again.
+---
+ btservice/AndroidBluetoothServer.cpp         | 85 ++++++++++++--------
+ include/btservice/AndroidBluetoothServer.hpp | 20 +++--
+ include/openauto/App.hpp                     |  4 +
+ openauto/App.cpp                             | 49 +++++++++--
+ 4 files changed, 109 insertions(+), 49 deletions(-)
+
+diff --git a/btservice/AndroidBluetoothServer.cpp b/btservice/AndroidBluetoothServer.cpp
+index d453d75..f8f122d 100644
+--- a/btservice/AndroidBluetoothServer.cpp
++++ b/btservice/AndroidBluetoothServer.cpp
+@@ -46,7 +46,6 @@ QString accessPointAddress()
+ 
+ AndroidBluetoothServer::AndroidBluetoothServer(openauto::configuration::IConfiguration::Pointer config)
+     : rfcommServer_(std::make_unique<QBluetoothServer>(QBluetoothServiceInfo::RfcommProtocol, this))
+-    , socket_(nullptr)
+     , config_(std::move(config))
+ {
+     connect(rfcommServer_.get(), &QBluetoothServer::newConnection, this, &AndroidBluetoothServer::onClientConnected);
+@@ -60,20 +59,25 @@ bool AndroidBluetoothServer::start(const QBluetoothAddress& address, uint16_t po
+ 
+ void AndroidBluetoothServer::onClientConnected()
+ {
+-    socket_ = rfcommServer_->nextPendingConnection();
+-    if(socket_ != nullptr)
++    // Each phone gets its own handshake. One socket for all of them meant a
++    // second phone (or the same phone reconnecting) took over the first's
++    // replies mid-handshake.
++    while(QBluetoothSocket* socket = rfcommServer_->nextPendingConnection())
+     {
+-        OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Device Connected: " << socket_->peerName().toStdString();
+-        connect(socket_, SIGNAL(readyRead()), this, SLOT(readSocket()));
+-        writeSocketInfoRequest();
+-    }
+-    else
+-    {
+-        OPENAUTO_LOG(error) << "[AndroidBluetoothServer] received null socket during client connection.";
++        OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Device Connected: " << socket->peerName().toStdString()
++                           << " (" << socket->peerAddress().toString().toStdString() << ")";
++        sockets_.insert(socket, QByteArray());
++        connect(socket, &QBluetoothSocket::readyRead, this, &AndroidBluetoothServer::readSocket);
++        connect(socket, &QBluetoothSocket::disconnected, this, [this, socket]() {
++            OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Device Disconnected: " << socket->peerName().toStdString();
++            sockets_.remove(socket);
++            socket->deleteLater();
++        });
++        writeSocketInfoRequest(socket);
+     }
+ }
+ 
+-bool AndroidBluetoothServer::writeProtoMessage(uint16_t messageType, google::protobuf::Message& message)
++bool AndroidBluetoothServer::writeProtoMessage(QBluetoothSocket* socket, uint16_t messageType, google::protobuf::Message& message)
+ {
+     QByteArray byteArray(message.SerializeAsString().c_str(), message.ByteSize());
+     uint16_t messageLength = message.ByteSize();
+@@ -82,7 +86,7 @@ bool AndroidBluetoothServer::writeProtoMessage(uint16_t messageType, google::pro
+     byteArray.prepend(messageLength & 0x000000ff);
+     byteArray.prepend((messageLength & 0x0000ff00) >> 8);
+ 
+-    if(socket_->write(byteArray) != byteArray.length())
++    if(socket->write(byteArray) != byteArray.length())
+     {
+         return false;
+     }
+@@ -90,7 +94,7 @@ bool AndroidBluetoothServer::writeProtoMessage(uint16_t messageType, google::pro
+     return true;
+ }
+ 
+-void AndroidBluetoothServer::writeSocketInfoRequest()
++void AndroidBluetoothServer::writeSocketInfoRequest(QBluetoothSocket* socket)
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sending SocketInfoRequest.";
+ 
+@@ -103,7 +107,7 @@ void AndroidBluetoothServer::writeSocketInfoRequest()
+     socketInfoRequest.set_port(5000);
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] port: "<< 5000;
+ 
+-    if(this->writeProtoMessage(1, socketInfoRequest))
++    if(this->writeProtoMessage(socket, 1, socketInfoRequest))
+     {
+         OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sent SocketInfoRequest.";
+     }
+@@ -112,7 +116,7 @@ void AndroidBluetoothServer::writeSocketInfoRequest()
+         OPENAUTO_LOG(error) << "[AndroidBluetoothServer] Error sending SocketInfoRequest.";
+     }
+ }
+-void AndroidBluetoothServer::writeSocketInfoResponse()
++void AndroidBluetoothServer::writeSocketInfoResponse(QBluetoothSocket* socket)
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sending SocketInfoResponse.";
+     QString ipAddr = accessPointAddress();
+@@ -128,7 +132,7 @@ void AndroidBluetoothServer::writeSocketInfoResponse()
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] status: "<< btservice::proto::Status::STATUS_SUCCESS;
+ 
+ 
+-    if(this->writeProtoMessage(7, socketInfoResponse))
++    if(this->writeProtoMessage(socket, 7, socketInfoResponse))
+     {
+         OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sent SocketInfoResponse.";
+     }
+@@ -138,7 +142,7 @@ void AndroidBluetoothServer::writeSocketInfoResponse()
+     }
+ }
+ 
+-void AndroidBluetoothServer::handleSocketInfoRequestResponse(QByteArray data)
++void AndroidBluetoothServer::handleSocketInfoRequestResponse(QBluetoothSocket* socket, const QByteArray& data)
+ {
+     btservice::proto::SocketInfoResponse socketInfoResponse;
+     socketInfoResponse.ParseFromArray(data, data.size());
+@@ -147,22 +151,20 @@ void AndroidBluetoothServer::handleSocketInfoRequestResponse(QByteArray data)
+     {
+         // A status of 0 should be successful handshake (unless phone later reports an error, aw well)
+         // save this phone so we can autoconnect to it next time
+-        config_->setLastBluetoothPair(socket_->peerAddress().toString().toStdString());
++        config_->setLastBluetoothPair(socket->peerAddress().toString().toStdString());
+         config_->save();
+     }
+ }
+ 
+ 
+-void AndroidBluetoothServer::handleSocketInfoRequest(QByteArray data)
++void AndroidBluetoothServer::handleSocketInfoRequest(QBluetoothSocket* socket, const QByteArray&)
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Reading SocketInfoRequest.";
+ 
+-    btservice::proto::SocketInfoRequest socketInfoRequest;
+-    
+-    writeSocketInfoResponse();
++    writeSocketInfoResponse(socket);
+ }
+ 
+-void AndroidBluetoothServer::writeNetworkInfoMessage()
++void AndroidBluetoothServer::writeNetworkInfoMessage(QBluetoothSocket* socket)
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sending NetworkInfoMessage.";
+ 
+@@ -192,7 +194,7 @@ void AndroidBluetoothServer::writeNetworkInfoMessage()
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] AP Type: "<< btservice::proto::AccessPointType::STATIC;
+ 
+ 
+-    if(this->writeProtoMessage(3, networkMessage))
++    if(this->writeProtoMessage(socket, 3, networkMessage))
+     {
+         OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Sent NetworkInfoMessage";
+     }
+@@ -202,7 +204,7 @@ void AndroidBluetoothServer::writeNetworkInfoMessage()
+     }
+ }
+ 
+-void AndroidBluetoothServer::handleUnknownMessage(int messageType, QByteArray data)
++void AndroidBluetoothServer::handleUnknownMessage(int messageType, const QByteArray& data)
+ {
+         OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Received unknown MessageType of "<<messageType;
+         OPENAUTO_LOG(info) << "[AndroidBluetoothServer] Unknown Message Data: "<<data.toHex(' ').toStdString()  ;
+@@ -210,32 +212,45 @@ void AndroidBluetoothServer::handleUnknownMessage(int messageType, QByteArray da
+ 
+ void AndroidBluetoothServer::readSocket()
+ {
+-    if(!socket_)
++    auto socket = qobject_cast<QBluetoothSocket*>(sender());
++    if(socket == nullptr || !sockets_.contains(socket))
+     {
+         return;
+     }
+ 
+-    auto data = socket_->readAll();
+-    if(data.length() == 0)
++    // Messages are [length:2][type:2][payload:length], big-endian. Take every
++    // whole one; keep a partial one for the next read.
++    QByteArray& buffer = sockets_[socket];
++    buffer.append(socket->readAll());
++    while(buffer.size() >= 4)
+     {
+-        return;
++        const auto byte = [&buffer](int i) { return static_cast<uint16_t>(static_cast<uint8_t>(buffer[i])); };
++        const uint16_t messageLength = (byte(0) << 8) | byte(1);
++        const uint16_t messageType = (byte(2) << 8) | byte(3);
++        if(buffer.size() < 4 + messageLength)
++        {
++            break;
++        }
++        const QByteArray payload = buffer.mid(4, messageLength);
++        buffer.remove(0, 4 + messageLength);
++        handleMessage(socket, messageType, payload);
+     }
++}
+ 
+-    uint16_t messageType = (data[2] << 8) | data[3];
++void AndroidBluetoothServer::handleMessage(QBluetoothSocket* socket, uint16_t messageType, const QByteArray& data)
++{
+     switch(messageType)
+     {
+         case 1:
+-            handleSocketInfoRequest(data);
++            handleSocketInfoRequest(socket, data);
+             break;
+         case 2:
+-            writeNetworkInfoMessage();
++            writeNetworkInfoMessage(socket);
+             break;
+         case 7:
+-            data.remove(0, 4);
+-            handleSocketInfoRequestResponse(data);
++            handleSocketInfoRequestResponse(socket, data);
+             break;
+         default:
+-            data.remove(0, 4);
+             handleUnknownMessage(messageType, data);
+             break;
+     }
+diff --git a/include/btservice/AndroidBluetoothServer.hpp b/include/btservice/AndroidBluetoothServer.hpp
+index d6d9d48..4de6a8f 100644
+--- a/include/btservice/AndroidBluetoothServer.hpp
++++ b/include/btservice/AndroidBluetoothServer.hpp
+@@ -7,6 +7,7 @@
+ #include <QBluetoothServer>
+ #include <QBluetoothLocalDevice>
+ #include <QDataStream>
++#include <QHash>
+ #include <btservice_proto/NetworkInfo.pb.h>
+ #include <btservice_proto/SocketInfoRequest.pb.h>
+ #include <btservice_proto/SocketInfoResponse.pb.h>
+@@ -32,16 +33,19 @@ private slots:
+ 
+ private:
+     std::unique_ptr<QBluetoothServer> rfcommServer_;
+-    QBluetoothSocket* socket_;
++    // Every phone in the handshake, with what it has sent that isn't a whole
++    // message yet: messages can arrive split, or several in one read
++    QHash<QBluetoothSocket*, QByteArray> sockets_;
+     openauto::configuration::IConfiguration::Pointer config_;
+ 
+-    void handleUnknownMessage(int messageType, QByteArray data);
+-    void handleSocketInfoRequest(QByteArray data);
+-    void handleSocketInfoRequestResponse(QByteArray data);
+-    void writeSocketInfoRequest();
+-    void writeSocketInfoResponse();
+-    void writeNetworkInfoMessage();
+-    bool writeProtoMessage(uint16_t messageType, google::protobuf::Message& message);
++    void handleMessage(QBluetoothSocket* socket, uint16_t messageType, const QByteArray& data);
++    void handleUnknownMessage(int messageType, const QByteArray& data);
++    void handleSocketInfoRequest(QBluetoothSocket* socket, const QByteArray& data);
++    void handleSocketInfoRequestResponse(QBluetoothSocket* socket, const QByteArray& data);
++    void writeSocketInfoRequest(QBluetoothSocket* socket);
++    void writeSocketInfoResponse(QBluetoothSocket* socket);
++    void writeNetworkInfoMessage(QBluetoothSocket* socket);
++    bool writeProtoMessage(QBluetoothSocket* socket, uint16_t messageType, google::protobuf::Message& message);
+ 
+ };
+ 
+diff --git a/include/openauto/App.hpp b/include/openauto/App.hpp
+index 41a27f9..ed7367e 100644
+--- a/include/openauto/App.hpp
++++ b/include/openauto/App.hpp
+@@ -60,6 +60,10 @@ private:
+     aasdk::usb::IConnectedAccessoriesEnumerator::Pointer connectedAccessoriesEnumerator_;
+     openauto::service::IAndroidAutoEntity::Pointer androidAutoEntity_;
+     bool isStopped_;
++    // The running session came over Wi-Fi (not USB)
++    bool wireless_ = false;
++    // An accept on port 5000 is waiting for a phone
++    bool acceptPending_ = false;
+ };
+ 
+ }
+diff --git a/openauto/App.cpp b/openauto/App.cpp
+index a872a3e..1ca4db8 100644
+--- a/openauto/App.cpp
++++ b/openauto/App.cpp
+@@ -60,9 +60,21 @@ void App::start(aasdk::tcp::ITCPEndpoint::SocketPointer socket)
+     strand_.dispatch([this, self = this->shared_from_this(), socket = std::move(socket)]() mutable {
+         if(androidAutoEntity_ != nullptr)
+         {
+-            tcpWrapper_.close(*socket);
+-            OPENAUTO_LOG(warning) << "[App] android auto entity is still running.";
+-            return;
++            if(!wireless_)
++            {
++                tcpWrapper_.close(*socket);
++                OPENAUTO_LOG(warning) << "[App] android auto entity is still running (USB).";
++                this->waitForWirelessDevice();
++                return;
++            }
++
++            // A phone connecting over Wi-Fi again means the session it had is
++            // gone (it left the hotspot, or gave up), even if that session
++            // hasn't timed out here yet. Turning it away left the phone on
++            // "Connecting to Android Auto" for good: nothing listened after.
++            OPENAUTO_LOG(info) << "[App] New wireless connection: ending the previous wireless session.";
++            androidAutoEntity_->stop();
++            androidAutoEntity_.reset();
+         }
+ 
+         try
+@@ -72,7 +84,10 @@ void App::start(aasdk::tcp::ITCPEndpoint::SocketPointer socket)
+ 
+             auto tcpEndpoint(std::make_shared<aasdk::tcp::TCPEndpoint>(tcpWrapper_, std::move(socket)));
+             androidAutoEntity_ = androidAutoEntityFactory_.create(std::move(tcpEndpoint));
++            wireless_ = true;
+             androidAutoEntity_->start(*this);
++            // Keep listening, so a phone that reconnects replaces this session
++            this->waitForWirelessDevice();
+         }
+         catch(const aasdk::error::Error& error)
+         {
+@@ -115,6 +130,7 @@ void App::aoapDeviceHandler(aasdk::usb::DeviceHandle deviceHandle)
+ 
+         auto aoapDevice(aasdk::usb::AOAPDevice::create(usbWrapper_, ioService_, deviceHandle));
+         androidAutoEntity_ = androidAutoEntityFactory_.create(std::move(aoapDevice));
++        wireless_ = false;
+         androidAutoEntity_->start(*this);
+     }
+     catch(const aasdk::error::Error& error)
+@@ -153,8 +169,26 @@ void App::waitForWirelessDevice()
+ {
+     OPENAUTO_LOG(info) << "[App] Waiting for Wireless device...";
+ 
++    if(acceptPending_)
++    {
++        return;
++    }
++    acceptPending_ = true;
++
+     auto socket = std::make_shared<boost::asio::ip::tcp::socket>(ioService_);
+-    acceptor_.async_accept(*socket, [this, socket](const boost::system::error_code &) { this->start(socket); });
++    acceptor_.async_accept(*socket, strand_.wrap([this, self = this->shared_from_this(), socket](const boost::system::error_code &ec) {
++        acceptPending_ = false;
++        if(ec)
++        {
++            OPENAUTO_LOG(error) << "[App] Wireless accept failed: " << ec.message();
++            if(ec != boost::asio::error::operation_aborted && !isStopped_)
++            {
++                this->waitForWirelessDevice();
++            }
++            return;
++        }
++        this->start(socket);
++    }));
+ }
+ 
+ void App::onAndroidAutoQuit()
+@@ -162,8 +196,11 @@ void App::onAndroidAutoQuit()
+     strand_.dispatch([this, self = this->shared_from_this()]() {
+         OPENAUTO_LOG(info) << "[App] quit.";
+ 
+-        androidAutoEntity_->stop();
+-        androidAutoEntity_.reset();
++        if(androidAutoEntity_ != nullptr)
++        {
++            androidAutoEntity_->stop();
++            androidAutoEntity_.reset();
++        }
+ 
+         if(!isStopped_)
+         {
+-- 
+2.43.0
+

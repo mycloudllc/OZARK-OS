@@ -1,6 +1,6 @@
 SUMMARY = "Boot logs on the SD card"
 DESCRIPTION = "Writes each boot's system journal as plain text to the OZARKLOGS \
-vfat partition (see ozark-sdimage.wks), mounted at /logs, so logs from a Pi that \
+vfat partition (see ozark-sdimage.wks.in), mounted at /logs, so logs from a Pi that \
 won't come up can be read by putting its SD card in any PC."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"

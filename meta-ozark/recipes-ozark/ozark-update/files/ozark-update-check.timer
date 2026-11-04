@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for software updates now and then (Settings > Update: Check automatically)
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=6h
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+[Unit]
+Description=Keep settings on the data partition
+DefaultDependencies=no
+RequiresMountsFor=/data
+ConditionPathIsMountPoint=/data
+After=data.mount systemd-growfs@data.service
+Before=local-fs.target systemd-tmpfiles-setup.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ozark-data mount
+
+[Install]
+WantedBy=local-fs.target

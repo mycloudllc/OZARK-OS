@@ -43,6 +43,8 @@ SRC_URI = " \
     file://0023-Bluetooth-and-Local-players-now-playing-view-library.patch \
     file://0024-Network-show-the-hotspot-s-bands.patch \
     file://0025-Settings-Lighting-WLED-controllers.patch \
+    file://0026-Settings-Update-install-software-updates-online-or-f.patch \
+    file://0027-Bluetooth-player-follow-the-phone-s-track-and-play-p.patch \
     file://trailcommand;subdir=git/plugins/vehicle \
     file://lighting/common \
     file://lighting/interior_lighting \

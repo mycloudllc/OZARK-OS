@@ -1,0 +1,467 @@
+#!/bin/sh
+# Software updates: the backend of Settings > Update in Dash (also handy over
+# SSH).
+#
+#   ozark-update status              key=value lines
+#   ozark-update check [--auto]      ask the update feed for a newer version
+#   ozark-update download            download the newer version it found
+#   ozark-update install [FILE.swu]  install FILE, or the download, into the other slot
+#   ozark-update usb                 look for .swu files on USB drives
+#   ozark-update usb-release         unmount the USB drives usb mounted
+#   ozark-update reboot              restart; into the new system once installed
+#   ozark-update feed URL            set the update feed ("" for none)
+#   ozark-update auto yes|no         check the feed by itself (ozark-update-check.timer)
+#   ozark-update boot                at boot: keep the new system once it runs, or go back
+#
+# The SD card has two system slots, A and B (classes/ozark-slots.bbclass in
+# meta-ozark). An update is written into the one not running, by SWUpdate,
+# which checks it was signed with the build's key. The Pi then boots it once
+# (tryboot): only when Dash has run for a while does "boot" make it the
+# system for good (os_prefix in /boot/config.txt). If it doesn't get that far,
+# the next start is the old system again, as if nothing happened.
+#
+# check, download and install print progress lines while they work:
+#   step TEXT, progress N (percent), and done / available=yes|no at the end.
+# On failure they print the reason on stderr and exit 1.
+
+conf=/etc/ozark/update.conf
+key=/etc/swupdate/public.pem
+helper=/usr/libexec/ozark-update-helper
+run=/run/ozark-update
+boot=/boot
+if mountpoint -q /data; then
+    state_dir=/data/ozark-update
+else
+    state_dir=/var/lib/ozark-update
+fi
+state_file=$state_dir/state
+available_file=$state_dir/available
+download=$state_dir/download.swu
+
+# Dash is healthy once it has run this long without restarting; give up after
+health_secs=30
+health_timeout=300
+
+fail() {
+    echo "$*" >&2
+    exit 1
+}
+
+mkdir -p "$run" "$state_dir"
+
+# Settings files are shell, values single-quoted
+plain() {
+    case "$1" in *\'*|*\\*) return 1 ;; esac
+    [ "$1" = "$(printf '%s' "$1" | tr -d '\001-\037\177')" ]
+}
+
+load_conf() {
+    FEED= AUTO=yes
+    [ -f "$conf" ] && . "$conf"
+}
+
+save_conf() {
+    mkdir -p "$(dirname "$conf")"
+    cat > "$conf.tmp" <<CONF
+# Software updates (see /usr/sbin/ozark-update)
+FEED='$FEED'
+AUTO='$AUTO'
+CONF
+    mv "$conf.tmp" "$conf"
+}
+
+load_state() {
+    STATE= TARGET= VERSION= BUILD= FROM= REASON=
+    [ -f "$state_file" ] && . "$state_file"
+}
+
+# A value single-quoted for the state file (it can hold quotes: reasons)
+q() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+save_state() {
+    cat > "$state_file.tmp" <<STATE
+STATE=$(q "$STATE")
+TARGET=$(q "$TARGET")
+VERSION=$(q "$VERSION")
+BUILD=$(q "$BUILD")
+FROM=$(q "$FROM")
+REASON=$(q "$REASON")
+STATE
+    mv "$state_file.tmp" "$state_file"
+    sync
+}
+
+this_version() {
+    sed -n 's/^VERSION_ID=//p' /etc/os-release | tr -d '"'
+}
+
+this_build() {
+    sed -n 's/^BUILD=//p' /etc/ozark-build 2>/dev/null
+}
+
+# Slot running now: a, b, or "" (not booted from a slot: QEMU, an old card)
+this_slot() {
+    case " $(cat /proc/cmdline) " in
+        *" root=/dev/mmcblk0p2 "*) echo a ;;
+        *" root=/dev/mmcblk0p3 "*) echo b ;;
+    esac
+}
+
+other_slot() {
+    case "$1" in a) echo b ;; b) echo a ;; esac
+}
+
+slot_device() {
+    case "$1" in a) echo /dev/mmcblk0p2 ;; b) echo /dev/mmcblk0p3 ;; esac
+}
+
+# Slot config.txt boots (the committed one)
+committed_slot() {
+    sed -n 's|^os_prefix=\([ab]\)/.*|\1|p' "$boot/config.txt" 2>/dev/null | tail -n 1
+}
+
+supported() {
+    [ -n "$(this_slot)" ] && [ -f "$boot/config.txt" ] && [ -b "$(slot_device b)" ]
+}
+
+lock() {
+    exec 9> "$run/lock"
+    flock -n 9 || fail "An update is already being installed."
+}
+
+busy() {
+    ( flock -n 9 || exit 1 ) 9> "$run/lock" 2>/dev/null && return 1
+    return 0
+}
+
+status() {
+    load_conf
+    load_state
+    echo "version=$(this_version)"
+    echo "build=$(this_build)"
+    echo "slot=$(this_slot)"
+    supported && echo "supported=yes" || echo "supported=no"
+    busy && echo "busy=yes" || echo "busy=no"
+    echo "feed=$FEED"
+    echo "auto=$AUTO"
+    echo "state=$STATE"
+    echo "state.version=$VERSION"
+    echo "state.build=$BUILD"
+    echo "state.from=$FROM"
+    echo "state.reason=$REASON"
+    if [ -f "$available_file" ]; then
+        sed 's/^/available./' "$available_file"
+    fi
+    [ -f "$download" ] && echo "downloaded=yes" || echo "downloaded=no"
+}
+
+value() {
+    sed -n "s/^$1=//p" "$2" | head -n 1
+}
+
+# Is VERSION/BUILD newer than this system?
+newer() {
+    "$helper" newer "$1" "${2:-0}" "$(this_version)" "$(this_build)"
+}
+
+check() {
+    load_conf
+    if [ "$1" = "--auto" ]; then
+        # From the timer: quietly skip when it's off or there's nothing to ask
+        [ "$AUTO" = yes ] && [ -n "$FEED" ] || exit 0
+    fi
+    [ -n "$FEED" ] || fail "Set an update address first."
+    echo "step Checking for updates"
+    if ! curl -fsSL --connect-timeout 15 --max-time 60 -o "$run/feed.json" "$FEED" 2> "$run/feed.err"; then
+        err=$(tail -n 1 "$run/feed.err" | sed 's/^curl: ([0-9]*) //')
+        fail "Can't reach the update address: ${err:-no answer}"
+    fi
+    "$helper" feed "$run/feed.json" > "$run/feed" || exit 1
+    version=$(value version "$run/feed")
+    build=$(value build "$run/feed")
+    url=$(value url "$run/feed")
+    machine=$(value machine "$run/feed")
+    [ -n "$url" ] || fail "The update feed has no url."
+    if [ -n "$machine" ] && [ "$machine" != "$(cat /etc/hwrevision | cut -d' ' -f1)" ]; then
+        fail "The update feed is for a different board ($machine)."
+    fi
+    # A relative url is next to the feed
+    case "$url" in
+        *://*) ;;
+        *) url="${FEED%/*}/$url" ;;
+    esac
+    if newer "$version" "$build"; then newer=yes; else newer=no; fi
+    old_url=$(value url "$available_file" 2>/dev/null)
+    {
+        echo "newer=$newer"
+        echo "version=$version"
+        echo "build=$build"
+        echo "url=$url"
+        echo "sha256=$(value sha256 "$run/feed")"
+        echo "size=$(value size "$run/feed")"
+        echo "notes=$(value notes "$run/feed")"
+        echo "checked=$(date +%s)"
+    } > "$available_file.tmp"
+    mv "$available_file.tmp" "$available_file"
+    # A download of something else is stale
+    [ "$url" = "$old_url" ] || rm -f "$download" "$download.part"
+    echo "available=$newer"
+}
+
+download() {
+    lock
+    [ -f "$available_file" ] || fail "Check for updates first."
+    url=$(value url "$available_file")
+    sha=$(value sha256 "$available_file")
+    size=$(value size "$available_file")
+    [ -n "$url" ] || fail "Check for updates first."
+    if [ -f "$download" ]; then
+        echo "done"
+        return
+    fi
+    echo "step Downloading"
+    curl -fL --retry 3 --connect-timeout 20 -C - -s -S -o "$download.part" "$url" 2> "$run/download.err" &
+    pid=$!
+    last=
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ -n "$size" ] && [ "$size" -gt 0 ] 2>/dev/null; then
+            got=$(stat -c %s "$download.part" 2>/dev/null || echo 0)
+            percent=$((got * 100 / size))
+            [ "$percent" -gt 100 ] && percent=100
+            [ "$percent" = "$last" ] || echo "progress $percent"
+            last=$percent
+        fi
+        sleep 1
+    done
+    if ! wait "$pid"; then
+        err=$(tail -n 1 "$run/download.err" | sed 's/^curl: ([0-9]*) //')
+        fail "The download didn't finish: ${err:-no answer}. Try again to carry on from here."
+    fi
+    if [ -n "$sha" ]; then
+        echo "step Checking the download"
+        if [ "$(sha256sum "$download.part" | cut -d' ' -f1)" != "$sha" ]; then
+            rm -f "$download.part"
+            fail "The download is damaged (checksum). Try again."
+        fi
+    fi
+    mv "$download.part" "$download"
+    echo "progress 100"
+    echo "done"
+}
+
+install() {
+    file=${1:-$download}
+    supported || fail "Updates need the A/B SD card layout (flash an Ozark OS image from 0.2 on)."
+    [ -f "$file" ] || fail "No update file: $file"
+    lock
+    current=$(this_slot)
+    target=$(other_slot "$current")
+    load_state
+    # Installing over a waiting update replaces it; never over the running system
+    [ "$target" != "$current" ] || fail "Can't install into the running system."
+
+    "$helper" swu-version "$file" > "$run/swu" 2>/dev/null || fail "Not an Ozark OS update file: $(basename "$file")"
+    version=$(value version "$run/swu")
+    build=$(value description "$run/swu" | sed -n 's/.*(build \([0-9]*\)).*/\1/p')
+
+    # Until it's done, the other slot is neither the old system nor the new
+    STATE=installing TARGET=$target VERSION=$version BUILD=$build FROM=$(this_version) REASON=
+    save_state
+
+    echo "step Checking the update"
+    echo "progress 0"
+    # The helper prints step/progress lines (and result) as SWUpdate goes
+    "$helper" progress 2>/dev/null &
+    progress_pid=$!
+    swupdate -v -k "$key" -e "stable,slot-$target" -i "$file" > "$run/install.log" 2>&1
+    rc=$?
+    # It stops by itself at the result; not if SWUpdate died without one
+    n=0
+    while kill -0 "$progress_pid" 2>/dev/null && [ "$n" -lt 20 ]; do
+        sleep 0.1
+        n=$((n + 1))
+    done
+    kill "$progress_pid" 2>/dev/null
+
+    if [ "$rc" -ne 0 ] || [ ! -f "$boot/tryboot.txt" ]; then
+        log=$run/errors
+        grep -F '[ERROR]' "$run/install.log" > "$log"
+        if grep -q 'rsa_verify\|verify_final\|DigestVerify' "$log"; then
+            why="This update isn't signed with this radio's key"
+        elif grep -q 'orrupt\|HASH mismatch\|hash mismatch\|invalid or corrupted' "$log"; then
+            why="The update file is damaged"
+        elif grep -q 'ardware\|hwrevision' "$log"; then
+            why="This update is for different hardware"
+        else
+            why=$(grep -v 'endupdate\|image_write' | head -n 1 | sed 's/.*ERROR [^:]*: [^:]*: [0-9]* : //; s/.*\[ERROR\][^:]*: *//')
+            why=${why:-SWUpdate exit code $rc}
+        fi
+        STATE=failed REASON=$why
+        save_state
+        rm -f "$boot/tryboot.txt"
+        sync
+        fail "$why: not installed. The current system is unchanged."
+    fi
+    STATE=pending
+    save_state
+    [ "$file" = "$download" ] && rm -f "$download"
+    echo "progress 100"
+    echo "done"
+}
+
+# Mounts USB drives read-only and lists their .swu files: swu=PATH|VERSION
+usb() {
+    mkdir -p "$run/usb"
+    for dev in /dev/sd[a-z] /dev/sd[a-z][0-9]*; do
+        [ -b "$dev" ] || continue
+        name=$(basename "$dev")
+        # A disk with partitions: look in the partitions
+        case "$name" in
+            *[a-z]) ls "$dev"[0-9]* >/dev/null 2>&1 && continue ;;
+        esac
+        dir=$run/usb/$name
+        if ! mountpoint -q "$dir"; then
+            mkdir -p "$dir"
+            mount -o ro "$dev" "$dir" 2>/dev/null || { rmdir "$dir"; continue; }
+        fi
+        for f in "$dir"/*.swu "$dir"/*/*.swu; do
+            [ -f "$f" ] || continue
+            # Not an update (no sw-description): leave it out
+            v=$("$helper" swu-version "$f" 2>/dev/null | sed -n 's/^version=//p')
+            [ -n "$v" ] && echo "swu=$f|$v"
+        done
+    done
+}
+
+usb_release() {
+    for dir in "$run"/usb/*; do
+        [ -d "$dir" ] || continue
+        umount "$dir" 2>/dev/null
+        rmdir "$dir" 2>/dev/null
+    done
+}
+
+do_reboot() {
+    load_state
+    usb_release
+    sync
+    if [ "$STATE" = pending ] && [ -f "$boot/tryboot.txt" ]; then
+        STATE=trying
+        save_state
+        # The firmware reads tryboot.txt for this one boot only
+        exec systemctl reboot --reboot-argument="0 tryboot"
+    fi
+    exec systemctl reboot
+}
+
+set_feed() {
+    load_conf
+    plain "$1" || fail "The address can't contain quotes, backslashes or control characters."
+    case "$1" in
+        ""|http://*|https://*) ;;
+        *) fail "The address must start with https:// (or http://)." ;;
+    esac
+    [ "$1" = "$FEED" ] || rm -f "$available_file" "$download" "$download.part"
+    FEED=$1
+    save_conf
+}
+
+set_auto() {
+    load_conf
+    case "$1" in
+        yes|no) AUTO=$1 ;;
+        *) fail "auto: yes or no" ;;
+    esac
+    save_conf
+}
+
+# Writes config.txt to boot this slot from now on
+commit() {
+    slot=$1
+    [ -f "$boot/$slot/config.txt" ] || fail "No $boot/$slot/config.txt"
+    { grep -v '^os_prefix=' "$boot/$slot/config.txt"; printf '[all]\nos_prefix=%s/\n' "$slot"; } > "$boot/config.txt.new"
+    sync
+    mv "$boot/config.txt.new" "$boot/config.txt"
+    rm -f "$boot/tryboot.txt"
+    sync
+}
+
+# Dash up for health_secs without restarting, within health_timeout
+healthy() {
+    waited=0
+    up=0
+    restarts=$(systemctl show -p NRestarts --value opendash.service 2>/dev/null)
+    while [ "$waited" -lt "$health_timeout" ]; do
+        now=$(systemctl show -p NRestarts --value opendash.service 2>/dev/null)
+        if [ "$now" != "$restarts" ]; then
+            REASON="Dash restarted during the first start"
+            return 1
+        fi
+        if [ "$(systemctl is-active opendash.service)" = active ]; then
+            up=$((up + 2))
+            [ "$up" -ge "$health_secs" ] && return 0
+        else
+            up=0
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    REASON="Dash didn't start"
+    return 1
+}
+
+on_boot() {
+    load_state
+    current=$(this_slot)
+    [ -n "$current" ] || exit 0
+    case "$STATE" in
+        trying|pending)
+            if [ "$current" = "$TARGET" ]; then
+                # Trial boot of the new system
+                if healthy; then
+                    commit "$current"
+                    STATE=committed REASON=
+                    save_state
+                    echo "Update to $VERSION committed: slot $current"
+                else
+                    STATE=failed
+                    save_state
+                    echo "Update to $VERSION failed ($REASON): back to the old system" >&2
+                    rm -f "$boot/tryboot.txt"
+                    sync
+                    systemctl reboot
+                fi
+            elif [ "$STATE" = trying ]; then
+                # Restarted into the update, but came back up in the old system
+                STATE=failed REASON="The new system didn't start"
+                rm -f "$boot/tryboot.txt"
+                save_state
+                echo "Update to $VERSION failed: still on slot $current" >&2
+            fi
+            ;;
+        installing)
+            # Power lost while installing: the other slot is unusable, the update not there
+            STATE=failed REASON="Installing was interrupted"
+            rm -f "$boot/tryboot.txt"
+            save_state
+            ;;
+    esac
+}
+
+cmd=$1
+[ $# -gt 0 ] && shift
+case "$cmd" in
+    status) status ;;
+    check) check "$@" ;;
+    download) download ;;
+    install) install "$@" ;;
+    usb) usb ;;
+    usb-release) usb_release ;;
+    reboot) do_reboot ;;
+    feed) set_feed "$1" ;;
+    auto) set_auto "$1" ;;
+    boot) on_boot ;;
+    *) sed -n '2,/^$/{s/^# \{0,1\}//;p}' "$0" >&2; exit 2 ;;
+esac

@@ -1,0 +1,19 @@
+# short-description: Ozark OS SD card for the Raspberry Pi, with A/B system slots
+# long-description: GPT (the Pi 4 boots from GPT), five partitions:
+#   1 boot       firmware at the top; each slot's kernel, dtbs and config in a/ and b/
+#   2 root       system slot A
+#   3 rootb      system slot B: empty until the first update writes it
+#   4 OZARKLOGS  plain-text boot logs (ozark-logs) that any PC can read. Separate
+#                from boot so a power cut mid-write can only damage logs.
+#   5 ozarkdata  settings, pairings and Dash's files (ozark-data): kept across
+#                updates. Grows to fill the card on first boot.
+# Slot sizes: OZARK_SLOT_SIZE (classes/ozark-slots.bbclass), 2560 MiB. All of it
+# fits an 8 GB card. No mountpoints here (wic would add fstab lines):
+# ozark-update (/boot), ozark-logs and ozark-data add them.
+
+bootloader --ptable gpt
+part --source bootimg-partition --ondisk mmcblk0 --fstype=vfat --label boot --active --align 4096 --size 256
+part / --source rootfs --ondisk mmcblk0 --fstype=ext4 --label root --align 4096 --fixed-size ${OZARK_SLOT_SIZE}M
+part --ondisk mmcblk0 --fstype=ext4 --label rootb --align 4096 --fixed-size ${OZARK_SLOT_SIZE}M
+part --ondisk mmcblk0 --fstype=vfat --label OZARKLOGS --align 4096 --size 256
+part --ondisk mmcblk0 --fstype=ext4 --label ozarkdata --align 4096 --size 256

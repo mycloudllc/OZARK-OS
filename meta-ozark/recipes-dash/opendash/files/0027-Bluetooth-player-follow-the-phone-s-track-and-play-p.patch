@@ -1,0 +1,104 @@
+From 51398ab2737750b8b3c1fd800c265540a497f35c Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 3 Nov 2026 21:05:17 -0600
+Subject: [PATCH] Bluetooth player: follow the phone's track and play/pause
+
+The Bluetooth player only looked at the phone's track when something about
+the device changed (signal strength, battery), and BlueZ reports a new
+track or play/pause on the media player instead. So it showed whatever was
+there when the phone connected, usually nothing, and never updated. With
+Android Auto connected it looked fine: that sends its own now-playing.
+
+Now the player's own track and status changes are followed. A phone already
+playing when Dash starts shows up too (it was picked without telling the
+pages), and device changes that aren't about the player no longer reset
+the page.
+---
+ include/app/services/bluetooth.hpp |  6 ++++++
+ src/app/services/bluetooth.cpp     | 34 +++++++++++++++++++++++++-----
+ 2 files changed, 35 insertions(+), 5 deletions(-)
+
+diff --git a/include/app/services/bluetooth.hpp b/include/app/services/bluetooth.hpp
+index f65ddea..16ad118 100644
+--- a/include/app/services/bluetooth.hpp
++++ b/include/app/services/bluetooth.hpp
+@@ -41,9 +41,15 @@ class Bluetooth : public QObject {
+ 
+    private:
+     void update_media_player(BluezQt::DevicePtr device);
++    // Follow this player's track and play/pause (BlueZ reports them on the
++    // player, not the device); false if it's the one already followed
++    bool watch_player(BluezQt::MediaPlayerPtr player);
+ 
+     BluezQt::AdapterPtr adapter;
+     BluezQt::DevicePtr media_player_device;
++    BluezQt::MediaPlayerPtr media_player;
++    QMetaObject::Connection track_connection;
++    QMetaObject::Connection status_connection;
+     QTimer *scan_timer;
+ 
+    signals:
+diff --git a/src/app/services/bluetooth.cpp b/src/app/services/bluetooth.cpp
+index 0c1c81d..e322b3f 100644
+--- a/src/app/services/bluetooth.cpp
++++ b/src/app/services/bluetooth.cpp
+@@ -43,9 +43,10 @@ Bluetooth::Bluetooth(Arbiter &arbiter)
+ 
+         this->adapter = manager->usableAdapter();
+         if (this->has_adapter()) {
++            // Pages made before BlueZ was ready show "nothing playing": tell them
+             for (auto device : this->get_devices()) {
+                 if (device->mediaPlayer() != nullptr) {
+-                    this->media_player_device = device;
++                    this->update_media_player(device);
+                     break;
+                 }
+             }
+@@ -97,17 +98,40 @@ void Bluetooth::toggle_device(BluezQt::DevicePtr device) const
+         device->connectToDevice()->waitForFinished();
+ }
+ 
++// Called for every change to a device (signal strength, battery, ...): only
++// a new or vanished player is news
+ void Bluetooth::update_media_player(BluezQt::DevicePtr device)
+ {
+     if (device->mediaPlayer() != nullptr) {
+-        emit media_player_status_changed(device->mediaPlayer()->status());
+-        emit media_player_track_changed(device->mediaPlayer()->track());
+-        emit media_player_changed(device->name(), device->mediaPlayer());
+         this->media_player_device = device;
++        if (this->watch_player(device->mediaPlayer())) {
++            emit media_player_changed(device->name(), device->mediaPlayer());
++            emit media_player_status_changed(device->mediaPlayer()->status());
++            emit media_player_track_changed(device->mediaPlayer()->track());
++        }
+     }
+-    else if (this->media_player_device == device) {
++    else if (this->media_player_device == device && this->watch_player(nullptr)) {
+         emit media_player_status_changed(BluezQt::MediaPlayer::Status::Paused);
+         emit media_player_track_changed(BluezQt::MediaPlayerTrack());
+         emit media_player_changed(QString(), QSharedPointer<BluezQt::MediaPlayer>(nullptr));
+     }
+ }
++
++bool Bluetooth::watch_player(BluezQt::MediaPlayerPtr player)
++{
++    if (player == this->media_player)
++        return false;
++
++    disconnect(this->track_connection);
++    disconnect(this->status_connection);
++    this->media_player = player;
++    if (player) {
++        this->track_connection = connect(player.data(), &BluezQt::MediaPlayer::trackChanged, this, [this](BluezQt::MediaPlayerTrack track){
++            emit media_player_track_changed(track);
++        });
++        this->status_connection = connect(player.data(), &BluezQt::MediaPlayer::statusChanged, this, [this](BluezQt::MediaPlayer::Status status){
++            emit media_player_status_changed(status);
++        });
++    }
++    return true;
++}
+-- 
+2.43.0
+

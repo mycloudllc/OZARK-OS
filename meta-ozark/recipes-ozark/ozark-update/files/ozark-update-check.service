@@ -1,0 +1,8 @@
+[Unit]
+Description=Check for a software update
+Documentation=file:///usr/sbin/ozark-update
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/ozark-update check --auto

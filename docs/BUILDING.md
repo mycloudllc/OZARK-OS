@@ -29,11 +29,17 @@ ozark-os/
 │   ├── recipes-multimedia/                  ozark-audio (PulseAudio setup), ozark-eq10 (equalizer)
 │   ├── recipes-connectivity/bluez5/         Bluetooth name, class, start without adapter
 │   ├── recipes-ozark/ozark-lightd/          Lighting controller service (source in lighting/daemon)
+│   ├── recipes-ozark/ozark-update/          Software updates (Settings > Update), ozark-swu: the .swu
+│   ├── recipes-ozark/ozark-data/            Data partition: settings kept across updates
+│   ├── recipes-support/swupdate/            SWUpdate build: signed images, no U-Boot
+│   ├── classes/ozark-slots.bbclass          A/B system slots on the SD card
 │   └── dynamic-layers/raspberrypi/          Pi-only bits (quiet cmdline, DRM card name, splash override)
 ├── branding/               Source SVGs for the splash and badge
 └── scripts/
     ├── build.sh            Builds inside the kas container
     ├── flash.sh            Writes the image to an SD card (bmaptool, with safety checks)
+    ├── make-keys.sh        Makes the key that signs updates (keys/, run by build.sh)
+    ├── make-release.sh     Update release: the .swu and the feed radios check
     ├── run-qemu.sh         Boots a --qemu build in a window on this PC
     └── make-splash.sh      Re-renders the PNGs from branding/*.svg
 ```
@@ -209,11 +215,85 @@ Use the serial console (dev images) for those.
 journalctl -u hello-ozark -b           # app output and Qt errors
 systemctl status psplash-start          # splash service
 ls -l /dev/dri/                         # expect card0, card1, ozark-display -> cardN
-cat /boot/config.txt /boot/cmdline.txt  # firmware settings actually used
+cat /boot/config.txt /boot/a/cmdline.txt  # firmware settings (b/ when slot B runs)
 ```
 
 For verbose Qt display logs, uncomment `QT_LOGGING_RULES` and
 `QT_QPA_EGLFS_DEBUG` in `/etc/default/ozark-display` and restart the service.
+
+## Software updates
+
+Settings → Update installs a new version of the whole system, from a USB
+drive or online, with [SWUpdate](https://swupdate.org). The radio keeps
+working while it installs, and after a restart it runs the new version with
+every setting, paired phone and music file kept. If the new version doesn't
+start properly, the radio goes back to the old one by itself.
+
+**How it works.** The SD card has two system slots, A and B
+(`meta-ozark/classes/ozark-slots.bbclass`):
+
+| Partition | What's on it |
+|---|---|
+| 1 `boot` | Pi firmware; each slot's kernel, device trees, overlays, `cmdline.txt` and `config.txt` in `a/` and `b/` |
+| 2 `root` | System slot A (2.5 GB) |
+| 3 `rootb` | System slot B (2.5 GB), empty until the first update |
+| 4 `OZARKLOGS` | Boot logs (see below) |
+| 5 `ozarkdata` | Settings, pairings and Dash's files: kept across updates. Grows to fill the card on first boot. |
+
+The whole layout fits an 8 GB card. `/boot/config.txt` picks the running
+slot with `os_prefix=a/`. An update (`.swu`) goes into the other slot:
+the root filesystem, then that system's boot files. The radio then restarts
+with the firmware's *tryboot*, which starts the new slot (`tryboot.txt`)
+for that one boot only. Once Dash has run for 30 seconds, `ozark-update`
+writes the new slot into `config.txt` and the update is done. If it doesn't
+get there (Dash keeps crashing, the kernel panics, the system hangs and the
+watchdog resets it, or the power goes), the next start is the old system.
+
+`ozark-data` keeps `/etc/ozark`, `/etc/systemd/network`, `/root` (Dash and
+OpenAuto settings), `/var/lib/bluetooth`, `/var/lib/ozark-lightd` and the
+clock on the data partition (overlayfs). Files the system ships in those
+folders still come from the new version unless they were changed on the radio.
+
+**Signing.** Each update is signed when it's built, and radios only install
+updates signed with the key their image was built with. `build.sh` makes the
+key pair on the first build (`scripts/make-keys.sh`, in `keys/`, which git
+ignores). **Back up `keys/swupdate-private.pem`.** With a different key,
+radios already out there won't take your updates, and you'd have to reflash them.
+
+**Making a release.**
+
+1. Raise `DISTRO_VERSION` in `meta-ozark/conf/distro/ozark.conf`.
+2. Run `./scripts/build.sh`. Next to the SD card image it builds
+   `ozark-swu-raspberrypi4-64.rootfs.swu`.
+3. Run `./scripts/make-release.sh --notes "What's new"`. It writes
+   `release/<version>-<build>/` with the `.swu`, the SD card image, and
+   `ozark-update.json` (the update feed: version, build, file name, SHA-256,
+   size and notes).
+4. Upload the `.swu` and `ozark-update.json` side by side, for example as
+   assets of a GitHub release. Radios then use this update address:
+   `https://github.com/OWNER/REPO/releases/latest/download/ozark-update.json`
+
+On the radio, enter that address in Settings → Update. With **Check
+automatically** on, it checks a few minutes after starting and every 6 hours
+after that. The radio only offers updates, and only installs one when you
+tap **download and install**. To bake an address into new images, set
+`OZARK_UPDATE_FEED` in `local.conf`.
+
+**From USB.** Copy the `.swu` to a USB drive (top folder), plug it in, then
+tap **look on USB** and **install from USB**.
+
+**Over SSH**, the same tool the page uses:
+
+```bash
+ozark-update status                  # version, slot, update state, what the feed offers
+ozark-update install /path/file.swu  # install into the other slot
+ozark-update reboot                  # restart into it (tryboot)
+journalctl -u ozark-update-boot -b   # the first start: committed, or why it went back
+cat /boot/config.txt /boot/tryboot.txt
+```
+
+The first card with this layout has to be flashed: an older card (one root
+partition) can't take updates.
 
 ## Iterating on the app without reflashing
 

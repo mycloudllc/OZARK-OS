@@ -1,0 +1,15 @@
+[Unit]
+Description=Grow the data partition to fill the SD card
+DefaultDependencies=no
+BindsTo=dev-disk-by\x2dlabel-ozarkdata.device
+After=dev-disk-by\x2dlabel-ozarkdata.device
+Before=data.mount shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/ozark-data grow
+
+[Install]
+WantedBy=data.mount

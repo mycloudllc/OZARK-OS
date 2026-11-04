@@ -8,6 +8,8 @@ header:
   version: 14
 
 machine: qemuarm64
+# No A/B slots in QEMU: no .swu
+target: ozark-image
 
 local_conf_header:
   ozark-qemu: |

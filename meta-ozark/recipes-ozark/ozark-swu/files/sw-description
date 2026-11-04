@@ -1,0 +1,66 @@
+software =
+{
+	version = "@@DISTRO_VERSION@@";
+	description = "@@DISTRO_NAME@@ @@DISTRO_VERSION@@ (build @@OZARK_BUILD@@)";
+	hardware-compatibility: [ "1.0" ];
+
+	/* ozark-update picks the slot that isn't running: -e stable,slot-a or slot-b */
+	stable = {
+		slot-a = {
+			images: (
+				{
+					filename = "@@OZARK_SWU_ROOTFS@@";
+					type = "raw";
+					device = "/dev/mmcblk0p2";
+					compressed = "zstd";
+					installed-directly = true;
+					sha256 = "$swupdate_get_sha256(@@OZARK_SWU_ROOTFS@@)";
+				}
+			);
+			files: (
+				{
+					filename = "ozark-boot.tar.gz";
+					type = "archive";
+					path = "/boot/a";
+					create-destination = true;
+					sha256 = "$swupdate_get_sha256(ozark-boot.tar.gz)";
+				}
+			);
+			scripts: (
+				{
+					filename = "ozark-install.sh";
+					type = "shellscript";
+					sha256 = "$swupdate_get_sha256(ozark-install.sh)";
+				}
+			);
+		};
+		slot-b = {
+			images: (
+				{
+					filename = "@@OZARK_SWU_ROOTFS@@";
+					type = "raw";
+					device = "/dev/mmcblk0p3";
+					compressed = "zstd";
+					installed-directly = true;
+					sha256 = "$swupdate_get_sha256(@@OZARK_SWU_ROOTFS@@)";
+				}
+			);
+			files: (
+				{
+					filename = "ozark-boot.tar.gz";
+					type = "archive";
+					path = "/boot/b";
+					create-destination = true;
+					sha256 = "$swupdate_get_sha256(ozark-boot.tar.gz)";
+				}
+			);
+			scripts: (
+				{
+					filename = "ozark-install.sh";
+					type = "shellscript";
+					sha256 = "$swupdate_get_sha256(ozark-install.sh)";
+				}
+			);
+		};
+	};
+}

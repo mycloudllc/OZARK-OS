@@ -10,6 +10,7 @@ IMAGE_FEATURES += "splash"
 
 IMAGE_INSTALL:append = " \
     kernel-modules \
+    usbutils \
 "
 
 # Plain-text boot logs on the SD card's OZARKLOGS partition (Pi only: the

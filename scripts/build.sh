@@ -101,6 +101,17 @@ if [ -z "$KAS_CONTAINER" ]; then
     fi
 fi
 
+# --- Docker engine ------------------------------------------------------------
+# Docker Desktop runs containers in a VM and shares the build folders over its
+# own filesystem, which breaks Yocto (hard links, files vanishing mid-task,
+# "Unable to read current working directory"). Use the host's own engine when
+# there is one, whatever the current docker context is.
+if [ -z "${DOCKER_CONTEXT:-}" ] && [ -z "${DOCKER_HOST:-}" ] && [ -S /var/run/docker.sock ] &&
+   docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null | grep -q '/desktop/'; then
+    echo "==> Using the host's Docker engine, not Docker Desktop (docker context: default)"
+    export DOCKER_CONTEXT=default
+fi
+
 # --- Caches (kept outside the build dir so 'rm -rf build' is cheap) -----------
 
 export DL_DIR="${OZARK_DL_DIR:-$ROOT/cache/downloads}"

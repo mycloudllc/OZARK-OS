@@ -1,0 +1,12 @@
+[Unit]
+Description=Record Bluetooth traffic to the boot logs
+After=ozark-logs.service
+Before=bluetooth.service
+ConditionPathIsMountPoint=/logs
+
+[Service]
+ExecStart=/usr/sbin/ozark-btsnoop
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

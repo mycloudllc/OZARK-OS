@@ -1,0 +1,52 @@
+From 7038d160a932246a27d39d6ef98ca1946d616775 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 18:45:30 -0600
+Subject: [PATCH] Settings > Update: warn not to cut power while installing
+
+While an update is being written (and when the page is opened during
+one), the status reads "Updating (Please do not cycle key, or cut power
+during update)" instead of "Working on it: the radio keeps running
+meanwhile." / "Installing an update...". Downloading keeps the old text:
+cutting power then only loses the download.
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ src/app/pages/update_settings.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+index 694c7df..6a8dc3d 100644
+--- a/src/app/pages/update_settings.cpp
++++ b/src/app/pages/update_settings.cpp
+@@ -11,6 +11,9 @@
+ 
+ namespace {
+ const char *kTool = "/usr/sbin/ozark-update";
++// Shown while an update is being written: a power cut then is the one thing
++// that can leave the new system half-installed
++const char *kUpdatingText = "Updating (Please do not cycle key, or cut power during update)";
+ const QString kNoUsb = "no update files found";
+ 
+ // "0.2.0, built 1 Nov 2026 19:27" from a version and a build stamp (YYYYMMDDHHMMSS)
+@@ -247,7 +250,8 @@ void UpdateSettingsTab::job(const QStringList &args, std::function<void(bool, co
+     this->step->show();
+     this->step->clear();
+     this->restart_button->hide();
+-    this->state->setText("Working on it: the radio keeps running meanwhile.");
++    this->state->setText(args.value(0) == "install" ? kUpdatingText
++                                                    : "Working on it: the radio keeps running meanwhile.");
+     // The buttons are further down: bring the progress into view
+     QTimer::singleShot(0, this, [this] { this->scroll->ensureWidgetVisible(this->state, 0, 40); });
+     this->run(args, [this](const QString &line) {
+@@ -301,7 +305,7 @@ void UpdateSettingsTab::show_status(const QMap<QString, QString> &s)
+     if (!supported)
+         text = "This SD card can't take updates: flash it with an Ozark OS image that has two system slots (0.2 or later).";
+     else if (s.value("busy") == "yes")
+-        text = "Installing an update...";
++        text = kUpdatingText;
+     else if (state == "pending")
+         text = QString("Version %1 is installed. Restart to start it.").arg(target);
+     else if (state == "trying")
+-- 
+2.43.0
+

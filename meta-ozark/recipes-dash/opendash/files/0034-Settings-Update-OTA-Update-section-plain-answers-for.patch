@@ -1,0 +1,104 @@
+From 699d0be49ae4b24b72327a6a18b81349b3470ffe Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 19:01:53 -0600
+Subject: [PATCH] Settings > Update: "OTA Update" section, plain answers for
+ Latest
+
+The "Online" section is "OTA Update", and its "Newest" row is "Latest",
+which now says only:
+
+- "No updates found": no update address, not checked yet, or the last
+  check couldn't reach the address (no internet)
+- the latest version (vX.Y.Z_mmddyy) when it's newer than this one
+- "You have the latest version" when this build is as new or newer
+
+(no more "set an update address to check", "not checked yet" or
+"this version is the newest (checked ...)"). A finished download can
+still be installed while offline.
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ include/app/pages/update_settings.hpp |  2 ++
+ src/app/pages/update_settings.cpp     | 28 +++++++++++++--------------
+ 2 files changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/include/app/pages/update_settings.hpp b/include/app/pages/update_settings.hpp
+index 7b07ce5..5ac8fe0 100644
+--- a/include/app/pages/update_settings.hpp
++++ b/include/app/pages/update_settings.hpp
+@@ -58,6 +58,8 @@ class UpdateSettingsTab : public QWidget {
+     bool busy = false;
+     bool filled = false;
+     bool loading = false;
++    // The last "check now" didn't get an answer (no address or no internet)
++    bool check_failed = false;
+     QMap<QString, QString> status;
+ 
+     QLabel *version;
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+index a044e5a..9b8faac 100644
+--- a/src/app/pages/update_settings.cpp
++++ b/src/app/pages/update_settings.cpp
+@@ -145,7 +145,7 @@ QWidget *UpdateSettingsTab::settings_widget()
+ 
+     // Online
+     layout->addWidget(Session::Forge::br());
+-    layout->addWidget(this->heading("Online"));
++    layout->addWidget(this->heading("OTA Update"));
+     this->feed = new TextEntry(this->arbiter, "Update address (https://...)", TextEntry::Text, widget);
+     this->feed->set_placeholder("none");
+     connect(this->feed, &TextEntry::edited, [this](const QString &url) {
+@@ -168,7 +168,7 @@ QWidget *UpdateSettingsTab::settings_widget()
+     layout->addWidget(this->row("Check automatically", this->auto_check));
+     this->available = new QLabel(widget);
+     this->available->setWordWrap(true);
+-    layout->addWidget(this->row("Newest", this->available, true));
++    layout->addWidget(this->row("Latest", this->available, true));
+     this->notes = new QLabel(widget);
+     this->notes->setWordWrap(true);
+     this->notes->setFont(font11);
+@@ -326,22 +326,21 @@ void UpdateSettingsTab::show_status(const QMap<QString, QString> &s)
+         this->filled = true;
+     }
+ 
+-    const QString checked = s.value("available.checked");
+     const bool newer = s.value("available.newer") == "yes";
+-    if (s.value("feed").isEmpty())
+-        this->available->setText("set an update address to check");
+-    else if (checked.isEmpty())
+-        this->available->setText("not checked yet");
+-    else {
+-        const QString when = QDateTime::fromSecsSinceEpoch(checked.toLongLong()).toString("d MMM HH:mm");
+-        this->available->setText(newer
+-            ? QString("%1 (checked %2)").arg(ozark_version(s.value("available.version"), s.value("available.build")), when)
+-            : QString("this version is the newest (checked %1)").arg(when));
+-    }
++    // No address, never checked, or the last check couldn't reach it (no
++    // internet): nothing to offer
++    const bool found = !s.value("feed").isEmpty() && !s.value("available.checked").isEmpty() && !this->check_failed;
++    if (!found)
++        this->available->setText("No updates found");
++    else if (newer)
++        this->available->setText(ozark_version(s.value("available.version"), s.value("available.build")));
++    else
++        this->available->setText("You have the latest version");
+     const QString notes = QString(s.value("available.notes")).replace("\\n", "\n");
+     this->notes->setText(notes);
+     this->notes->setVisible(newer && !notes.isEmpty());
+-    this->install_online->setVisible(supported && newer);
++    // A finished download can still be installed offline
++    this->install_online->setVisible(supported && newer && (found || s.value("downloaded") == "yes"));
+     this->install_online->setText(s.value("downloaded") == "yes" ? "install" : "download and install");
+ }
+ 
+@@ -363,6 +362,7 @@ void UpdateSettingsTab::report(bool ok, const QString &message)
+ void UpdateSettingsTab::check()
+ {
+     this->job({"check"}, [this](bool ok, const QString &message) {
++        this->check_failed = !ok;
+         this->report(ok, ok ? QString() : message);
+         this->refresh();
+     });
+-- 
+2.43.0
+

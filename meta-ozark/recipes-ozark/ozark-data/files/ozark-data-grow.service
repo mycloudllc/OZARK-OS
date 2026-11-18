@@ -1,7 +1,8 @@
 [Unit]
 Description=Grow the data partition to fill the SD card
 DefaultDependencies=no
-BindsTo=dev-disk-by\x2dlabel-ozarkdata.device
+# Not BindsTo: growing makes the device blink, which stopped this mid-way
+Wants=dev-disk-by\x2dlabel-ozarkdata.device
 After=dev-disk-by\x2dlabel-ozarkdata.device
 Before=data.mount shutdown.target
 Conflicts=shutdown.target

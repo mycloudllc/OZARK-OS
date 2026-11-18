@@ -1,0 +1,246 @@
+From 10b71fcd5708d70cb4f13ab00efd8f9952132a6c Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 17:35:14 -0600
+Subject: [PATCH] Bluetooth: reconnect the last phone until it's in range
+
+"Autoconnect Last Device" (Settings > Android Auto) made one attempt
+when Dash started. The phone was often not reachable yet (its Bluetooth
+still starting, or not in the car yet), and nothing tried again.
+
+- The last phone is the last paired phone that connected, by any route
+  (before, only a finished wireless Android Auto handshake saved it).
+- Once the adapter is up, Dash connects it (all profiles, so calls,
+  music and wireless Android Auto follow), every 10 s for two minutes,
+  then every minute, until a phone is connected. Asynchronous: the UI
+  never waits on it.
+- The adapter can become usable after Dash starts (a UART controller
+  loading its firmware): Bluetooth now follows usableAdapterChanged, so
+  the Bluetooth player and this work then too.
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ include/app/services/bluetooth.hpp |  13 +++
+ src/app/services/bluetooth.cpp     | 148 +++++++++++++++++++++++++----
+ 2 files changed, 140 insertions(+), 21 deletions(-)
+
+diff --git a/include/app/services/bluetooth.hpp b/include/app/services/bluetooth.hpp
+index 16ad118..38724ab 100644
+--- a/include/app/services/bluetooth.hpp
++++ b/include/app/services/bluetooth.hpp
+@@ -11,6 +11,7 @@
+ #include <QPair>
+ #include <QPushButton>
+ #include <QString>
++#include <QTimer>
+ 
+ #include "app/widgets/progress.hpp"
+ 
+@@ -40,6 +41,15 @@ class Bluetooth : public QObject {
+     inline bool has_adapter() { return this->adapter != nullptr; }
+ 
+    private:
++    // Follow this adapter (null: none); BlueZ can make it usable after Dash
++    // starts (a UART controller loading its firmware)
++    void set_adapter(BluezQt::AdapterPtr adapter);
++    // A paired phone that connects becomes the last phone
++    void remember_phone(BluezQt::DevicePtr device);
++    // Connect the last phone, again until a phone is connected
++    void reconnect_last_phone();
++    void stop_reconnecting();
++
+     void update_media_player(BluezQt::DevicePtr device);
+     // Follow this player's track and play/pause (BlueZ reports them on the
+     // player, not the device); false if it's the one already followed
+@@ -51,6 +61,9 @@ class Bluetooth : public QObject {
+     QMetaObject::Connection track_connection;
+     QMetaObject::Connection status_connection;
+     QTimer *scan_timer;
++    QTimer *reconnect_timer;
++    int reconnect_attempts = 0;
++    bool reconnect_pending = false;
+ 
+    signals:
+     void init();
+diff --git a/src/app/services/bluetooth.cpp b/src/app/services/bluetooth.cpp
+index e322b3f..ed35a87 100644
+--- a/src/app/services/bluetooth.cpp
++++ b/src/app/services/bluetooth.cpp
+@@ -20,6 +20,7 @@
+ 
+ #include "app/widgets/progress.hpp"
+ #include "app/arbiter.hpp"
++#include "app/config.hpp"
+ 
+ #include "app/services/bluetooth.hpp"
+ 
+@@ -33,6 +34,13 @@ Bluetooth::Bluetooth(Arbiter &arbiter)
+     this->scan_timer->setSingleShot(true);
+     connect(this->scan_timer, &QTimer::timeout, [this]{ this->stop_scan(); });
+ 
++    // Reconnecting the last phone: the first attempt waits a moment for
++    // OpenAuto to register wireless Android Auto with the adapter, so the
++    // phone finds it when it connects
++    this->reconnect_timer = new QTimer(this);
++    this->reconnect_timer->setSingleShot(true);
++    connect(this->reconnect_timer, &QTimer::timeout, [this]{ this->reconnect_last_phone(); });
++
+     BluezQt::Manager *manager = new BluezQt::Manager();
+     BluezQt::InitManagerJob *job = manager->init();
+ 
+@@ -41,27 +49,10 @@ Bluetooth::Bluetooth(Arbiter &arbiter)
+     connect(job, &BluezQt::InitManagerJob::result, [this, manager]{
+         DASH_LOG(info) << "[Bluetooth] Init complete!";
+ 
+-        this->adapter = manager->usableAdapter();
+-        if (this->has_adapter()) {
+-            // Pages made before BlueZ was ready show "nothing playing": tell them
+-            for (auto device : this->get_devices()) {
+-                if (device->mediaPlayer() != nullptr) {
+-                    this->update_media_player(device);
+-                    break;
+-                }
+-            }
+-
+-            connect(this->adapter.data(), &BluezQt::Adapter::deviceAdded, [this](BluezQt::DevicePtr device){
+-                emit device_added(device);
+-            });
+-            connect(this->adapter.data(), &BluezQt::Adapter::deviceChanged, [this](BluezQt::DevicePtr device) {
+-                emit device_changed(device);
+-                this->update_media_player(device);
+-            });
+-            connect(this->adapter.data(), &BluezQt::Adapter::deviceRemoved, [this](BluezQt::DevicePtr device){
+-                emit device_removed(device);
+-            });
+-        }
++        this->set_adapter(manager->usableAdapter());
++        connect(manager, &BluezQt::Manager::usableAdapterChanged, this, [this](BluezQt::AdapterPtr adapter){
++            this->set_adapter(adapter);
++        });
+ 
+         DASH_LOG(info) << "[Bluetooth] Has Adapter: " << this->has_adapter() << ", Has Media Device: " << (this->media_player_device != nullptr);
+ 
+@@ -69,6 +60,121 @@ Bluetooth::Bluetooth(Arbiter &arbiter)
+     });
+ }
+ 
++void Bluetooth::set_adapter(BluezQt::AdapterPtr adapter)
++{
++    if (adapter == this->adapter)
++        return;
++
++    if (this->has_adapter())
++        this->adapter->disconnect(this);
++    this->adapter = adapter;
++    this->stop_reconnecting();
++    if (!this->has_adapter())
++        return;
++
++    DASH_LOG(info) << "[Bluetooth] Adapter " << adapter->address().toStdString();
++
++    // Pages made before BlueZ was ready show "nothing playing": tell them
++    for (auto device : this->get_devices()) {
++        if (device->mediaPlayer() != nullptr) {
++            this->update_media_player(device);
++            break;
++        }
++    }
++
++    connect(this->adapter.data(), &BluezQt::Adapter::deviceAdded, this, [this](BluezQt::DevicePtr device){
++        emit device_added(device);
++    });
++    connect(this->adapter.data(), &BluezQt::Adapter::deviceChanged, this, [this](BluezQt::DevicePtr device) {
++        emit device_changed(device);
++        this->update_media_player(device);
++        this->remember_phone(device);
++    });
++    connect(this->adapter.data(), &BluezQt::Adapter::deviceRemoved, this, [this](BluezQt::DevicePtr device){
++        emit device_removed(device);
++    });
++
++    this->reconnect_attempts = 0;
++    this->reconnect_timer->start(3000);
++}
++
++void Bluetooth::remember_phone(BluezQt::DevicePtr device)
++{
++    if (!device->isConnected() || !device->isPaired() || device->type() != BluezQt::Device::Phone)
++        return;
++
++    // A phone is here: no need to call one
++    this->stop_reconnecting();
++
++    auto config = Config::get_instance()->openauto_config;
++    const std::string address = device->address().toUpper().toStdString();
++    if (QString::fromStdString(config->getLastBluetoothPair()).toUpper().toStdString() == address)
++        return;
++
++    DASH_LOG(info) << "[Bluetooth] Last phone is now " << device->name().toStdString() << " (" << address << ")";
++    config->setLastBluetoothPair(address);
++    config->save();
++}
++
++void Bluetooth::stop_reconnecting()
++{
++    this->reconnect_timer->stop();
++    this->reconnect_attempts = 0;
++}
++
++void Bluetooth::reconnect_last_phone()
++{
++    if (!this->has_adapter() || this->reconnect_pending)
++        return;
++
++    auto config = Config::get_instance()->openauto_config;
++    if (!config->getAutoconnectBluetooth())
++        return;
++
++    for (auto device : this->get_devices()) {
++        if (device->isConnected() && device->isPaired() && device->type() == BluezQt::Device::Phone) {
++            this->remember_phone(device);
++            return;
++        }
++    }
++
++    const QString address = QString::fromStdString(config->getLastBluetoothPair()).toUpper();
++    if (address.isEmpty()) {
++        DASH_LOG(info) << "[Bluetooth] No last phone to reconnect yet";
++        return;
++    }
++    BluezQt::DevicePtr device = this->adapter->deviceForAddress(address);
++    if (device == nullptr || !device->isPaired()) {
++        DASH_LOG(info) << "[Bluetooth] Last phone " << address.toStdString() << " is no longer paired";
++        return;
++    }
++
++    // Every 10 s for the first two minutes (the phone's Bluetooth may still be
++    // starting, or it's on the way to the car), then every minute
++    ++this->reconnect_attempts;
++    const int next = (this->reconnect_attempts < 12) ? 10000 : 60000;
++    if (this->reconnect_attempts == 1 || this->reconnect_attempts % 10 == 0)
++        DASH_LOG(info) << "[Bluetooth] Reconnecting " << device->name().toStdString() << " (" << address.toStdString()
++                       << "), attempt " << this->reconnect_attempts;
++
++    this->reconnect_pending = true;
++    BluezQt::PendingCall *call = device->connectToDevice();
++    connect(call, &BluezQt::PendingCall::finished, this, [this, device, next](BluezQt::PendingCall *call){
++        this->reconnect_pending = false;
++        if (!call->error() || call->error() == BluezQt::PendingCall::AlreadyConnected) {
++            DASH_LOG(info) << "[Bluetooth] Reconnected " << device->name().toStdString();
++            this->remember_phone(device);
++            this->stop_reconnecting();
++            return;
++        }
++        if (this->reconnect_attempts == 1)
++            DASH_LOG(info) << "[Bluetooth] Phone not reachable yet (" << call->errorText().toStdString() << "), trying again";
++        // stop_reconnecting() may have run meanwhile (a phone connected)
++        if (this->reconnect_attempts > 0)
++            this->reconnect_timer->start(next);
++    });
++}
++
+ void Bluetooth::start_scan()
+ {
+     if (this->has_adapter()) {
+-- 
+2.43.0
+

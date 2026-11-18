@@ -1,0 +1,49 @@
+From 5738d6d835adaeef59b9300ee555727322071c90 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Mon, 16 Nov 2026 21:38:34 -0600
+Subject: [PATCH] Wireless AA: when the phone stops answering pings, have the
+ system reconnect it
+
+---
+ openauto/Service/AndroidAutoEntity.cpp | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/openauto/Service/AndroidAutoEntity.cpp b/openauto/Service/AndroidAutoEntity.cpp
+index 9c6e88d..f3beebe 100644
+--- a/openauto/Service/AndroidAutoEntity.cpp
++++ b/openauto/Service/AndroidAutoEntity.cpp
+@@ -19,6 +19,8 @@
+ #include "aasdk/Channel/Control/ControlServiceChannel.hpp"
+ #include "openauto/Service/AndroidAutoEntity.hpp"
+ #include "OpenautoLog.hpp"
++#include <cstdlib>
++#include <unistd.h>
+ 
+ namespace openauto
+ {
+@@ -276,6 +278,22 @@ void AndroidAutoEntity::schedulePing()
+            error != aasdk::error::ErrorCode::OPERATION_IN_PROGRESS)
+         {
+             OPENAUTO_LOG(error) << "[AndroidAutoEntity] ping timer exceeded.";
++
++            // Ozark: the phone went quiet while still joined (seen 10-12 min
++            // into drives, with its Bluetooth audio stuttering after). Have
++            // the system drop it from Wi-Fi and Bluetooth and call it back,
++            // which is what switching the phone's radios off and on does.
++            // In the background: it takes a while and must not hold this up.
++            const char *recover = "/usr/sbin/ozark-aa-recover";
++            if(access(recover, X_OK) == 0)
++            {
++                OPENAUTO_LOG(info) << "[AndroidAutoEntity] Running " << recover;
++                if(std::system("/usr/sbin/ozark-aa-recover &") != 0)
++                {
++                    OPENAUTO_LOG(error) << "[AndroidAutoEntity] Couldn't start " << recover;
++                }
++            }
++
+             this->triggerQuit();
+         }
+     });
+-- 
+2.43.0
+

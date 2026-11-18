@@ -9,6 +9,8 @@ IMAGE_INSTALL:append = " \
     opendash \
     ozark-audio \
     ozark-lightd \
+    ozark-vehicled \
+    ozark-remoted \
 "
 
 # Wi-Fi hotspot for wireless Android Auto (the Pi's Wi-Fi; QEMU has none),

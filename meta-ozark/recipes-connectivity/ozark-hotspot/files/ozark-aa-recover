@@ -1,0 +1,71 @@
+#!/bin/sh
+# Wireless Android Auto stopped hearing from the phone (OpenAuto's ping timed
+# out). Seen in the car: about 10-12 minutes into a drive the phone goes quiet
+# on Wi-Fi while still joined, Android Auto exits, and the phone's Bluetooth
+# audio stutters until its Wi-Fi and Bluetooth are switched off and on again.
+#
+# This does that from the radio's side: drop the phone from the hotspot and
+# from Bluetooth, then call it back over Bluetooth. A fresh Bluetooth
+# connection makes the phone start wireless Android Auto again, and it joins
+# the hotspot from scratch.
+#
+# OpenAuto runs this in the background when its ping times out. Everything it
+# does goes to the journal (and so to the boot log on the SD card) with an
+# "aa-recover:" prefix.
+
+log() { echo "aa-recover: $*"; }
+
+# At most once every 2 minutes: if the phone is still stuck after one round,
+# hammering it won't help, and it may be on its way back already
+stamp=/run/ozark-aa-recover
+now=$(cut -d. -f1 /proc/uptime)
+last=$(cat "$stamp" 2>/dev/null)
+if [ -n "$last" ] && [ $((now - last)) -lt 120 ]; then
+    log "skipped: the last recovery was $((now - last)) s ago"
+    exit 0
+fi
+echo "$now" > "$stamp"
+
+log "Android Auto lost the phone; reconnecting it"
+
+# Wi-Fi: disconnect every phone on the hotspot (one control socket per radio)
+for ctl in /run/hostapd/*; do
+    [ -S "$ctl" ] || continue
+    iface=${ctl##*/}
+    for mac in $(hostapd_cli -p /run/hostapd -i "$iface" list_sta 2>/dev/null |
+                 grep -iE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$'); do
+        log "Wi-Fi: disconnecting $mac from $iface"
+        hostapd_cli -p /run/hostapd -i "$iface" deauthenticate "$mac" >/dev/null 2>&1
+    done
+done
+
+# Bluetooth: the phones connected now
+phones=$(bluetoothctl devices Connected 2>/dev/null | awk '$1 == "Device" { print $2 }')
+if [ -z "$phones" ]; then
+    log "Bluetooth: no phone connected, nothing to call back"
+    exit 0
+fi
+for a in $phones; do
+    log "Bluetooth: disconnecting $a"
+    bluetoothctl disconnect "$a" >/dev/null 2>&1
+done
+
+# Give the phone a moment to notice before calling it back
+sleep 5
+for a in $phones; do
+    ok=
+    for try in 1 2 3 4 5; do
+        # The phone may call back on its own first ("already connected")
+        bluetoothctl connect "$a" >/dev/null 2>&1
+        if bluetoothctl info "$a" 2>/dev/null | grep -q "Connected: yes"; then
+            ok=1
+            break
+        fi
+        sleep 5
+    done
+    if [ -n "$ok" ]; then
+        log "Bluetooth: $a connected again (attempt $try)"
+    else
+        log "Bluetooth: $a didn't answer after 5 attempts"
+    fi
+done

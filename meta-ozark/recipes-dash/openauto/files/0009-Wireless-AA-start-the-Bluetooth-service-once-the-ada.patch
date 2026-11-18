@@ -1,0 +1,168 @@
+From 2063e8a1053350f941bf59f05c7a581e538db02d Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 7 Nov 2026 16:26:16 -0600
+Subject: [PATCH] Wireless AA: start the Bluetooth service once the adapter is
+ up
+
+On the Orange Pi 3B the Bluetooth controller loads its firmware over UART
+for about five seconds, and Dash can start before it's done. The one
+attempt to listen on RFCOMM channel 22 then failed ("Server start
+failed"), and phones connected over Bluetooth but never started wireless
+Android Auto, until Dash restarted.
+
+Try again every second (up to 90 s) until listening and the SDP
+registration work, then reconnect the last phone as before. A server
+whose listen failed is replaced for the next attempt.
+---
+ btservice/AndroidBluetoothServer.cpp | 12 ++++-
+ btservice/btservice.cpp              | 67 +++++++++++++++++++++-------
+ include/btservice/btservice.hpp      |  8 ++++
+ 3 files changed, 70 insertions(+), 17 deletions(-)
+
+diff --git a/btservice/AndroidBluetoothServer.cpp b/btservice/AndroidBluetoothServer.cpp
+index f8f122d..dcd2b31 100644
+--- a/btservice/AndroidBluetoothServer.cpp
++++ b/btservice/AndroidBluetoothServer.cpp
+@@ -54,7 +54,17 @@ AndroidBluetoothServer::AndroidBluetoothServer(openauto::configuration::IConfigu
+ bool AndroidBluetoothServer::start(const QBluetoothAddress& address, uint16_t portNumber)
+ {
+     OPENAUTO_LOG(info) << "[AndroidBluetoothServer] listening.";
+-    return rfcommServer_->listen(address, portNumber);
++    if(rfcommServer_->listen(address, portNumber))
++    {
++        return true;
++    }
++
++    OPENAUTO_LOG(warning) << "[AndroidBluetoothServer] listen failed, error " << rfcommServer_->error();
++    // A server whose listen failed can't always listen again: the next
++    // attempt (btservice retries) gets a new one
++    rfcommServer_ = std::make_unique<QBluetoothServer>(QBluetoothServiceInfo::RfcommProtocol, this);
++    connect(rfcommServer_.get(), &QBluetoothServer::newConnection, this, &AndroidBluetoothServer::onClientConnected);
++    return false;
+ }
+ 
+ void AndroidBluetoothServer::onClientConnected()
+diff --git a/btservice/btservice.cpp b/btservice/btservice.cpp
+index 22a9c52..91f2d6e 100644
+--- a/btservice/btservice.cpp
++++ b/btservice/btservice.cpp
+@@ -6,39 +6,74 @@ namespace btservice
+ {
+ 
+ btservice::btservice(openauto::configuration::IConfiguration::Pointer config)
+-    : androidBluetoothService_(cServicePortNumber)
++    : config_(config)
++    , androidBluetoothService_(cServicePortNumber)
+     , androidBluetoothServer_(config)
+ {
++    // The adapter can still be starting when Dash does (a UART controller
++    // loading its firmware takes seconds): listening then failed, and phones
++    // got no wireless Android Auto until a restart. Keep trying until it works.
++    retryTimer_.setInterval(1000);
++    QObject::connect(&retryTimer_, &QTimer::timeout, [this]() { tryStart(); });
++    tryStart();
++}
++
++void btservice::tryStart()
++{
++    ++startAttempts_;
++    const bool firstAttempt = startAttempts_ == 1;
++    const auto retry = [this, firstAttempt](const char* what) {
++        if(firstAttempt)
++        {
++            OPENAUTO_LOG(warning) << "[btservice] " << what << ", trying again while the adapter starts.";
++        }
++        if(startAttempts_ >= cStartAttempts)
++        {
++            OPENAUTO_LOG(error) << "[btservice] " << what << " after " << startAttempts_
++                                << " attempts: no wireless Android Auto.";
++            retryTimer_.stop();
++        }
++        else if(!retryTimer_.isActive())
++        {
++            retryTimer_.start();
++        }
++    };
++
+     QBluetoothAddress address;
+     auto adapters = QBluetoothLocalDevice::allDevices();
+     if(adapters.size() > 0)
+     {
+         address = adapters.at(0).address();
+     }
+-    else
++    if(address.isNull())
+     {
+-        OPENAUTO_LOG(error) << "[btservice] No adapter found.";
++        retry("No adapter found");
++        return;
+     }
+ 
+-    if(!androidBluetoothServer_.start(address, cServicePortNumber))
++    if(!listening_)
+     {
+-        OPENAUTO_LOG(error) << "[btservice] Server start failed.";
+-        return;
++        if(!androidBluetoothServer_.start(address, cServicePortNumber))
++        {
++            retry("Server start failed");
++            return;
++        }
++        listening_ = true;
++        OPENAUTO_LOG(info) << "[btservice] Listening for connections, address: " << address.toString().toStdString()
++                           << ", port: " << cServicePortNumber;
+     }
+ 
+-    OPENAUTO_LOG(info) << "[btservice] Listening for connections, address: " << address.toString().toStdString()
+-                       << ", port: " << cServicePortNumber;
+-
+     if(!androidBluetoothService_.registerService(address))
+     {
+-        OPENAUTO_LOG(error) << "[btservice] Service registration failed.";
+-    }
+-    else
+-    {
+-        OPENAUTO_LOG(info) << "[btservice] Service registered, port: " << cServicePortNumber;
++        retry("Service registration failed");
++        return;
+     }
+-    if(config->getAutoconnectBluetooth())
+-        connectToBluetooth(QBluetoothAddress(QString::fromStdString(config->getLastBluetoothPair())), address);
++    retryTimer_.stop();
++    OPENAUTO_LOG(info) << "[btservice] Service registered, port: " << cServicePortNumber
++                       << (firstAttempt ? "" : " (after waiting for the adapter)");
++
++    if(config_->getAutoconnectBluetooth())
++        connectToBluetooth(QBluetoothAddress(QString::fromStdString(config_->getLastBluetoothPair())), address);
+ }
+ 
+ void btservice::connectToBluetooth(QBluetoothAddress addr, QBluetoothAddress controller)
+diff --git a/include/btservice/btservice.hpp b/include/btservice/btservice.hpp
+index 4fe91a2..c9ce66c 100644
+--- a/include/btservice/btservice.hpp
++++ b/include/btservice/btservice.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <QProcess> 
++#include <QTimer>
+ #include <QBluetoothAddress>
+ #include "OpenautoLog.hpp"
+ #include "btservice/AndroidBluetoothService.hpp"
+@@ -19,6 +20,13 @@ public:
+ 
+ private:
+     const uint16_t cServicePortNumber = 22;
++    // How many times (one a second) to try while the adapter comes up
++    static const int cStartAttempts = 90;
++    void tryStart();
++    openauto::configuration::IConfiguration::Pointer config_;
++    QTimer retryTimer_;
++    int startAttempts_ = 0;
++    bool listening_ = false;
+     void connectToBluetooth(QBluetoothAddress addr, QBluetoothAddress controller);
+     openauto::btservice::AndroidBluetoothService androidBluetoothService_;
+     openauto::btservice::AndroidBluetoothServer androidBluetoothServer_;
+-- 
+2.43.0
+

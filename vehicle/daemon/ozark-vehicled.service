@@ -1,0 +1,13 @@
+[Unit]
+Description=Ozark vehicle service: OBD-II, illumination, tire sensors (org.ozark.Vehicle1)
+After=dbus.service bluetooth.service ozark-data.service
+
+[Service]
+Type=dbus
+BusName=org.ozark.Vehicle1
+ExecStart=/usr/bin/ozark-vehicled
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

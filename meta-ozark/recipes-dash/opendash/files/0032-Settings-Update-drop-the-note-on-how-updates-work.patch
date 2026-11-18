@@ -1,0 +1,36 @@
+From c74dc78879abb30cf32d1bc1e014b00d0170d301 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 18:49:53 -0600
+Subject: [PATCH] Settings > Update: drop the note on how updates work
+
+The paragraph under the USB drive buttons (installs alongside the
+running system, settings kept, goes back by itself, .swu in the top
+folder, signed updates only) is gone.
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ src/app/pages/update_settings.cpp | 8 --------
+ 1 file changed, 8 deletions(-)
+
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+index 6a8dc3d..1f3b129 100644
+--- a/src/app/pages/update_settings.cpp
++++ b/src/app/pages/update_settings.cpp
+@@ -198,14 +198,6 @@ QWidget *UpdateSettingsTab::settings_widget()
+     usb_buttons->addWidget(this->install_usb);
+     layout->addLayout(usb_buttons);
+ 
+-    auto hint = new QLabel("Updates install alongside the running system, which keeps working until you restart. "
+-                           "Settings, phones and music are kept. If the new version doesn't start properly, "
+-                           "the radio goes back to this one by itself. For USB, put the .swu file on the drive "
+-                           "(top folder). Only updates signed for this radio install.", widget);
+-    hint->setWordWrap(true);
+-    hint->setFont(font11);
+-    layout->addWidget(hint);
+-
+     layout->addStretch();
+     return widget;
+ }
+-- 
+2.43.0
+

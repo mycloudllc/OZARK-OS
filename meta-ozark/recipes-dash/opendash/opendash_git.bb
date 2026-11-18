@@ -45,12 +45,27 @@ SRC_URI = " \
     file://0025-Settings-Lighting-WLED-controllers.patch \
     file://0026-Settings-Update-install-software-updates-online-or-f.patch \
     file://0027-Bluetooth-player-follow-the-phone-s-track-and-play-p.patch \
+    file://0030-Bluetooth-reconnect-the-last-phone-until-it-s-in-ran.patch \
+    file://0031-Settings-Update-warn-not-to-cut-power-while-installi.patch \
+    file://0032-Settings-Update-drop-the-note-on-how-updates-work.patch \
+    file://0033-Versions-read-vX.Y.Z_mmddyy.patch \
+    file://0034-Settings-Update-OTA-Update-section-plain-answers-for.patch \
+    file://0035-Bluetooth-one-reconnect-at-start-and-say-why-each-at.patch \
+    file://0036-Settings-Update-scan-usb-newest-file-selected.patch \
+    file://0037-Vehicle-page-Material-3-gauges-trouble-codes-and-tir.patch \
+    file://0038-Material-3-look-colour-scheme-from-the-theme-colour-.patch \
+    file://0039-Stylesheet-scale-pixel-lengths-in-place-Vehicle-sett.patch \
+    file://0040-Settings-swipe-the-tab-bar-instead-of-arrow-buttons.patch \
+    file://0041-Android-Auto-page-whole-icon-Android-Auto-will-conne.patch \
+    file://0042-Settings-Phone-tab-becomes-Bluetooth-with-add-device.patch \
+    file://0043-Remote-control-org.ozark.Dash1-for-the-phone-app-pai.patch \
     file://trailcommand;subdir=git/plugins/vehicle \
     file://lighting/common \
     file://lighting/interior_lighting \
     file://lighting/exterior_lighting \
     file://opendash.service \
     file://dash.conf \
+    file://org.ozark.Dash1.conf \
     file://psplash-ozark-img.png \
 "
 SRCREV = "2d56f99cff5990e420297ca02e7cf45fe2aebb81"
@@ -113,12 +128,16 @@ do_install() {
     # System-wide defaults (TrailCommand plugin); user changes go to ~/.config
     install -d ${D}${sysconfdir}/xdg/openDsh
     install -m 0644 ${WORKDIR}/dash.conf ${D}${sysconfdir}/xdg/openDsh/dash.conf
+
+    # org.ozark.Dash1: what ozark-remoted (the phone app) controls
+    install -d ${D}${datadir}/dbus-1/system.d
+    install -m 0644 ${WORKDIR}/org.ozark.Dash1.conf ${D}${datadir}/dbus-1/system.d/
 }
 
 SYSTEMD_SERVICE:${PN} = "opendash.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
-FILES:${PN} += "${libdir}/opendash ${datadir}/opendash"
+FILES:${PN} += "${libdir}/opendash ${datadir}/opendash ${datadir}/dbus-1/system.d"
 
 # Media > Local plays files through QtMultimedia's GStreamer backend: playbin,
 # decoders for MP3, FLAC, Ogg Vorbis/Opus and WAV (with their tags), and the

@@ -1,0 +1,47 @@
+#!/bin/sh
+# Record this boot's Bluetooth traffic (HCI packets, as btmon sees them) next
+# to the boot log: /logs/bt-NNNN.snoop. Read it on a PC with
+# "btmon -r bt-NNNN.snoop". For finding why a phone won't connect, or what it
+# did when wireless Android Auto dropped mid-drive.
+#
+# The whole boot, not just the start: drops come 10+ minutes into a drive.
+# A connected phone with Android Auto adds about 15 KB a minute; Bluetooth
+# music adds a few MB a minute, which is why there's a size cap.
+
+dir=/logs
+keep=5           # captures to keep
+max_kb=16384     # stop this capture past 16 MB
+min_free_kb=32768  # or when the log partition gets this full
+
+cd "$dir" || exit 0
+n=$(cat bootcount.txt 2>/dev/null || echo 0)
+file=$(printf 'bt-%04d.snoop' "$n")
+
+old=$(( $(ls bt-*.snoop 2>/dev/null | wc -l) - keep + 1 ))
+for f in $(ls bt-*.snoop 2>/dev/null | sort); do
+    [ "$old" -gt 0 ] || break
+    rm -f "$f"; old=$(( old - 1 ))
+done
+
+btmon -w "$file" > /dev/null 2>&1 &
+pid=$!
+trap 'kill $pid 2>/dev/null; wait $pid; sync; exit 0' TERM INT
+
+why=
+while kill -0 $pid 2>/dev/null; do
+    # sync often enough that a power cut loses at most half a minute
+    sleep 30 & wait $!
+    sync
+    size=$(du -k "$file" 2>/dev/null | cut -f1)
+    free=$(df -k "$dir" | awk 'NR == 2 { print $4 }')
+    if [ "${size:-0}" -gt "$max_kb" ]; then
+        why="it reached ${max_kb} KB"
+    elif [ -n "$free" ] && [ "$free" -lt "$min_free_kb" ]; then
+        why="the log partition has under ${min_free_kb} KB free"
+    fi
+    [ -z "$why" ] || break
+done
+[ -z "$why" ] || echo "ozark-btsnoop: stopped $file because $why"
+kill $pid 2>/dev/null
+wait $pid
+sync

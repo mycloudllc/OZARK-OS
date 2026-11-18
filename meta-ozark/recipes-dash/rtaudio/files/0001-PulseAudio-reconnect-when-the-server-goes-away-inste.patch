@@ -1,0 +1,164 @@
+From 1638132131e06cd1c95b40137253576f5346a2d5 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Mon, 16 Nov 2026 21:37:10 -0600
+Subject: [PATCH] PulseAudio: reconnect when the server goes away instead of
+ spinning
+
+---
+ RtAudio.cpp | 88 ++++++++++++++++++++++++++++++++++++++++++++++-------
+ 1 file changed, 77 insertions(+), 11 deletions(-)
+
+diff --git a/RtAudio.cpp b/RtAudio.cpp
+index 40fb6a9..b9e7b61 100644
+--- a/RtAudio.cpp
++++ b/RtAudio.cpp
+@@ -8525,6 +8525,8 @@ static void *alsaCallbackHandler( void *ptr )
+ #include <pulse/error.h>
+ #include <pulse/simple.h>
+ #include <pulse/pulseaudio.h>
++#include <time.h>
++#include <unistd.h>
+ #include <cstdio>
+ 
+ static pa_mainloop_api *rt_pa_mainloop_api = NULL;
+@@ -8564,9 +8566,35 @@ struct PulseAudioHandle {
+   pthread_t thread;
+   pthread_cond_t runnable_cv;
+   bool runnable;
+-  PulseAudioHandle() : s_play(0), s_rec(0), runnable(false) { }
++  // Ozark: what it takes to open the streams again after the server goes away
++  // (it restarts, or is killed): the name, format and buffering they had
++  std::string name;
++  pa_sample_spec ss;
++  pa_buffer_attr play_attr, rec_attr;
++  bool have_play_attr;
++  struct timespec retry_at;
++  PulseAudioHandle() : s_play(0), s_rec(0), runnable(false), have_play_attr(false) { retry_at.tv_sec = 0; retry_at.tv_nsec = 0; }
+ };
+ 
++// Ozark: a stream whose server went away. Without this, every write fails at
++// once, logs a line, and the callback thread spins: tens of thousands of lines
++// a second, a CPU's worth of load, and no sound until the app restarts. Now
++// it's one line, a reconnect attempt each second (to the default device, as
++// the old one may not exist in the new server), and silence paced at the
++// stream's own rate in between.
++static bool rt_pa_time_reached( const struct timespec &t )
++{
++  struct timespec now;
++  clock_gettime( CLOCK_MONOTONIC, &now );
++  return now.tv_sec > t.tv_sec || ( now.tv_sec == t.tv_sec && now.tv_nsec >= t.tv_nsec );
++}
++
++static void rt_pa_retry_in_a_second( struct timespec &t )
++{
++  clock_gettime( CLOCK_MONOTONIC, &t );
++  t.tv_sec += 1;
++}
++
+ static void rt_pa_mainloop_api_quit(int ret) {
+     rt_pa_mainloop_api->quit(rt_pa_mainloop_api, ret);
+ }
+@@ -8846,6 +8874,7 @@ void RtApiPulse::closeStream( void )
+ void RtApiPulse::callbackEvent( void )
+ {
+   PulseAudioHandle *pah = static_cast<PulseAudioHandle *>( stream_.apiHandle );
++  bool lost = false;
+ 
+   if ( stream_.state == STREAM_STOPPED ) {
+     MUTEX_LOCK( &stream_.mutex );
+@@ -8898,12 +8927,23 @@ void RtApiPulse::callbackEvent( void )
+         bytes = stream_.nUserChannels[OUTPUT] * stream_.bufferSize *
+                 formatBytes( stream_.userFormat );
+ 
+-    if ( pa_simple_write( pah->s_play, pulse_out, bytes, &pa_error ) < 0 ) {
+-      errorStream_ << "RtApiPulse::callbackEvent: audio write error, " <<
+-        pa_strerror( pa_error ) << ".";
+-      errorText_ = errorStream_.str();
+-      error( RtAudioError::WARNING );
++    if ( pah->s_play && pa_simple_write( pah->s_play, pulse_out, bytes, &pa_error ) < 0 ) {
++      std::cerr << "RtApiPulse: lost the PulseAudio server (" << pa_strerror( pa_error )
++                << "); reconnecting playback" << std::endl;
++      pa_simple_free( pah->s_play );
++      pah->s_play = 0;
++      pah->retry_at.tv_sec = 0;
++    }
++    if ( !pah->s_play && rt_pa_time_reached( pah->retry_at ) ) {
++      pah->s_play = pa_simple_new( NULL, pah->name.c_str(), PA_STREAM_PLAYBACK, NULL, "Playback",
++                                   &pah->ss, NULL, pah->have_play_attr ? &pah->play_attr : NULL, &pa_error );
++      if ( pah->s_play )
++        std::cerr << "RtApiPulse: playback reconnected to PulseAudio" << std::endl;
++      else
++        rt_pa_retry_in_a_second( pah->retry_at );
+     }
++    if ( !pah->s_play )
++      lost = true;
+   }
+ 
+   if ( stream_.mode == INPUT || stream_.mode == DUPLEX) {
+@@ -8914,11 +8954,24 @@ void RtApiPulse::callbackEvent( void )
+       bytes = stream_.nUserChannels[INPUT] * stream_.bufferSize *
+         formatBytes( stream_.userFormat );
+             
+-    if ( pa_simple_read( pah->s_rec, pulse_in, bytes, &pa_error ) < 0 ) {
+-      errorStream_ << "RtApiPulse::callbackEvent: audio read error, " <<
+-        pa_strerror( pa_error ) << ".";
+-      errorText_ = errorStream_.str();
+-      error( RtAudioError::WARNING );
++    if ( pah->s_rec && pa_simple_read( pah->s_rec, pulse_in, bytes, &pa_error ) < 0 ) {
++      std::cerr << "RtApiPulse: lost the PulseAudio server (" << pa_strerror( pa_error )
++                << "); reconnecting recording" << std::endl;
++      pa_simple_free( pah->s_rec );
++      pah->s_rec = 0;
++      pah->retry_at.tv_sec = 0;
++    }
++    if ( !pah->s_rec && rt_pa_time_reached( pah->retry_at ) ) {
++      pah->s_rec = pa_simple_new( NULL, pah->name.c_str(), PA_STREAM_RECORD, NULL, "Record",
++                                  &pah->ss, NULL, &pah->rec_attr, &pa_error );
++      if ( pah->s_rec )
++        std::cerr << "RtApiPulse: recording reconnected to PulseAudio" << std::endl;
++      else
++        rt_pa_retry_in_a_second( pah->retry_at );
++    }
++    if ( !pah->s_rec ) {
++      lost = true;
++      memset( pulse_in, 0, bytes );
+     }
+     if ( stream_.doConvertBuffer[INPUT] ) {
+       convertBuffer( stream_.userBuffer[INPUT],
+@@ -8929,6 +8982,10 @@ void RtApiPulse::callbackEvent( void )
+ 
+  unlock:
+   MUTEX_UNLOCK( &stream_.mutex );
++  // No server to block on: wait one buffer's worth so the thread keeps time
++  // instead of spinning
++  if ( lost && stream_.sampleRate )
++    usleep( (useconds_t) ( 1000000.0 * stream_.bufferSize / stream_.sampleRate ) );
+   RtApi::tickStreamTime();
+ 
+   if ( doStopStream == 1 )
+@@ -9202,6 +9259,9 @@ bool RtApiPulse::probeDeviceOpen( unsigned int device, StreamMode mode,
+     buffer_attr.fragsize = bufferBytes;
+     buffer_attr.maxlength = -1;
+ 
++    pah->name = streamName;
++    pah->ss = ss;
++    pah->rec_attr = buffer_attr;
+     pah->s_rec = pa_simple_new( NULL, streamName.c_str(), PA_STREAM_RECORD,
+                                 dev_input, "Record", &ss, NULL, &buffer_attr, &error );
+     if ( !pah->s_rec ) {
+@@ -9224,6 +9284,12 @@ bool RtApiPulse::probeDeviceOpen( unsigned int device, StreamMode mode,
+       attr_ptr = nullptr;
+     }
+ 
++    pah->name = streamName;
++    pah->ss = ss;
++    if ( attr_ptr ) {
++      pah->play_attr = *attr_ptr;
++      pah->have_play_attr = true;
++    }
+     pah->s_play = pa_simple_new( NULL, streamName.c_str(), PA_STREAM_PLAYBACK,
+                                  dev_output, "Playback", &ss, NULL, attr_ptr, &error );
+     if ( !pah->s_play ) {
+-- 
+2.43.0
+

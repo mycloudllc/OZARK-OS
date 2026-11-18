@@ -1,0 +1,28 @@
+# Build output and caches (can be 100+ GB)
+/build/
+/cache/
+
+# Downloaded tooling
+/.tools/
+
+# Editor/OS noise
+*.swp
+.DS_Store
+
+# PlatformIO build output (lighting firmware)
+/lighting/firmware/.pio/
+
+# Layer checkouts kas fetches (if kas is run without KAS_WORK_DIR=build)
+/poky/
+/meta-openembedded/
+/meta-qt5/
+/meta-raspberrypi/
+
+# Boot logs copied from a unit's SD card (contain device addresses)
+/test-logs/
+
+# Update signing keys (scripts/make-keys.sh): keep the private key out of git
+/keys/
+
+# Update releases (scripts/make-release.sh)
+/release/

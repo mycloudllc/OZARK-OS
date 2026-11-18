@@ -1,0 +1,2412 @@
+From 25d8ba3b57136e710f2772688074a866fc9d3f8f Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Mon, 16 Nov 2026 23:17:02 -0600
+Subject: [PATCH] Material 3 look: colour scheme from the theme colour, M3
+ stylesheets, switch, cards, segmented buttons and chips; Diagnostics, Media,
+ Android Auto, Phone and Equalizer pages
+
+---
+ assets/stylesheets/dark.qss        | 380 +++++++++++++++++++---------
+ assets/stylesheets/light.qss       | 386 +++++++++++++++++++----------
+ include/app/md3.hpp                |  31 +++
+ include/app/pages/vehicle.hpp      |  16 +-
+ include/app/session.hpp            |   6 +
+ include/app/widgets/switch.hpp     |  32 ++-
+ src/app/md3.cpp                    | 148 +++++++++++
+ src/app/pages/equalizer.cpp        |  13 +-
+ src/app/pages/media.cpp            |  36 ++-
+ src/app/pages/network_settings.cpp |   2 +-
+ src/app/pages/openauto.cpp         |  28 ++-
+ src/app/pages/phone.cpp            |   3 +
+ src/app/pages/update_settings.cpp  |   7 +-
+ src/app/pages/vehicle.cpp          | 281 +++++++++++++++------
+ src/app/session.cpp                |  22 +-
+ src/app/widgets/now_playing.cpp    |   9 +-
+ src/app/widgets/osd.cpp            |  20 +-
+ src/app/widgets/switch.cpp         |  57 +++--
+ src/app/widgets/tuner.cpp          |   5 +
+ 19 files changed, 1079 insertions(+), 403 deletions(-)
+ create mode 100644 include/app/md3.hpp
+ create mode 100644 src/app/md3.cpp
+
+diff --git a/assets/stylesheets/dark.qss b/assets/stylesheets/dark.qss
+index 5a5bef7..b676410 100644
+--- a/assets/stylesheets/dark.qss
++++ b/assets/stylesheets/dark.qss
+@@ -1,6 +1,10 @@
++/* Material 3, with colours from the theme colour: @md-<role> is filled in at
++   run time from a scheme made from it (src/app/md3.cpp), @md-<role>/<n> at n %
++   opacity (state layers). */
++
+ QMainWindow,
+ QMainWindow > QFrame {
+-    background-color: rgb(18, 18, 18);
++    background-color: @md-surface;
+ }
+ 
+ QWidget {
+@@ -8,36 +12,43 @@ QWidget {
+ }
+ 
+ QLabel {
+-    color: rgb(255, 255, 255);
++    color: @md-on-surface;
+ }
+ 
+ QLabel:disabled {
+-    color: rgba(255, 255, 255, 128);
++    color: @md-on-surface/38;
+ }
+ 
+ /* Secondary text (album, credits): set the "muted" property on a label */
+ QLabel[muted="true"] {
+-    color: rgba(255, 255, 255, 140);
++    color: @md-on-surface-variant;
+ }
+ 
++/* Primary tabs: a 3px indicator under the selected one */
+ QTabWidget::pane {
+     background-color: transparent;
+     border: none;
+-    border-top: 2px solid rgb(66, 66, 66);
++    border-top: 1px solid @md-outline-variant;
+ }
+ 
+ QTabBar::tab {
+     background-color: transparent;
+-    margin-right: 10px;
+-    color: rgba(255, 255, 255, 179);
++    margin-right: 8px;
++    color: @md-on-surface-variant;
+     margin-top: 2px;
+-    padding: 4px 10px;
+-    border-bottom: 2px solid transparent;
++    padding: 6px 14px;
++    border-bottom: 3px solid transparent;
++    border-top-left-radius: 3px;
++    border-top-right-radius: 3px;
++}
++
++QTabBar::tab:pressed {
++    background-color: @md-on-surface/12;
+ }
+ 
+ QTabBar::tab:selected:top {
+-    color: palette(base);
+-    border-bottom: 2px solid palette(base);
++    color: @md-primary;
++    border-bottom: 3px solid @md-primary;
+ }
+ 
+ QTabBar::tab:disabled {
+@@ -47,70 +58,168 @@ QTabBar::tab:disabled {
+     margin: 0px;
+ }
+ 
++/* Sliders: a thick rounded track, the active part in primary, a round handle */
+ QSlider {
+-    height: 30px;
++    height: 36px;
+ }
+ 
+ QSlider::groove {
+-    background-color: palette(alternate-base);
+-    height: 5px;
+-    border-radius: 2px;
++    background-color: @md-secondary-container;
++    height: 12px;
++    border-radius: 6px;
+ }
+ 
+ QSlider::groove[neutral="true"] {
+-    background-color: rgba(224, 224, 224, 128);
++    background-color: @md-surface-container-highest;
+ }
+ 
+ QSlider::handle {
+-    background-color: palette(base);
+-    width: 25px;
+-    height: 5px;
+-    line-height: 26px;
+-    margin-top: -10px;
+-    margin-bottom: -10px;
++    background-color: @md-primary;
++    width: 24px;
++    height: 24px;
++    margin-top: -6px;
++    margin-bottom: -6px;
+     border-radius: 12px;
+ }
+ 
+ QSlider::handle[neutral="true"] {
+-    background-color: rgb(224, 224, 224);
++    background-color: @md-on-surface-variant;
+ }
+ 
+ QSlider::sub-page {
+-    background-color: palette(base);
+-    height: 5px;
+-    border-radius: 2px;
++    background-color: @md-primary;
++    height: 12px;
++    border-radius: 6px;
+ }
+ 
+ QSlider::sub-page[neutral="true"] {
+-    background-color: rgb(224, 224, 224);
++    background-color: @md-on-surface-variant;
+ }
+ 
++/* Flat buttons are M3 text (and icon) buttons; the others filled tonal buttons */
+ QPushButton {
+-    color: rgb(255, 255, 255);
++    color: @md-primary;
+     border: none;
+-    padding: 8px;
+-    border-radius: 8px;
++    padding: 10px 16px;
++    border-radius: 20px;
+ }
+ 
+ QPushButton:pressed {
+-    background-color: rgba(255, 255, 255, 25);
++    background-color: @md-primary/12;
+ }
+ 
+ QPushButton:disabled {
+-    color: rgba(255, 255, 255, 128);
++    color: @md-on-surface/38;
+ }
+ 
+ QPushButton:!flat {
+-    background-color: rgb(50, 50, 50);
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++}
++
++QPushButton:!flat:pressed {
++    background-color: @md-on-secondary-container/20;
+ }
+ 
+ QPushButton:!flat:checked {
+-    color: rgb(0, 0, 0);
+-    background-color: palette(base);
++    color: @md-on-primary;
++    background-color: @md-primary;
+ }
+ 
+ QPushButton:!flat:disabled {
+-    background-color: rgb(33, 33, 33);
++    color: @md-on-surface/38;
++    background-color: @md-on-surface/12;
++}
++
++/* M3 button variants: md="filled" (primary), md="outlined", md="tonal" */
++QPushButton[md="filled"] {
++    color: @md-on-primary;
++    background-color: @md-primary;
++}
++
++QPushButton[md="filled"]:pressed {
++    background-color: @md-primary/88;
++}
++
++QPushButton[md="outlined"] {
++    color: @md-primary;
++    background-color: transparent;
++    border: 1px solid @md-outline;
++}
++
++QPushButton[md="tonal"] {
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++}
++
++QPushButton[md]:disabled {
++    color: @md-on-surface/38;
++    background-color: @md-on-surface/12;
++    border: none;
++}
++
++/* M3 segmented buttons: segment="first" / "middle" / "last" */
++QPushButton[segment] {
++    color: @md-on-surface;
++    background-color: transparent;
++    border: 1px solid @md-outline;
++    border-radius: 0px;
++    padding: 8px 20px;
++}
++
++QPushButton[segment="first"] {
++    border-top-left-radius: 20px;
++    border-bottom-left-radius: 20px;
++}
++
++QPushButton[segment="last"] {
++    border-top-right-radius: 20px;
++    border-bottom-right-radius: 20px;
++    border-left: none;
++}
++
++QPushButton[segment="middle"] {
++    border-left: none;
++}
++
++QPushButton[segment]:checked {
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++}
++
++/* M3 filter chips: md="chip" (checkable) */
++QPushButton[md="chip"] {
++    color: @md-on-surface-variant;
++    background-color: transparent;
++    border: 1px solid @md-outline;
++    border-radius: 8px;
++    padding: 8px 16px;
++}
++
++QPushButton[md="chip"]:checked {
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++    border: 1px solid @md-secondary-container;
++}
++
++QPushButton[md="chip"]:pressed {
++    background-color: @md-on-surface/12;
++}
++
++/* M3 cards: md="card" (and "card-high") on a QFrame */
++QFrame[md="card"] {
++    background-color: @md-surface-container-low;
++    border-radius: 24px;
++}
++
++QFrame[md="card-high"] {
++    background-color: @md-surface-container-high;
++    border-radius: 24px;
++}
++
++QFrame[md="card"] QListWidget,
++QFrame[md="card-high"] QListWidget {
++    background-color: transparent;
+ }
+ 
+ QPushButton#FullscreenBar {
+@@ -118,34 +227,57 @@ QPushButton#FullscreenBar {
+     margin: 2px;
+ }
+ 
++/* Navigation rail: a pill behind the selected page's icon */
++#NavRail {
++    background-color: @md-surface-container;
++}
++
++#NavRail QPushButton {
++    border-radius: 16px;
++    margin: 4px 8px;
++    padding: 6px;
++}
++
++#NavRail QPushButton:checked {
++    background-color: @md-secondary-container;
++}
++
++#NavRail QPushButton:pressed {
++    background-color: @md-on-surface/12;
++}
++
+ QFrame[frameShape="4"][frameShadow="16"],
+ QFrame[frameShape="5"][frameShadow="16"] {
+-    color: rgba(255, 255, 255, 66);
++    color: @md-outline-variant;
+ }
+ 
+ QListWidget {
+-    background-color: rgb(46, 46, 46); 
+-    color: rgb(255, 255, 255);
+-    border: 2px solid rgb(66, 66, 66);
++    background-color: @md-surface-container-low;
++    color: @md-on-surface;
++    border: none;
+ }
+ 
+ QListView {
+-    padding: 2px;
+-    border-radius: 8px;
++    padding: 4px;
++    border-radius: 12px;
+ }
+ 
+ QListView::indicator {
+     border: none;
+ }
+ 
++QListView::item {
++    padding: 4px;
++}
++
+ QListView::item:selected {
+-    color: rgb(0, 0, 0);
+-    background-color: palette(base);
+-    border-radius: 8px;
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++    border-radius: 12px;
+ }
+ 
+ QListView::item:disabled {
+-    color: rgba(255, 255, 255, 128);
++    color: @md-on-surface/38;
+ }
+ 
+ QGroupBox {
+@@ -153,51 +285,51 @@ QGroupBox {
+ }
+ 
+ QCheckBox {
+-    color: rgb(255, 255, 255);
++    color: @md-on-surface;
+     background-color: transparent;
+ }
+ 
+ QRadioButton {
+-    color: rgb(255, 255, 255);
++    color: @md-on-surface;
+     background-color: transparent;
+ }
+ 
+ QRadioButton:disabled {
+-    color: rgb(136, 136, 136);
++    color: @md-on-surface/38;
+ }
+ 
+ QCheckBox::indicator {
+-    width: 22px;
+-    height: 22px;
+-    border: 2px solid rgb(255, 255, 255);
++    width: 18px;
++    height: 18px;
++    border: 2px solid @md-on-surface-variant;
+     border-radius: 3px;
+ }
+ 
+ QRadioButton::indicator {
+-    width: 19px;
+-    height: 19px;
+-    border: 2px solid rgb(255, 255, 255);
++    width: 18px;
++    height: 18px;
++    border: 2px solid @md-on-surface-variant;
+     border-radius: 11px;
+ }
+ 
+ QRadioButton::indicator:disabled {
+-    border: 2px solid rgb(136, 136, 136);
++    border: 2px solid @md-on-surface/38;
+ }
+ 
+ QCheckBox::indicator::checked {
+     image: url(:/icons/dark/check.svg);
+-    background-color: palette(base);
+-    border: 2px solid palette(base);
++    background-color: @md-primary;
++    border: 2px solid @md-primary;
+ }
+ 
+ QRadioButton::indicator::checked {
+-    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.65 palette(base), stop:.75 transparent);
+-    border: 2px solid palette(base);
++    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.6 @md-primary, stop:.7 transparent);
++    border: 2px solid @md-primary;
+ }
+ 
+ QRadioButton::indicator::checked:disabled {
+-    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.65 rgb(136, 136, 136), stop:.75 transparent);
+-    border: 2px solid rgb(136, 136, 136);
++    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.6 @md-on-surface/38, stop:.7 transparent);
++    border: 2px solid @md-on-surface/38;
+ }
+ 
+ QScrollArea {
+@@ -209,7 +341,7 @@ QScrollArea > QWidget > QWidget {
+     background-color: transparent;
+ }
+ 
+-/* Material-style: a thin rounded thumb, no track, no arrow buttons */
++/* A thin rounded thumb, no track, no arrow buttons */
+ QScrollBar {
+     background-color: transparent;
+     border: none;
+@@ -226,12 +358,12 @@ QScrollBar:horizontal {
+ }
+ 
+ QScrollBar::handle {
+-    background-color: rgba(255, 255, 255, 97);
++    background-color: @md-on-surface/38;
+     border-radius: 3px;
+ }
+ 
+ QScrollBar::handle:pressed {
+-    background-color: rgba(255, 255, 255, 153);
++    background-color: @md-on-surface/62;
+ }
+ 
+ QScrollBar::handle:vertical {
+@@ -254,16 +386,26 @@ QScrollBar::sub-page {
+     background: none;
+ }
+ 
+-/* Spin boxes look like text boxes; without a rule they took the palette's
+-   base colour, which is the theme accent (black text on black by default) */
+-QAbstractSpinBox {
++/* Filled text fields: spin boxes, drop-downs and line edits */
++QAbstractSpinBox,
++QComboBox {
+     border: none;
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
+-    padding: 6px 12px;
+-    color: rgb(255, 255, 255);
+-    background-color: rgb(25, 25, 25);
+-    border-bottom: 1px solid rgb(66, 66, 66);
++    border-top-left-radius: 4px;
++    border-top-right-radius: 4px;
++    padding: 8px 12px;
++    color: @md-on-surface;
++    background-color: @md-surface-container-highest;
++    border-bottom: 1px solid @md-on-surface-variant;
++}
++
++QComboBox {
++    selection-background-color: transparent;
++    selection-color: @md-on-surface;
++}
++
++QAbstractSpinBox:focus,
++QComboBox:focus {
++    border-bottom: 2px solid @md-primary;
+ }
+ 
+ QAbstractSpinBox::up-button,
+@@ -271,19 +413,6 @@ QAbstractSpinBox::down-button {
+     width: 32px;
+ }
+ 
+-/* Drop-downs (plugins' dialogs) look like text boxes too */
+-QComboBox {
+-    border: none;
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
+-    padding: 6px 12px;
+-    color: rgb(255, 255, 255);
+-    background-color: rgb(25, 25, 25);
+-    border-bottom: 1px solid rgb(66, 66, 66);
+-    selection-background-color: transparent;
+-    selection-color: rgb(255, 255, 255);
+-}
+-
+ QComboBox::drop-down,
+ QDateTimeEdit::drop-down {
+     border: none;
+@@ -298,39 +427,44 @@ QDateTimeEdit::down-arrow {
+ }
+ 
+ QComboBox QAbstractItemView {
+-    color: rgb(255, 255, 255);
+-    background-color: rgb(46, 46, 46);
+-    selection-color: rgb(255, 255, 255);
+-    selection-background-color: rgb(66, 66, 66);
+-    border: 1px solid rgb(66, 66, 66);
++    color: @md-on-surface;
++    background-color: @md-surface-container;
++    selection-color: @md-on-secondary-container;
++    selection-background-color: @md-secondary-container;
++    border: none;
++    border-radius: 4px;
+     outline: 0;
+ }
+ 
+ QLineEdit {
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
+-    border-bottom-left-radius: 1px;
+-    border-bottom-right-radius: 1px;
++    border-top-left-radius: 4px;
++    border-top-right-radius: 4px;
++    border-bottom-left-radius: 0px;
++    border-bottom-right-radius: 0px;
+     border: none;
+-    padding: 12px;
+-    color: rgb(255, 255, 255);
+-    background-color: rgb(25, 25, 25);
+-    border-bottom: 1px solid rgb(66, 66, 66);
++    padding: 12px 16px;
++    color: @md-on-surface;
++    background-color: @md-surface-container-highest;
++    border-bottom: 1px solid @md-on-surface-variant;
++    selection-background-color: @md-primary/40;
+ }
+ 
+ QLineEdit:focus {
+-    background-color: rgb(29, 29, 29);
+-    border-bottom: 2px solid palette(base);
++    border-bottom: 2px solid @md-primary;
+ }
+ 
++/* M3 switch: outlined track and small thumb off; primary track, big thumb on */
+ Switch {
+-    qproperty-track_color: rgba(255, 255, 255, 31);
+-    qproperty-thumb_color: rgb(158, 158, 158);
++    qproperty-track_color: @md-surface-container-highest;
++    qproperty-thumb_color: @md-outline;
++    qproperty-outline_color: @md-outline;
++    qproperty-checked_track_color: @md-primary;
++    qproperty-checked_thumb_color: @md-on-primary;
+ }
+ 
+ Tuner {
+-    qproperty-color: rgb(224, 224, 224);
+-    qproperty-accent: palette(base);
++    qproperty-color: @md-on-surface-variant;
++    qproperty-accent: @md-primary;
+ }
+ 
+ Tuner::groove {
+@@ -348,45 +482,43 @@ Tuner::sub-page {
+ }
+ 
+ StepMeter {
+-    qproperty-base_color: palette(alternate-base);
+-    qproperty-bar_color: palette(base);
++    qproperty-base_color: @md-secondary-container;
++    qproperty-bar_color: @md-primary;
+ }
+ 
+ ClimateState {
+-    qproperty-color: rgb(228, 228, 228);
++    qproperty-color: @md-on-surface;
+ }
+ 
+ VehicleState {
+-    qproperty-base_color: rgb(228, 228, 228);
++    qproperty-base_color: @md-on-surface;
+     qproperty-headlight_color: #4FC3F7;
+     qproperty-taillight_color: #E57373;
+     qproperty-indicator_color: #FFB74D;
+-    qproperty-warning_color: #FF7043;
++    qproperty-warning_color: @md-error;
+ }
+ 
++/* Dialogs: an extra-large rounded surface */
+ QDialog,
+ QDialog > QFrame {
+-    background-color: rgb(56, 56, 56);
+-    border-radius: 8px;
+-    border: 2px solid rgb(66, 66, 66);
++    background-color: @md-surface-container-high;
++    border-radius: 28px;
++    border: none;
+ }
+ 
+ #ControlBar {
+-    background-color: rgb(48, 48, 48);
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
++    background-color: @md-surface-container;
++    border-top-left-radius: 16px;
++    border-top-right-radius: 16px;
+ }
+ 
+ #StatusBar {
+-    background-color: rgba(255, 255, 255, 4);
+-    border-top-left-radius: 4px;
+-    border-top-right-radius: 4px;
+-    border-bottom-left-radius: 4px;
+-    border-bottom-right-radius: 4px;
++    background-color: @md-surface-container-high;
++    border-radius: 12px;
+     margin: 2px;
+ }
+ 
+ *[add_hint="true"] {
+-    background-color: rgba(255, 255, 255, 31);
+-    border-radius: 8px;
++    background-color: @md-on-surface/12;
++    border-radius: 12px;
+ }
+diff --git a/assets/stylesheets/light.qss b/assets/stylesheets/light.qss
+index 8b23273..b5f8d01 100644
+--- a/assets/stylesheets/light.qss
++++ b/assets/stylesheets/light.qss
+@@ -1,6 +1,10 @@
++/* Material 3, with colours from the theme colour: @md-<role> is filled in at
++   run time from a scheme made from it (src/app/md3.cpp), @md-<role>/<n> at n %
++   opacity (state layers). */
++
+ QMainWindow,
+ QMainWindow > QFrame {
+-    background-color: rgb(238, 238, 238);
++    background-color: @md-surface;
+ }
+ 
+ QWidget {
+@@ -8,36 +12,43 @@ QWidget {
+ }
+ 
+ QLabel {
+-    color: rgba(0, 0, 0, 222);
++    color: @md-on-surface;
+ }
+ 
+ QLabel:disabled {
+-    color: rgba(0, 0, 0, 97);
++    color: @md-on-surface/38;
+ }
+ 
+ /* Secondary text (album, credits): set the "muted" property on a label */
+ QLabel[muted="true"] {
+-    color: rgba(0, 0, 0, 138);
++    color: @md-on-surface-variant;
+ }
+ 
++/* Primary tabs: a 3px indicator under the selected one */
+ QTabWidget::pane {
+     background-color: transparent;
+     border: none;
+-    border-top: 2px solid rgb(224, 224, 224);
++    border-top: 1px solid @md-outline-variant;
+ }
+ 
+ QTabBar::tab {
+     background-color: transparent;
+-    margin-right: 10px;
+-    color: rgba(0, 0, 0, 138);
++    margin-right: 8px;
++    color: @md-on-surface-variant;
+     margin-top: 2px;
+-    padding: 4px 10px;
+-    border-bottom: 2px solid transparent;
++    padding: 6px 14px;
++    border-bottom: 3px solid transparent;
++    border-top-left-radius: 3px;
++    border-top-right-radius: 3px;
++}
++
++QTabBar::tab:pressed {
++    background-color: @md-on-surface/12;
+ }
+ 
+ QTabBar::tab:selected:top {
+-    color: palette(base);
+-    border-bottom: 2px solid palette(base);
++    color: @md-primary;
++    border-bottom: 3px solid @md-primary;
+ }
+ 
+ QTabBar::tab:disabled {
+@@ -47,70 +58,168 @@ QTabBar::tab:disabled {
+     margin: 0px;
+ }
+ 
++/* Sliders: a thick rounded track, the active part in primary, a round handle */
+ QSlider {
+-    height: 30px;
++    height: 36px;
+ }
+ 
+ QSlider::groove {
+-    background-color: palette(alternate-base);
+-    height: 5px;
+-    border-radius: 2px;
++    background-color: @md-secondary-container;
++    height: 12px;
++    border-radius: 6px;
+ }
+ 
+ QSlider::groove[neutral="true"] {
+-    background-color: rgba(66, 66, 66, 128);
++    background-color: @md-surface-container-highest;
+ }
+ 
+ QSlider::handle {
+-    background-color: palette(base);
+-    width: 25px;
+-    height: 5px;
+-    line-height: 26px;
+-    margin-top: -10px;
+-    margin-bottom: -10px;
++    background-color: @md-primary;
++    width: 24px;
++    height: 24px;
++    margin-top: -6px;
++    margin-bottom: -6px;
+     border-radius: 12px;
+ }
+ 
+ QSlider::handle[neutral="true"] {
+-    background-color: rgb(66, 66, 66);
++    background-color: @md-on-surface-variant;
+ }
+ 
+ QSlider::sub-page {
+-    background-color: palette(base);
+-    height: 5px;
+-    border-radius: 2px;
++    background-color: @md-primary;
++    height: 12px;
++    border-radius: 6px;
+ }
+ 
+ QSlider::sub-page[neutral="true"] {
+-    background-color: rgb(66, 66, 66);
++    background-color: @md-on-surface-variant;
+ }
+ 
++/* Flat buttons are M3 text (and icon) buttons; the others filled tonal buttons */
+ QPushButton {
+-    color: rgba(0, 0, 0, 222);
++    color: @md-primary;
+     border: none;
+-    padding: 8px;
+-    border-radius: 8px;
++    padding: 10px 16px;
++    border-radius: 20px;
+ }
+ 
+ QPushButton:pressed {
+-    background-color: rgba(0, 0, 0, 25);
++    background-color: @md-primary/12;
+ }
+ 
+ QPushButton:disabled {
+-    color: rgba(0, 0, 0, 97);
++    color: @md-on-surface/38;
+ }
+ 
+ QPushButton:!flat {
+-    background-color: rgb(212, 212, 212);
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++}
++
++QPushButton:!flat:pressed {
++    background-color: @md-on-secondary-container/20;
+ }
+ 
+ QPushButton:!flat:checked {
+-    color: rgba(255, 255, 255, 222);
+-    background-color: palette(base);
++    color: @md-on-primary;
++    background-color: @md-primary;
+ }
+ 
+ QPushButton:!flat:disabled {
+-    background-color: rgb(224, 224, 224);
++    color: @md-on-surface/38;
++    background-color: @md-on-surface/12;
++}
++
++/* M3 button variants: md="filled" (primary), md="outlined", md="tonal" */
++QPushButton[md="filled"] {
++    color: @md-on-primary;
++    background-color: @md-primary;
++}
++
++QPushButton[md="filled"]:pressed {
++    background-color: @md-primary/88;
++}
++
++QPushButton[md="outlined"] {
++    color: @md-primary;
++    background-color: transparent;
++    border: 1px solid @md-outline;
++}
++
++QPushButton[md="tonal"] {
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++}
++
++QPushButton[md]:disabled {
++    color: @md-on-surface/38;
++    background-color: @md-on-surface/12;
++    border: none;
++}
++
++/* M3 segmented buttons: segment="first" / "middle" / "last" */
++QPushButton[segment] {
++    color: @md-on-surface;
++    background-color: transparent;
++    border: 1px solid @md-outline;
++    border-radius: 0px;
++    padding: 8px 20px;
++}
++
++QPushButton[segment="first"] {
++    border-top-left-radius: 20px;
++    border-bottom-left-radius: 20px;
++}
++
++QPushButton[segment="last"] {
++    border-top-right-radius: 20px;
++    border-bottom-right-radius: 20px;
++    border-left: none;
++}
++
++QPushButton[segment="middle"] {
++    border-left: none;
++}
++
++QPushButton[segment]:checked {
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++}
++
++/* M3 filter chips: md="chip" (checkable) */
++QPushButton[md="chip"] {
++    color: @md-on-surface-variant;
++    background-color: transparent;
++    border: 1px solid @md-outline;
++    border-radius: 8px;
++    padding: 8px 16px;
++}
++
++QPushButton[md="chip"]:checked {
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++    border: 1px solid @md-secondary-container;
++}
++
++QPushButton[md="chip"]:pressed {
++    background-color: @md-on-surface/12;
++}
++
++/* M3 cards: md="card" (and "card-high") on a QFrame */
++QFrame[md="card"] {
++    background-color: @md-surface-container-low;
++    border-radius: 24px;
++}
++
++QFrame[md="card-high"] {
++    background-color: @md-surface-container-high;
++    border-radius: 24px;
++}
++
++QFrame[md="card"] QListWidget,
++QFrame[md="card-high"] QListWidget {
++    background-color: transparent;
+ }
+ 
+ QPushButton#FullscreenBar {
+@@ -118,34 +227,57 @@ QPushButton#FullscreenBar {
+     margin: 2px;
+ }
+ 
++/* Navigation rail: a pill behind the selected page's icon */
++#NavRail {
++    background-color: @md-surface-container;
++}
++
++#NavRail QPushButton {
++    border-radius: 16px;
++    margin: 4px 8px;
++    padding: 6px;
++}
++
++#NavRail QPushButton:checked {
++    background-color: @md-secondary-container;
++}
++
++#NavRail QPushButton:pressed {
++    background-color: @md-on-surface/12;
++}
++
+ QFrame[frameShape="4"][frameShadow="16"],
+ QFrame[frameShape="5"][frameShadow="16"] {
+-    color: rgba(0, 0, 0, 31);
++    color: @md-outline-variant;
+ }
+ 
+ QListWidget {
+-    background-color: rgb(241, 241, 241);
+-    color: rgba(0, 0, 0, 222);
+-    border: 2px solid rgb(224, 224, 224);
++    background-color: @md-surface-container-low;
++    color: @md-on-surface;
++    border: none;
+ }
+ 
+ QListView {
+-    padding: 2px;
+-    border-radius: 8px;
++    padding: 4px;
++    border-radius: 12px;
+ }
+ 
+ QListView::indicator {
+     border: none;
+ }
+ 
++QListView::item {
++    padding: 4px;
++}
++
+ QListView::item:selected {
+-    color: rgba(255, 255, 255, 222);
+-    background-color: palette(base);
+-    border-radius: 8px;
++    color: @md-on-secondary-container;
++    background-color: @md-secondary-container;
++    border-radius: 12px;
+ }
+ 
+ QListView::item:disabled {
+-    color: rgba(0, 0, 0, 97);
++    color: @md-on-surface/38;
+ }
+ 
+ QGroupBox {
+@@ -153,51 +285,51 @@ QGroupBox {
+ }
+ 
+ QCheckBox {
+-    color: rgba(0, 0, 0, 222);
++    color: @md-on-surface;
+     background-color: transparent;
+ }
+ 
+ QRadioButton {
+-    color: rgba(0, 0, 0, 222);
++    color: @md-on-surface;
+     background-color: transparent;
+ }
+ 
+ QRadioButton:disabled {
+-    color: rgb(136, 136, 136);
++    color: @md-on-surface/38;
+ }
+ 
+ QCheckBox::indicator {
+-    width: 22px;
+-    height: 22px;
+-    border: 2px solid rgb(97, 97, 97);
++    width: 18px;
++    height: 18px;
++    border: 2px solid @md-on-surface-variant;
+     border-radius: 3px;
+ }
+ 
+ QRadioButton::indicator {
+-    width: 19px;
+-    height: 19px;
+-    border: 2px solid rgb(97, 97, 97);
++    width: 18px;
++    height: 18px;
++    border: 2px solid @md-on-surface-variant;
+     border-radius: 11px;
+ }
+ 
+ QRadioButton::indicator:disabled {
+-    border: 2px solid rgb(136, 136, 136);
++    border: 2px solid @md-on-surface/38;
+ }
+ 
+ QCheckBox::indicator::checked {
+     image: url(:/icons/light/check.svg);
+-    background-color: palette(base);
+-    border: 2px solid palette(base);
++    background-color: @md-primary;
++    border: 2px solid @md-primary;
+ }
+ 
+ QRadioButton::indicator::checked {
+-    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.65 palette(base), stop:.75 transparent);
+-    border: 2px solid palette(base);
++    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.6 @md-primary, stop:.7 transparent);
++    border: 2px solid @md-primary;
+ }
+ 
+ QRadioButton::indicator::checked:disabled {
+-    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.65 rgb(136, 136, 136), stop:.75 transparent);
+-    border: 2px solid rgb(136, 136, 136);
++    background-color: qradialgradient(cx:0.5, cy:0.5, fx:0.5, fy:0.5, radius:.4, stop:.6 @md-on-surface/38, stop:.7 transparent);
++    border: 2px solid @md-on-surface/38;
+ }
+ 
+ QScrollArea {
+@@ -209,7 +341,7 @@ QScrollArea > QWidget > QWidget {
+     background-color: transparent;
+ }
+ 
+-/* Material-style: a thin rounded thumb, no track, no arrow buttons */
++/* A thin rounded thumb, no track, no arrow buttons */
+ QScrollBar {
+     background-color: transparent;
+     border: none;
+@@ -226,12 +358,12 @@ QScrollBar:horizontal {
+ }
+ 
+ QScrollBar::handle {
+-    background-color: rgba(0, 0, 0, 97);
++    background-color: @md-on-surface/38;
+     border-radius: 3px;
+ }
+ 
+ QScrollBar::handle:pressed {
+-    background-color: rgba(0, 0, 0, 153);
++    background-color: @md-on-surface/62;
+ }
+ 
+ QScrollBar::handle:vertical {
+@@ -254,16 +386,26 @@ QScrollBar::sub-page {
+     background: none;
+ }
+ 
+-/* Spin boxes look like text boxes; without a rule they took the palette's
+-   base colour, which is the theme accent (black text on black by default) */
+-QAbstractSpinBox {
++/* Filled text fields: spin boxes, drop-downs and line edits */
++QAbstractSpinBox,
++QComboBox {
+     border: none;
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
+-    padding: 6px 12px;
+-    color: rgba(0, 0, 0, 222);
+-    background-color: rgb(231, 231, 231);
+-    border-bottom: 1px solid rgb(189, 189, 189);
++    border-top-left-radius: 4px;
++    border-top-right-radius: 4px;
++    padding: 8px 12px;
++    color: @md-on-surface;
++    background-color: @md-surface-container-highest;
++    border-bottom: 1px solid @md-on-surface-variant;
++}
++
++QComboBox {
++    selection-background-color: transparent;
++    selection-color: @md-on-surface;
++}
++
++QAbstractSpinBox:focus,
++QComboBox:focus {
++    border-bottom: 2px solid @md-primary;
+ }
+ 
+ QAbstractSpinBox::up-button,
+@@ -271,19 +413,6 @@ QAbstractSpinBox::down-button {
+     width: 32px;
+ }
+ 
+-/* Drop-downs (plugins' dialogs) look like text boxes too */
+-QComboBox {
+-    border: none;
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
+-    padding: 6px 12px;
+-    color: rgba(0, 0, 0, 222);
+-    background-color: rgb(231, 231, 231);
+-    border-bottom: 1px solid rgb(189, 189, 189);
+-    selection-background-color: transparent;
+-    selection-color: rgba(0, 0, 0, 222);
+-}
+-
+ QComboBox::drop-down,
+ QDateTimeEdit::drop-down {
+     border: none;
+@@ -298,39 +427,44 @@ QDateTimeEdit::down-arrow {
+ }
+ 
+ QComboBox QAbstractItemView {
+-    color: rgba(0, 0, 0, 222);
+-    background-color: rgb(255, 255, 255);
+-    selection-color: rgba(0, 0, 0, 222);
+-    selection-background-color: rgb(189, 189, 189);
+-    border: 1px solid rgb(189, 189, 189);
++    color: @md-on-surface;
++    background-color: @md-surface-container;
++    selection-color: @md-on-secondary-container;
++    selection-background-color: @md-secondary-container;
++    border: none;
++    border-radius: 4px;
+     outline: 0;
+ }
+ 
+ QLineEdit {
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
+-    border-bottom-left-radius: 1px;
+-    border-bottom-right-radius: 1px;
++    border-top-left-radius: 4px;
++    border-top-right-radius: 4px;
++    border-bottom-left-radius: 0px;
++    border-bottom-right-radius: 0px;
+     border: none;
+-    padding: 12px;
+-    color: rgba(0, 0, 0, 222);
+-    background-color: rgb(231, 231, 231);
+-    border-bottom: 1px solid rgb(189, 189, 189);
++    padding: 12px 16px;
++    color: @md-on-surface;
++    background-color: @md-surface-container-highest;
++    border-bottom: 1px solid @md-on-surface-variant;
++    selection-background-color: @md-primary/40;
+ }
+ 
+ QLineEdit:focus {
+-    background-color: rgb(224, 224, 224);
+-    border-bottom: 2px solid palette(base);
++    border-bottom: 2px solid @md-primary;
+ }
+ 
++/* M3 switch: outlined track and small thumb off; primary track, big thumb on */
+ Switch {
+-    qproperty-track_color: rgba(0, 0, 0, 64);
+-    qproperty-thumb_color: rgb(224, 224, 224);
++    qproperty-track_color: @md-surface-container-highest;
++    qproperty-thumb_color: @md-outline;
++    qproperty-outline_color: @md-outline;
++    qproperty-checked_track_color: @md-primary;
++    qproperty-checked_thumb_color: @md-on-primary;
+ }
+ 
+ Tuner {
+-    qproperty-color: rgb(0, 0, 0);
+-    qproperty-accent: palette(base);
++    qproperty-color: @md-on-surface-variant;
++    qproperty-accent: @md-primary;
+ }
+ 
+ Tuner::groove {
+@@ -348,45 +482,43 @@ Tuner::sub-page {
+ }
+ 
+ StepMeter {
+-    qproperty-base_color: palette(alternate-base);
+-    qproperty-bar_color: palette(base);
++    qproperty-base_color: @md-secondary-container;
++    qproperty-bar_color: @md-primary;
+ }
+ 
+ ClimateState {
+-    qproperty-color: rgb(0, 0, 0);
++    qproperty-color: @md-on-surface;
+ }
+ 
+ VehicleState {
+-    qproperty-base_color: rgb(0, 0, 0);
+-    qproperty-headlight_color: #03A9F4;
+-    qproperty-taillight_color: #F44336;
+-    qproperty-indicator_color: #FF9800;
+-    qproperty-warning_color: #F4511E;
++    qproperty-base_color: @md-on-surface;
++    qproperty-headlight_color: #4FC3F7;
++    qproperty-taillight_color: #E57373;
++    qproperty-indicator_color: #FFB74D;
++    qproperty-warning_color: @md-error;
+ }
+ 
++/* Dialogs: an extra-large rounded surface */
+ QDialog,
+ QDialog > QFrame {
+-    background-color: rgb(255, 255, 255);
+-    border-radius: 8px;
+-    border: 2px solid rgb(224, 224, 224);
++    background-color: @md-surface-container-high;
++    border-radius: 28px;
++    border: none;
+ }
+ 
+ #ControlBar {
+-    background-color: rgb(250, 250, 250);
+-    border-top-left-radius: 6px;
+-    border-top-right-radius: 6px;
++    background-color: @md-surface-container;
++    border-top-left-radius: 16px;
++    border-top-right-radius: 16px;
+ }
+ 
+ #StatusBar {
+-    background-color: rgba(0, 0, 0, 12);
+-    border-top-left-radius: 4px;
+-    border-top-right-radius: 4px;
+-    border-bottom-left-radius: 4px;
+-    border-bottom-right-radius: 4px;
++    background-color: @md-surface-container-high;
++    border-radius: 12px;
+     margin: 2px;
+ }
+ 
+ *[add_hint="true"] {
+-    background-color: rgba(0, 0, 0, 12);
+-    border-radius: 8px;
++    background-color: @md-on-surface/12;
++    border-radius: 12px;
+ }
+diff --git a/include/app/md3.hpp b/include/app/md3.hpp
+new file mode 100644
+index 0000000..fa9021f
+--- /dev/null
++++ b/include/app/md3.hpp
+@@ -0,0 +1,31 @@
++#pragma once
++
++#include <QColor>
++#include <QMap>
++#include <QString>
++
++// A Material 3 colour scheme, made from one seed colour (the theme colour
++// picked in Settings) for light or dark mode: the roles the M3 guidelines
++// use (primary, containers, surfaces, outlines...). Tones are approximated in
++// HSL rather than M3's HCT, close enough for a head unit.
++//
++// Stylesheets use the roles as @md-<role> (e.g. @md-primary,
++// @md-surface-container-high), optionally with an opacity in percent for
++// state layers: @md-on-surface/12.
++struct Md3 {
++    QColor primary, on_primary, primary_container, on_primary_container;
++    QColor secondary, on_secondary, secondary_container, on_secondary_container;
++    QColor tertiary_container, on_tertiary_container;
++    QColor error, on_error, error_container, on_error_container;
++    QColor surface, surface_dim, surface_container_lowest, surface_container_low, surface_container,
++        surface_container_high, surface_container_highest;
++    QColor on_surface, on_surface_variant, outline, outline_variant;
++    QColor inverse_surface, inverse_on_surface, inverse_primary;
++
++    static Md3 scheme(const QColor &seed, bool dark);
++
++    // Every role by its stylesheet name ("primary", "on-surface-variant", ...)
++    QMap<QString, QColor> roles() const;
++    // Replace @md-<role>[/<opacity>] in a stylesheet
++    QString apply(const QString &stylesheet) const;
++};
+diff --git a/include/app/pages/vehicle.hpp b/include/app/pages/vehicle.hpp
+index 9154559..7d73326 100644
+--- a/include/app/pages/vehicle.hpp
++++ b/include/app/pages/vehicle.hpp
+@@ -120,13 +120,23 @@ class DiagnosticsTab : public QWidget {
+     void show_result(const QVariantMap &result);
+     void update_status();
+     void confirm_clear();
++    void restyle();
++    QLabel *info_value(QGridLayout *grid, int column, const QString &name);
+ 
+     Arbiter &arbiter;
+-    QLabel *mil;
+-    QLabel *info;
+-    QLabel *message;
++    QVariantMap result;   // the last read
++    QString note;         // "Reading...", an error from the car
++    // The status card: check-engine light, how many codes, when read
++    QFrame *hero;
++    QLabel *hero_title;
++    QLabel *hero_detail;
+     QPushButton *read;
+     QPushButton *clear;
++    // The car: VIN, protocol, modules answering
++    QFrame *info;
++    QLabel *vin;
++    QLabel *protocol;
++    QLabel *ecus;
+     QWidget *codes;
+     QVBoxLayout *codes_layout;
+ };
+diff --git a/include/app/session.hpp b/include/app/session.hpp
+index 993fdb6..eef41d1 100644
+--- a/include/app/session.hpp
++++ b/include/app/session.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
++#include "app/md3.hpp"
+ #include <array>
+ 
+ #include <QAbstractButton>
+@@ -54,6 +55,9 @@ class Session {
+         QColor color(Mode mode) const { return this->colors_[mode]; }
+         QColor &color() { return this->colors_[this->mode]; }
+         QColor color() const { return this->colors_[this->mode]; }
++        // Material 3 roles made from the theme colour, for this mode
++        Md3 scheme() const { return Md3::scheme(this->color(), this->mode == Dark); }
++        // Icons keep their original colours (black or white, the theme colour when selected)
+         QColor base_color() const { return (this->mode == Light) ? QColor(0, 0, 0) : QColor(255, 255, 255); }
+ 
+        private:
+@@ -210,6 +214,8 @@ class Session {
+         QList<Action *> actions_;
+ 
+         QString parse_stylesheet(QString path) const;
++
++        Arbiter &arbiter_;
+     };
+ 
+     Session(Arbiter &arbiter);
+diff --git a/include/app/widgets/switch.hpp b/include/app/widgets/switch.hpp
+index 2514b70..35a3e06 100644
+--- a/include/app/widgets/switch.hpp
++++ b/include/app/widgets/switch.hpp
+@@ -2,10 +2,16 @@
+ 
+ #include <QtWidgets>
+ 
++// A Material 3 switch: 52 x 32, an outlined track with a small thumb when
++// off, a filled primary track with a bigger thumb when on. Colours come from
++// the stylesheet (Switch { qproperty-...: ... }).
+ class Switch : public QAbstractButton {
+     Q_OBJECT
+     Q_PROPERTY(QColor track_color READ get_track_color WRITE set_track_color)
+     Q_PROPERTY(QColor thumb_color READ get_thumb_color WRITE set_thumb_color)
++    Q_PROPERTY(QColor outline_color READ get_outline_color WRITE set_outline_color)
++    Q_PROPERTY(QColor checked_track_color READ get_checked_track_color WRITE set_checked_track_color)
++    Q_PROPERTY(QColor checked_thumb_color READ get_checked_thumb_color WRITE set_checked_thumb_color)
+     Q_PROPERTY(int offset READ get_offset WRITE set_offset)
+ 
+    public:
+@@ -15,15 +21,20 @@ class Switch : public QAbstractButton {
+ 
+     QColor get_track_color() { return this->track_color; };
+     QColor get_thumb_color() { return this->thumb_color; };
++    QColor get_outline_color() { return this->outline_color; };
++    QColor get_checked_track_color() { return this->checked_track_color; };
++    QColor get_checked_thumb_color() { return this->checked_thumb_color; };
+     int get_offset() { return this->offset; }
+ 
+-    void set_track_color(QColor track_color) { this->track_color = track_color; }
+-    void set_thumb_color(QColor thumb_color) { this->thumb_color = thumb_color; }
+-    void set_offset(int offset) { this->offset = offset; }
++    void set_track_color(QColor c) { this->track_color = c; this->update(); }
++    void set_thumb_color(QColor c) { this->thumb_color = c; this->update(); }
++    void set_outline_color(QColor c) { this->outline_color = c; this->update(); }
++    void set_checked_track_color(QColor c) { this->checked_track_color = c; this->update(); }
++    void set_checked_thumb_color(QColor c) { this->checked_thumb_color = c; this->update(); }
++    void set_offset(int offset) { this->offset = offset; this->update(); }
+     void scale(double scale)
+     {
+         this->track_radius = std::ceil(BASE_TRACK_RADIUS * scale);
+-        this->thumb_radius = std::ceil(BASE_THUMB_RADIUS * scale);
+         this->update_properties();
+     }
+ 
+@@ -35,17 +46,16 @@ class Switch : public QAbstractButton {
+     void nextCheckState() override;
+ 
+    private:
+-    const int BASE_TRACK_RADIUS = 8;
+-    const int BASE_THUMB_RADIUS = 12;
++    const int BASE_TRACK_RADIUS = 16;  // M3: 32 high, 52 wide
+ 
+     int track_radius;
+-    int thumb_radius;
+ 
+-    QColor track_color = Qt::transparent;
+-    QColor thumb_color = Qt::transparent;
++    QColor track_color = QColor(230, 224, 233);
++    QColor thumb_color = QColor(121, 116, 126);
++    QColor outline_color = QColor(121, 116, 126);
++    QColor checked_track_color = QColor(103, 80, 164);
++    QColor checked_thumb_color = Qt::white;
+     int offset;
+-    int margin;
+-    int base_offset;
+     std::function<int(bool)> end_offset;
+ 
+     void update_properties();
+diff --git a/src/app/md3.cpp b/src/app/md3.cpp
+new file mode 100644
+index 0000000..3cd77f9
+--- /dev/null
++++ b/src/app/md3.cpp
+@@ -0,0 +1,148 @@
++#include "app/md3.hpp"
++
++#include <QRegularExpression>
++
++#include <cmath>
++
++namespace {
++// A tone (0 black - 100 white) of a hue at a saturation
++QColor tone(double hue, double saturation, double t)
++{
++    return QColor::fromHslF(hue, qBound(0.0, saturation, 1.0), qBound(0.0, t / 100.0, 1.0));
++}
++}  // namespace
++
++Md3 Md3::scheme(const QColor &seed, bool dark)
++{
++    // Dash's default theme colours are plain black and white: use M3's
++    // baseline blue then
++    double h = seed.hslHueF(), s = seed.hslSaturationF();
++    if (h < 0 || s < 0.15 || seed.lightnessF() < 0.08 || seed.lightnessF() > 0.95) {
++        h = 217 / 360.0;
++        s = 0.75;
++    }
++    const double ps = qBound(0.45, s, 0.9);  // primary
++    const double ss = ps * 0.3;              // secondary: same hue, muted
++    const double th = std::fmod(h + 60 / 360.0, 1.0), ts = ps * 0.5;  // tertiary: a neighbour
++    const double ns = 0.05, nvs = 0.1;       // neutral, neutral variant: a hint of the hue
++
++    Md3 m;
++    if (dark) {
++        m.primary = tone(h, ps, 80);
++        m.on_primary = tone(h, ps, 20);
++        m.primary_container = tone(h, ps, 30);
++        m.on_primary_container = tone(h, ps, 90);
++        m.secondary = tone(h, ss, 80);
++        m.on_secondary = tone(h, ss, 20);
++        m.secondary_container = tone(h, ss, 30);
++        m.on_secondary_container = tone(h, ss, 90);
++        m.tertiary_container = tone(th, ts, 30);
++        m.on_tertiary_container = tone(th, ts, 90);
++        m.error = QColor("#f2b8b5");
++        m.on_error = QColor("#601410");
++        m.error_container = QColor("#8c1d18");
++        m.on_error_container = QColor("#f9dedc");
++        m.surface = tone(h, ns, 6);
++        m.surface_dim = tone(h, ns, 6);
++        m.surface_container_lowest = tone(h, ns, 4);
++        m.surface_container_low = tone(h, ns, 10);
++        m.surface_container = tone(h, ns, 12);
++        m.surface_container_high = tone(h, ns, 17);
++        m.surface_container_highest = tone(h, ns, 22);
++        m.on_surface = tone(h, ns, 90);
++        m.on_surface_variant = tone(h, nvs, 80);
++        m.outline = tone(h, nvs, 60);
++        m.outline_variant = tone(h, nvs, 30);
++        m.inverse_surface = tone(h, ns, 90);
++        m.inverse_on_surface = tone(h, ns, 20);
++        m.inverse_primary = tone(h, ps, 40);
++    } else {
++        m.primary = tone(h, ps, 40);
++        m.on_primary = tone(h, ps, 100);
++        m.primary_container = tone(h, ps, 90);
++        m.on_primary_container = tone(h, ps, 10);
++        m.secondary = tone(h, ss, 40);
++        m.on_secondary = tone(h, ss, 100);
++        m.secondary_container = tone(h, ss, 90);
++        m.on_secondary_container = tone(h, ss, 10);
++        m.tertiary_container = tone(th, ts, 90);
++        m.on_tertiary_container = tone(th, ts, 10);
++        m.error = QColor("#b3261e");
++        m.on_error = QColor("#ffffff");
++        m.error_container = QColor("#f9dedc");
++        m.on_error_container = QColor("#410e0b");
++        m.surface = tone(h, ns, 98);
++        m.surface_dim = tone(h, ns, 87);
++        m.surface_container_lowest = tone(h, ns, 100);
++        m.surface_container_low = tone(h, ns, 96);
++        m.surface_container = tone(h, ns, 94);
++        m.surface_container_high = tone(h, ns, 92);
++        m.surface_container_highest = tone(h, ns, 90);
++        m.on_surface = tone(h, ns, 10);
++        m.on_surface_variant = tone(h, nvs, 30);
++        m.outline = tone(h, nvs, 50);
++        m.outline_variant = tone(h, nvs, 80);
++        m.inverse_surface = tone(h, ns, 20);
++        m.inverse_on_surface = tone(h, ns, 95);
++        m.inverse_primary = tone(h, ps, 80);
++    }
++    return m;
++}
++
++QMap<QString, QColor> Md3::roles() const
++{
++    return {
++        {"primary", primary},
++        {"on-primary", on_primary},
++        {"primary-container", primary_container},
++        {"on-primary-container", on_primary_container},
++        {"secondary", secondary},
++        {"on-secondary", on_secondary},
++        {"secondary-container", secondary_container},
++        {"on-secondary-container", on_secondary_container},
++        {"tertiary-container", tertiary_container},
++        {"on-tertiary-container", on_tertiary_container},
++        {"error", error},
++        {"on-error", on_error},
++        {"error-container", error_container},
++        {"on-error-container", on_error_container},
++        {"surface", surface},
++        {"surface-dim", surface_dim},
++        {"surface-container-lowest", surface_container_lowest},
++        {"surface-container-low", surface_container_low},
++        {"surface-container", surface_container},
++        {"surface-container-high", surface_container_high},
++        {"surface-container-highest", surface_container_highest},
++        {"on-surface", on_surface},
++        {"on-surface-variant", on_surface_variant},
++        {"outline", outline},
++        {"outline-variant", outline_variant},
++        {"inverse-surface", inverse_surface},
++        {"inverse-on-surface", inverse_on_surface},
++        {"inverse-primary", inverse_primary},
++    };
++}
++
++QString Md3::apply(const QString &stylesheet) const
++{
++    static const QRegularExpression token("@md-([a-z-]+[a-z])(?:/(\\d{1,3}))?");
++    const QMap<QString, QColor> colors = this->roles();
++    QString out;
++    out.reserve(stylesheet.size());
++    int last = 0;
++    auto it = token.globalMatch(stylesheet);
++    while (it.hasNext()) {
++        const auto match = it.next();
++        out += stylesheet.midRef(last, match.capturedStart() - last);
++        last = match.capturedEnd();
++        const auto c = colors.find(match.captured(1));
++        if (c == colors.end()) {
++            out += match.captured();  // unknown role: leave it for Qt to complain about
++            continue;
++        }
++        const int alpha = match.captured(2).isEmpty() ? 255 : qBound(0, match.captured(2).toInt(), 100) * 255 / 100;
++        out += QString("rgba(%1, %2, %3, %4)").arg(c->red()).arg(c->green()).arg(c->blue()).arg(alpha);
++    }
++    out += stylesheet.midRef(last);
++    return out;
++}
+diff --git a/src/app/pages/equalizer.cpp b/src/app/pages/equalizer.cpp
+index ce1c5d4..8aa75ee 100644
+--- a/src/app/pages/equalizer.cpp
++++ b/src/app/pages/equalizer.cpp
+@@ -91,10 +91,14 @@ EqualizerTab::EqualizerTab(Arbiter &arbiter, QWidget *parent)
+     this->status->hide();
+     layout->addWidget(this->status);
+ 
+-    auto bands = new QHBoxLayout();
++    // The bands on a Material 3 card
++    auto card = new QFrame(this);
++    card->setProperty("md", "card");
++    auto bands = new QHBoxLayout(card);
++    bands->setContentsMargins(8, 12, 8, 12);
+     for (int band = 0; band < kBands; band++)
+         bands->addWidget(this->band_widget(band), 1);
+-    layout->addLayout(bands, 1);
++    layout->addWidget(card, 1);
+ 
+     // Coalesce slider drags into a few updates a second
+     this->apply_timer = new QTimer(this);
+@@ -132,9 +136,10 @@ QWidget *EqualizerTab::band_widget(int band)
+     auto slider = new QSlider(Qt::Vertical, widget);
+     slider->setStyleSheet(QString(
+         "QSlider { width: %1px; height: %2px; }"
+-        "QSlider::groove:vertical { background-color: palette(alternate-base); width: 5px; height: %2px; border-radius: 2px; }"
++        // Material 3: a thick rounded track (secondary container), a round primary handle
++        "QSlider::groove:vertical { background-color: palette(alternate-base); width: 12px; height: %2px; border-radius: 6px; }"
+         "QSlider::add-page:vertical, QSlider::sub-page:vertical { background: transparent; }"
+-        "QSlider::handle:vertical { background-color: palette(base); width: 25px; height: 25px; margin: 0px -10px; border-radius: 12px; }")
++        "QSlider::handle:vertical { background-color: palette(base); width: 24px; height: 24px; margin: 0px -6px; border-radius: 12px; }")
+         .arg(width)
+         .arg(height));
+     slider->setFixedSize(width, height);
+diff --git a/src/app/pages/media.cpp b/src/app/pages/media.cpp
+index e03d457..edf5aca 100644
+--- a/src/app/pages/media.cpp
++++ b/src/app/pages/media.cpp
+@@ -37,7 +37,13 @@ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+     , ticker(new QTimer(this))
+ {
+     auto layout = new QVBoxLayout(this);
+-    layout->addWidget(this->now_playing);
++    auto card = new QFrame(this);
++    card->setProperty("md", "card");
++    auto card_layout = new QVBoxLayout(card);
++    card_layout->setContentsMargins(16, 16, 16, 16);
++    this->now_playing->setParent(card);
++    card_layout->addWidget(this->now_playing);
++    layout->addWidget(card);
+     // AVRCP can skip and pause, not seek
+     this->now_playing->set_seekable(false);
+ 
+@@ -187,11 +193,15 @@ RadioPlayerTab::RadioPlayerTab(Arbiter &arbiter, QWidget *parent)
+ 
+     auto layout = new QVBoxLayout(this);
+     layout->addWidget(this->top_widget());
+-    layout->addStretch(1);
+-    layout->addWidget(this->tuner_widget(), 1);
+-    layout->addWidget(this->controls_widget(), 3);
++    // The station and the dial on a Material 3 card
++    auto card = new QFrame(this);
++    card->setProperty("md", "card");
++    auto card_layout = new QVBoxLayout(card);
++    card_layout->setContentsMargins(12, 12, 12, 12);
++    card_layout->addWidget(this->tuner_widget(), 1);
++    card_layout->addWidget(this->controls_widget(), 3);
++    layout->addWidget(card, 4);
+     layout->addWidget(this->presets_widget());
+-    layout->addStretch(1);
+ 
+     this->load_plugin();
+     const bool am = this->settings.value("Pages/Media/Radio/band", "fm").toString() == "am";
+@@ -313,6 +323,9 @@ QWidget *RadioPlayerTab::top_widget()
+     auto bands = new QButtonGroup(widget);
+     this->fm_button = new QPushButton("FM", widget);
+     this->am_button = new QPushButton("AM", widget);
++    this->fm_button->setProperty("segment", "first");
++    this->am_button->setProperty("segment", "last");
++    layout->setSpacing(0);
+     for (QPushButton *button : {this->fm_button, this->am_button}) {
+         button->setCheckable(true);
+         button->setFont(this->arbiter.forge().font(14, true));
+@@ -361,6 +374,7 @@ QWidget *RadioPlayerTab::presets_widget()
+     for (int i = 0; i < PRESETS; i++) {
+         auto button = new QPushButton(widget);
+         button->setCheckable(true);
++        button->setProperty("md", "chip");
+         button->setFont(this->arbiter.forge().font(14, true));
+         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+         auto hold = new QTimer(button);
+@@ -461,8 +475,16 @@ LocalPlayerTab::LocalPlayerTab(Arbiter &arbiter, QWidget *parent)
+     this->player->setPlaylist(playlist);
+ 
+     auto layout = new QHBoxLayout(this);
+-    layout->addWidget(this->browser_widget(), 2);
+-    layout->addWidget(this->now_playing, 3);
++    layout->setSpacing(8);
++    for (QWidget *part : {this->browser_widget(), (QWidget *)this->now_playing}) {
++        auto card = new QFrame(this);
++        card->setProperty("md", "card");
++        auto card_layout = new QVBoxLayout(card);
++        card_layout->setContentsMargins(12, 12, 12, 12);
++        part->setParent(card);
++        card_layout->addWidget(part);
++        layout->addWidget(card, part == this->now_playing ? 3 : 2);
++    }
+ 
+     connect(this->now_playing, &NowPlaying::play_pause, [this](bool play){
+         if (play) {
+diff --git a/src/app/pages/network_settings.cpp b/src/app/pages/network_settings.cpp
+index 0b12ef1..7d9a657 100644
+--- a/src/app/pages/network_settings.cpp
++++ b/src/app/pages/network_settings.cpp
+@@ -316,7 +316,7 @@ void NetworkSettingsTab::set_busy(bool busy)
+ void NetworkSettingsTab::report(bool ok, const QString &message)
+ {
+     this->result->setText(message);
+-    this->result->setStyleSheet(ok ? QString() : QString("color: rgb(211, 47, 47);"));
++    this->result->setStyleSheet(ok ? QString() : QString("color: %1;").arg(this->arbiter.theme().scheme().error.name()));
+     this->result->setVisible(!message.isEmpty());
+ }
+ 
+diff --git a/src/app/pages/openauto.cpp b/src/app/pages/openauto.cpp
+index bc2b875..362a387 100644
+--- a/src/app/pages/openauto.cpp
++++ b/src/app/pages/openauto.cpp
+@@ -457,8 +457,30 @@ QWidget *OpenAutoPage::connect_msg()
+     QVBoxLayout *layout = new QVBoxLayout(widget);
+     layout->setContentsMargins(0, 0, 0, 0);
+ 
+-    QLabel *label = new QLabel("Connect Device to Start Android Auto", widget);
++    // Material 3 empty state: a card with the Android Auto icon, a headline
++    // and how to start it
++    auto card = new QFrame(widget);
++    card->setProperty("md", "card");
++    auto card_layout = new QVBoxLayout(card);
++    const double scale = this->arbiter.layout().scale;
++    card_layout->setContentsMargins(40 * scale, 32 * scale, 40 * scale, 32 * scale);
++    card_layout->setSpacing(10 * scale);
++    auto icon = new QLabel(card);
++    const int side = 88 * scale;
++    icon->setPixmap(QIcon(QString(":/icons/%1.svg").arg(this->connected_icon_name)).pixmap(side, side));
++    icon->setAlignment(Qt::AlignCenter);
++    card_layout->addWidget(icon);
++    auto headline = new QLabel("Connect your phone", card);
++    headline->setFont(this->arbiter.forge().font(22, true));
++    headline->setAlignment(Qt::AlignCenter);
++    card_layout->addWidget(headline);
++    QLabel *label = new QLabel("Android Auto starts by itself when your phone connects over Bluetooth, "
++                               "or when you plug it in with a USB cable.", card);
++    label->setProperty("muted", true);
++    label->setWordWrap(true);
+     label->setAlignment(Qt::AlignCenter);
++    label->setMaximumWidth(460 * scale);
++    card_layout->addWidget(label, 0, Qt::AlignHCenter);
+ 
+     QHBoxLayout *layout2 = new QHBoxLayout();
+     layout2->setContentsMargins(0, 0, 0, 0);
+@@ -483,8 +505,8 @@ QWidget *OpenAutoPage::connect_msg()
+ 
+     layout->addLayout(layout2);
+     layout->addStretch();
+-    layout->addWidget(label);
+-    layout->addStretch();
++    layout->addWidget(card, 0, Qt::AlignCenter);
++    layout->addStretch(2);
+ 
+     return widget;
+ }
+diff --git a/src/app/pages/phone.cpp b/src/app/pages/phone.cpp
+index e0b423a..f03cce3 100644
+--- a/src/app/pages/phone.cpp
++++ b/src/app/pages/phone.cpp
+@@ -349,7 +349,9 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+     QWidget *row = this->rows.value(address);
+     if (!row) {
+         row = new QFrame();
++        row->setProperty("md", "card");  // a Material 3 list card per device
+         auto layout = new QHBoxLayout(row);
++        layout->setContentsMargins(12, 6, 12, 6);
+         auto icon = new QPushButton(row);
+         icon->setFlat(true);
+         icon->setFocusPolicy(Qt::NoFocus);
+@@ -364,6 +366,7 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+         text->addWidget(name);
+         auto state = new QLabel(row);
+         state->setObjectName("state");
++        state->setProperty("muted", true);
+         state->setFont(this->arbiter.forge().font(11));
+         text->addWidget(state);
+         layout->addLayout(text, 1);
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+index 4e9ecf6..5715aef 100644
+--- a/src/app/pages/update_settings.cpp
++++ b/src/app/pages/update_settings.cpp
+@@ -119,8 +119,9 @@ QWidget *UpdateSettingsTab::settings_widget()
+     this->progress->setTextVisible(false);
+     this->progress->setFixedHeight(8);
+     this->progress->setStyleSheet(
+-        // Dash keeps the accent colour in palette(base) (as the volume OSD does)
+-        "QProgressBar { background-color: rgba(128, 128, 128, 70); border: none; border-radius: 4px; }"
++        // Material 3 linear progress: palette(base) is primary, alternate-base
++        // secondary-container (Session::Theme::palette)
++        "QProgressBar { background-color: palette(alternate-base); border: none; border-radius: 4px; }"
+         "QProgressBar::chunk { background-color: palette(base); border-radius: 4px; }");
+     this->progress->hide();
+     layout->addWidget(this->progress);
+@@ -356,7 +357,7 @@ void UpdateSettingsTab::set_busy(bool busy)
+ void UpdateSettingsTab::report(bool ok, const QString &message)
+ {
+     this->result->setText(message);
+-    this->result->setStyleSheet(ok ? QString() : QString("color: rgb(211, 47, 47);"));
++    this->result->setStyleSheet(ok ? QString() : QString("color: %1;").arg(this->arbiter.theme().scheme().error.name()));
+     this->result->setVisible(!message.isEmpty());
+ }
+ 
+diff --git a/src/app/pages/vehicle.cpp b/src/app/pages/vehicle.cpp
+index 00a003f..607b71f 100644
+--- a/src/app/pages/vehicle.cpp
++++ b/src/app/pages/vehicle.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <QSvgRenderer>
+ #include <QtMath>
++#include <tuple>
+ 
+ #include "app/arbiter.hpp"
+ #include "app/config.hpp"
+@@ -11,7 +12,6 @@
+ #include "plugins/vehicle_plugin.hpp"
+ 
+ namespace {
+-const QString kRed = "#d93025";
+ 
+ const QList<QPair<QString, QString>> kPositions = {
+     {"front_left", "Front left"},     {"front_right", "Front right"}, {"rear_left", "Rear left"},
+@@ -197,26 +197,23 @@ void VehiclePage::load_plugin()
+ /* ---------- Material 3 colours ---------- */
+ 
+ namespace {
+-struct Md3 {
++struct Md3c {
+     QColor surface, surface_high, on_surface, on_variant, track, accent, error;
+ };
+ 
+-// Neutral surfaces that sit on Dash's own backgrounds, the theme colour as
+-// the accent (or Material's baseline blue when the theme colour is plain
+-// black or white)
+-Md3 md3(Arbiter &arbiter)
+-{
+-    const bool dark = arbiter.theme().mode == Session::Theme::Dark;
+-    Md3 c;
+-    c.surface = dark ? QColor("#1f1f22") : QColor("#ffffff");
+-    c.surface_high = dark ? QColor("#2a2a2e") : QColor("#f1f1f4");
+-    c.on_surface = dark ? QColor("#e6e1e5") : QColor("#1c1b1f");
+-    c.on_variant = dark ? QColor("#a8a4ad") : QColor("#5f5b66");
+-    c.track = dark ? QColor("#38373d") : QColor("#e2e1e6");
+-    c.error = dark ? QColor("#f2b8b5") : QColor("#b3261e");
+-    c.accent = arbiter.theme().color();
+-    if (c.accent.hsvSaturation() < 40)
+-        c.accent = dark ? QColor("#a8c7fa") : QColor("#0b57d0");
++// The roles the vehicle pages paint with, from Dash's Material 3 scheme
++Md3c md3(Arbiter &arbiter)
++{
++    // Dash's Material 3 scheme (from the theme colour), in the roles used here
++    const Md3 m = arbiter.theme().scheme();
++    Md3c c;
++    c.surface = m.surface_container_low;
++    c.surface_high = m.surface_container_high;
++    c.on_surface = m.on_surface;
++    c.on_variant = m.on_surface_variant;
++    c.track = m.surface_container_highest;
++    c.accent = m.primary;
++    c.error = m.error;
+     return c;
+ }
+ 
+@@ -298,7 +295,7 @@ void DialGauge::paintEvent(QPaintEvent *)
+ {
+     QPainter p(this);
+     p.setRenderHint(QPainter::Antialiasing);
+-    const Md3 c = md3(this->arbiter);
++    const Md3c c = md3(this->arbiter);
+ 
+     // The card
+     const QRectF card = QRectF(this->rect()).adjusted(4, 4, -4, -4);
+@@ -511,56 +508,105 @@ void GaugesTab::update_values()
+ 
+ /* ---------- trouble codes ---------- */
+ 
++namespace {
++// Which module an answer came from, in words where it's the usual one
++QString module_name(const QString &ecu)
++{
++    if (ecu == "7E8" || ecu == "18DAF110" || ecu == "10")
++        return "Engine";
++    if (ecu == "7E9" || ecu == "18DAF118" || ecu == "18")
++        return "Transmission";
++    return ecu.isEmpty() ? QString() : "Module " + ecu;
++}
++}  // namespace
++
+ DiagnosticsTab::DiagnosticsTab(Arbiter &arbiter, QWidget *parent)
+     : QWidget(parent)
+     , arbiter(arbiter)
+ {
+     auto layout = new QVBoxLayout(this);
+-
+-    auto top = new QHBoxLayout();
+-    this->mil = new QLabel("Check engine light: unknown", this);
+-    this->mil->setFont(arbiter.forge().font(16, true));
+-    top->addWidget(this->mil, 1);
+-    this->read = new QPushButton("read codes", this);
+-    this->read->setFlat(true);
+-    top->addWidget(this->read);
+-    this->clear = new QPushButton("clear codes", this);
+-    this->clear->setFlat(true);
+-    top->addWidget(this->clear);
+-    layout->addLayout(top);
+-
+-    this->info = new QLabel(this);
+-    this->info->setWordWrap(true);
++    layout->setContentsMargins(8, 8, 8, 0);
++    layout->setSpacing(8);
++
++    // Status card: the check-engine light, and the two actions
++    this->hero = new QFrame(this);
++    this->hero->setObjectName("hero");
++    auto hl = new QHBoxLayout(this->hero);
++    hl->setContentsMargins(20, 14, 16, 14);
++    auto texts = new QVBoxLayout();
++    texts->setSpacing(2);
++    this->hero_title = new QLabel("Trouble codes", this->hero);
++    this->hero_title->setFont(arbiter.forge().font(18, true));
++    texts->addWidget(this->hero_title);
++    this->hero_detail = new QLabel(this->hero);
++    this->hero_detail->setWordWrap(true);
++    texts->addWidget(this->hero_detail);
++    hl->addLayout(texts, 1);
++    this->read = new QPushButton("Read codes", this->hero);
++    this->read->setProperty("md", "filled");
++    hl->addWidget(this->read);
++    this->clear = new QPushButton("Clear codes", this->hero);
++    this->clear->setProperty("md", "outlined");
++    hl->addWidget(this->clear);
++    layout->addWidget(this->hero);
++
++    // The car
++    this->info = new QFrame(this);
++    this->info->setObjectName("info");
++    auto grid = new QGridLayout(this->info);
++    grid->setContentsMargins(20, 10, 20, 10);
++    grid->setVerticalSpacing(0);
++    this->vin = this->info_value(grid, 0, "VIN");
++    this->protocol = this->info_value(grid, 1, "Protocol");
++    this->ecus = this->info_value(grid, 2, "Modules answering");
++    grid->setColumnStretch(0, 2);
++    grid->setColumnStretch(1, 3);
++    grid->setColumnStretch(2, 2);
+     layout->addWidget(this->info);
+-    this->message = new QLabel(this);
+-    this->message->setWordWrap(true);
+-    layout->addWidget(this->message);
+-    layout->addWidget(Session::Forge::br());
+ 
++    // The codes, one card each
+     auto scroll = new QScrollArea(this);
+     Session::Forge::to_touch_scroller(scroll);
+     scroll->setWidgetResizable(true);
+     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+     this->codes = new QWidget(scroll);
+     this->codes_layout = new QVBoxLayout(this->codes);
++    this->codes_layout->setContentsMargins(0, 0, 0, 8);
++    this->codes_layout->setSpacing(6);
+     this->codes_layout->addStretch();
+     scroll->setWidget(this->codes);
+     layout->addWidget(scroll, 1);
+ 
+     VehicleClient &client = VehicleClient::instance();
+     connect(this->read, &QPushButton::clicked, this, [this, &client] {
+-        this->message->setText("Reading...");
++        this->note = "Reading codes...";
++        this->show_result({});
+         client.call("ReadDtcs");
+     });
+     connect(this->clear, &QPushButton::clicked, this, &DiagnosticsTab::confirm_clear);
+     connect(&client, &VehicleClient::dtcs_read, this, &DiagnosticsTab::show_result);
+     connect(&client, &VehicleClient::dtcs_cleared, this, [this](bool ok, const QString &text) {
+-        this->message->setText(ok ? text + ". Reading again..." : text);
++        this->note = ok ? text + ". Reading again..." : text;
++        this->show_result({});
+     });
+     connect(&client, &VehicleClient::status_changed, this, &DiagnosticsTab::update_status);
++    connect(&arbiter, &Arbiter::mode_changed, this, [this] { this->restyle(); });
++    connect(&arbiter, &Arbiter::color_changed, this, [this] { this->restyle(); });
+     this->update_status();
+-    if (!client.dtcs.isEmpty())
+-        this->show_result(client.dtcs);
++    this->show_result(client.dtcs);
++}
++
++QLabel *DiagnosticsTab::info_value(QGridLayout *grid, int column, const QString &name)
++{
++    auto label = new QLabel(name, this->info);
++    label->setObjectName("infoName");
++    grid->addWidget(label, 0, column);
++    auto value = new QLabel("--", this->info);
++    value->setObjectName("infoValue");
++    value->setWordWrap(true);
++    value->setTextInteractionFlags(Qt::TextSelectableByMouse);
++    grid->addWidget(value, 1, column);
++    return value;
+ }
+ 
+ void DiagnosticsTab::update_status()
+@@ -570,61 +616,139 @@ void DiagnosticsTab::update_status()
+     const bool connected = obd.value("state").toString() == "connected";
+     this->read->setEnabled(connected);
+     this->clear->setEnabled(connected);
+-    QStringList lines;
++    const QString vin = obd.value("vin").toString();
++    const QString protocol = obd.value("protocol").toString();
++    QStringList modules;
++    for (const QVariant &e : obd.value("ecus").toList())
++        modules << module_name(e.toString());
++    this->vin->setText(vin.isEmpty() ? "--" : vin);
++    this->protocol->setText(protocol.isEmpty() ? "--" : protocol);
++    this->ecus->setText(modules.isEmpty() ? "--" : modules.join(", "));
++    // Not connected: say why where the codes' summary goes
+     const QString hint = obd_hint(status);
+-    if (!hint.isEmpty())
+-        lines << hint;
+-    if (!obd.value("vin").toString().isEmpty())
+-        lines << "VIN " + obd.value("vin").toString();
+-    if (!obd.value("protocol").toString().isEmpty())
+-        lines << obd.value("protocol").toString();
+-    this->info->setText(lines.join("\n"));
++    if (!hint.isEmpty() && this->result.isEmpty())
++        this->note = hint;
++    else if (hint.isEmpty() && this->note == obd_hint(QVariantMap()))
++        this->note.clear();
++    this->show_result({});
+ }
+ 
+-void DiagnosticsTab::show_result(const QVariantMap &result)
++// An empty `r` just redraws with what's known
++void DiagnosticsTab::show_result(const QVariantMap &r)
+ {
+-    this->message->setText(result.value("message").toString());
+-    if (!result.value("ok").toBool())
+-        return;
++    if (!r.isEmpty()) {
++        if (r.value("ok").toBool()) {
++            this->result = r;
++            this->note.clear();
++        } else {
++            this->note = r.value("message").toString();
++        }
++    }
+ 
+-    const bool on = result.value("mil").toBool();
+-    this->mil->setText(on ? "Check engine light: ON" : "Check engine light: off");
+-    this->mil->setStyleSheet(on ? QString("color: %1;").arg(kRed) : QString());
++    // The status card
++    const QVariantList stored = this->result.value("stored").toList();
++    const QVariantList pending = this->result.value("pending").toList();
++    const QVariantList permanent = this->result.value("permanent").toList();
++    QStringList detail;
++    if (this->result.isEmpty()) {
++        this->hero_title->setText("Trouble codes");
++        if (this->note.isEmpty())
++            detail << "Not read yet";
++    } else {
++        this->hero_title->setText(this->result.value("mil").toBool() ? "Check engine light is on"
++                                                                      : "Check engine light is off");
++        QStringList counts;
++        counts << (stored.isEmpty() ? QString("No stored codes")
++                                    : QString("%1 stored").arg(stored.size()));
++        if (!pending.isEmpty())
++            counts << QString("%1 pending").arg(pending.size());
++        if (!permanent.isEmpty())
++            counts << QString("%1 permanent").arg(permanent.size());
++        const QDateTime at = QDateTime::fromString(this->result.value("read_at").toString(), Qt::ISODate);
++        if (at.isValid())
++            counts << "read " + QLocale().toString(at.toLocalTime().time(), QLocale::ShortFormat);
++        detail << counts.join(" · ");
++    }
++    if (!this->note.isEmpty())
++        detail << this->note;
++    this->hero_detail->setText(detail.join("\n"));
+ 
+-    // Rebuild the list
++    // The codes
+     while (this->codes_layout->count() > 1) {
+         QLayoutItem *item = this->codes_layout->takeAt(0);
+         delete item->widget();
+         delete item;
+     }
+     int row = 0;
+-    const QList<QPair<QString, QString>> lists = {
+-        {"stored", "Stored"},
+-        {"pending", "Pending (seen once, not confirmed yet)"},
+-        {"permanent", "Permanent (clear themselves once the car re-tests)"},
++    const QList<std::tuple<QString, QString, QVariantList>> lists = {
++        {"stored", "Stored", stored},
++        {"pending", "Pending: seen once, not confirmed yet", pending},
++        {"permanent", "Permanent: clear themselves once the car has re-tested", permanent},
+     };
+     for (const auto &list : lists) {
+-        const QVariantList items = result.value(list.first).toList();
++        const QVariantList &items = std::get<2>(list);
+         if (items.isEmpty())
+             continue;
+-        auto heading = new QLabel(list.second, this->codes);
+-        QFont font = heading->font();
+-        font.setBold(true);
+-        heading->setFont(font);
++        auto heading = new QLabel(std::get<1>(list), this->codes);
++        heading->setObjectName("section");
++        heading->setContentsMargins(8, row ? 8 : 2, 0, 0);
+         this->codes_layout->insertWidget(row++, heading);
+         for (const QVariant &v : items) {
+             const QVariantMap c = v.toMap();
+-            auto label = new QLabel(
+-                QString("<b>%1</b>&nbsp;&nbsp;%2").arg(c.value("code").toString(), c.value("description").toString().toHtmlEscaped()),
+-                this->codes);
+-            label->setWordWrap(true);
+-            this->codes_layout->insertWidget(row++, label);
++            auto card = new QFrame(this->codes);
++            card->setObjectName("code");
++            auto cl = new QHBoxLayout(card);
++            cl->setContentsMargins(12, 10, 16, 10);
++            cl->setSpacing(14);
++            auto chip = new QLabel(c.value("code").toString(), card);
++            chip->setObjectName("chip");
++            chip->setProperty("kind", std::get<0>(list));
++            chip->setFont(this->arbiter.forge().font(14, true));
++            chip->setAlignment(Qt::AlignCenter);
++            chip->setMinimumWidth(90);
++            cl->addWidget(chip, 0, Qt::AlignVCenter);
++            auto text = new QLabel(c.value("description").toString(), card);
++            text->setWordWrap(true);
++            cl->addWidget(text, 1);
++            auto module = new QLabel(module_name(c.value("ecu").toString()), card);
++            module->setObjectName("ecu");
++            cl->addWidget(module, 0, Qt::AlignVCenter);
++            this->codes_layout->insertWidget(row++, card);
+         }
+     }
+-    if (row == 0) {
+-        auto none = new QLabel("No trouble codes.", this->codes);
+-        this->codes_layout->insertWidget(0, none);
++    if (row == 0 && !this->result.isEmpty()) {
++        auto card = new QFrame(this->codes);
++        card->setObjectName("code");
++        auto cl = new QVBoxLayout(card);
++        cl->setContentsMargins(16, 18, 16, 18);
++        auto none = new QLabel("No trouble codes. The engine computer has nothing to report.", card);
++        none->setAlignment(Qt::AlignCenter);
++        none->setWordWrap(true);
++        cl->addWidget(none);
++        this->codes_layout->insertWidget(0, card);
+     }
++    this->restyle();
++}
++
++void DiagnosticsTab::restyle()
++{
++    const Md3 m = this->arbiter.theme().scheme();
++    const bool mil = this->result.value("mil").toBool();
++    auto c = [](const QColor &color) { return color.name(QColor::HexArgb); };
++    this->setStyleSheet(
++        QString("QFrame#hero { background: %1; border-radius: 24px; }"
++                "QFrame#hero QLabel { color: %2; background: transparent; }"
++                "QFrame#info, QFrame#code { background: %3; border-radius: 16px; }"
++                "QLabel#infoName, QLabel#section, QLabel#ecu { color: %4; background: transparent; }"
++                "QLabel#infoValue { color: %5; background: transparent; }"
++                "QLabel#chip { border-radius: 8px; padding: 6px 10px; }"
++                "QLabel#chip[kind=\"stored\"] { background: %6; color: %7; }"
++                "QLabel#chip[kind=\"pending\"] { background: %8; color: %9; }"
++                "QLabel#chip[kind=\"permanent\"] { background: %10; color: %11; }")
++            .arg(c(mil ? m.error_container : m.surface_container_high), c(mil ? m.on_error_container : m.on_surface),
++                 c(m.surface_container_low), c(m.on_surface_variant), c(m.on_surface), c(m.error_container),
++                 c(m.on_error_container), c(m.tertiary_container), c(m.on_tertiary_container))
++            .arg(c(m.surface_container_highest), c(m.on_surface_variant)));
+ }
+ 
+ void DiagnosticsTab::confirm_clear()
+@@ -639,7 +763,8 @@ void DiagnosticsTab::confirm_clear()
+     dialog->set_body(body);
+     auto button = new QPushButton("clear");
+     connect(button, &QPushButton::clicked, this, [this, dialog] {
+-        this->message->setText("Clearing...");
++        this->note = "Clearing...";
++        this->show_result({});
+         VehicleClient::instance().call("ClearDtcs");
+         dialog->close();
+     });
+@@ -685,7 +810,7 @@ VehicleOutline::VehicleOutline(Arbiter &arbiter, bool trailer, QWidget *parent)
+ 
+ void VehicleOutline::paintEvent(QPaintEvent *)
+ {
+-    const Md3 c = md3(this->arbiter);
++    const Md3c c = md3(this->arbiter);
+     const QString svg = QString(this->trailer ? kTrailerSvg : kVehicleSvg).arg(c.on_variant.name(), c.track.name());
+     QSvgRenderer renderer(svg.toUtf8());
+     renderer.setAspectRatioMode(Qt::KeepAspectRatio);
+@@ -798,7 +923,7 @@ TiresTab::Tile TiresTab::make_tile(const QString &name, QWidget *parent)
+ // Card and tile colours follow the theme; tiles with a low or hot tire get a red outline
+ void TiresTab::restyle()
+ {
+-    const Md3 c = md3(this->arbiter);
++    const Md3c c = md3(this->arbiter);
+     for (QFrame *card : this->cards)
+         card->setStyleSheet(QString("QFrame#card { background: %1; border-radius: 20px; }"
+                                     "QLabel#cardTitle { color: %2; font-weight: 600; }")
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index b10b673..fea9e72 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -75,11 +75,21 @@ Session::Theme::Theme(QSettings &settings)
+ 
+ QPalette Session::Theme::palette() const
+ {
++    // Widgets that read the accent from the palette (palette(base)) get M3's
++    // primary; the rest of the palette follows the scheme too
++    const Md3 m = this->scheme();
+     QPalette palette;
+-    auto color = this->color();
+-    palette.setColor(QPalette::Base, color);
+-    color.setAlphaF(.5);
+-    palette.setColor(QPalette::AlternateBase, color);
++    palette.setColor(QPalette::Base, m.primary);
++    palette.setColor(QPalette::AlternateBase, m.secondary_container);
++    palette.setColor(QPalette::Window, m.surface);
++    palette.setColor(QPalette::WindowText, m.on_surface);
++    palette.setColor(QPalette::Text, m.on_surface);
++    palette.setColor(QPalette::Button, m.surface_container_high);
++    palette.setColor(QPalette::ButtonText, m.on_surface);
++    palette.setColor(QPalette::Highlight, m.primary);
++    palette.setColor(QPalette::HighlightedText, m.on_primary);
++    palette.setColor(QPalette::Mid, m.outline_variant);
++    palette.setColor(QPalette::PlaceholderText, m.on_surface_variant);
+ 
+     return palette;
+ }
+@@ -429,6 +439,7 @@ Session::AndroidAuto::AndroidAuto(Arbiter &arbiter)
+ 
+ Session::Core::Core(QSettings &settings, Arbiter &arbiter)
+     : cursor(settings.value("Core/cursor", true).toBool())
++    , arbiter_(arbiter)
+ {
+     this->stylesheets_[Session::Theme::Light] = this->parse_stylesheet(":/stylesheets/light.qss");
+     this->stylesheets_[Session::Theme::Dark] = this->parse_stylesheet(":/stylesheets/dark.qss");
+@@ -507,7 +518,8 @@ QString Session::Core::stylesheet(Theme::Mode mode, float scale) const
+ {
+     QRegularExpression regex(" (-?\\d+)px");
+ 
+-    auto stylesheet = this->stylesheet(mode);
++    // Material 3 colours from the theme colour (@md-<role> in the stylesheets)
++    auto stylesheet = Md3::scheme(this->arbiter_.theme().color(mode), mode == Theme::Dark).apply(this->stylesheet(mode));
+     auto it = regex.globalMatch(stylesheet);
+     while (it.hasNext()) {
+         auto match = it.next();
+diff --git a/src/app/widgets/now_playing.cpp b/src/app/widgets/now_playing.cpp
+index 9e8de20..4a5f3ad 100644
+--- a/src/app/widgets/now_playing.cpp
++++ b/src/app/widgets/now_playing.cpp
+@@ -34,7 +34,7 @@ void AlbumArt::paintEvent(QPaintEvent *)
+     painter.setRenderHint(QPainter::Antialiasing);
+     painter.setRenderHint(QPainter::SmoothPixmapTransform);
+     const QRectF frame = this->rect();
+-    const qreal radius = 12 * this->arbiter.layout().scale;
++    const qreal radius = 16 * this->arbiter.layout().scale;
+     QPainterPath path;
+     path.addRoundedRect(frame, radius, radius);
+     painter.setClipPath(path);
+@@ -46,11 +46,8 @@ void AlbumArt::paintEvent(QPaintEvent *)
+         return;
+     }
+ 
+-    // placeholder: a soft tile with a music note (Dash's palette carries only
+-    // the accent, so the tile's colour comes from the mode)
+-    const bool dark = this->arbiter.theme().mode == Session::Theme::Dark;
+-    const QColor tile = dark ? QColor(255, 255, 255, 26) : QColor(0, 0, 0, 20);
+-    painter.fillPath(path, tile);
++    // placeholder: a Material 3 tile with a music note
++    painter.fillPath(path, this->arbiter.theme().scheme().surface_container_highest);
+     const int note = this->width() * 0.45;
+     QIcon icon(new IconEngine(this->arbiter, ":/icons/music_note.svg", false));
+     const QPixmap pixmap = icon.pixmap(note, note, QIcon::Disabled);
+diff --git a/src/app/widgets/osd.cpp b/src/app/widgets/osd.cpp
+index 3cbbafe..e3b8f92 100644
+--- a/src/app/widgets/osd.cpp
++++ b/src/app/widgets/osd.cpp
+@@ -98,20 +98,18 @@ Osd::Osd(Arbiter &arbiter, QWidget *parent)
+     });
+ }
+ 
+-// Same look as Dash's dialogs in each mode (light.qss / dark.qss). Dash's
+-// palette only carries the accent colour (base), so window/mid would stay
+-// light in dark mode: the colours are spelled out instead.
++// Material 3, like Dash's dialogs: a surface-container-high panel, a
++// secondary-container track with a primary bar
+ void Osd::apply_theme()
+ {
+-    const bool dark = this->arbiter.theme().mode == Session::Theme::Dark;
++    const Md3 m = this->arbiter.theme().scheme();
+     this->panel->setStyleSheet(QString(
+-        "QFrame#OsdPanel { background-color: %1; border: 2px solid %2; border-radius: %3px; }"
+-        "QProgressBar { background-color: %4; border: none; border-radius: 2px; }"
+-        "QProgressBar::chunk { background-color: palette(base); border-radius: 2px; }")
+-        .arg(dark ? "rgb(56, 56, 56)" : "rgb(255, 255, 255)")
+-        .arg(dark ? "rgb(66, 66, 66)" : "rgb(224, 224, 224)")
+-        .arg(int(14 * this->arbiter.layout().scale))
+-        .arg(dark ? "rgba(255, 255, 255, 46)" : "rgba(0, 0, 0, 31)"));
++        "QFrame#OsdPanel { background-color: %1; border: none; border-radius: %3px; }"
++        "QProgressBar { background-color: %2; border: none; border-radius: 3px; }"
++        "QProgressBar::chunk { background-color: %4; border-radius: 3px; }")
++        .arg(m.surface_container_high.name(), m.secondary_container.name())
++        .arg(int(20 * this->arbiter.layout().scale))
++        .arg(m.primary.name()));
+ }
+ 
+ bool Osd::eventFilter(QObject *watched, QEvent *event)
+diff --git a/src/app/widgets/switch.cpp b/src/app/widgets/switch.cpp
+index 1c4e12d..7f8c759 100644
+--- a/src/app/widgets/switch.cpp
++++ b/src/app/widgets/switch.cpp
+@@ -7,40 +7,54 @@ Switch::Switch(QWidget* parent) : QAbstractButton(parent)
+     QAbstractButton::setCheckable(true);
+ 
+     this->track_radius = BASE_TRACK_RADIUS;
+-    this->thumb_radius = BASE_THUMB_RADIUS;
+-    this->end_offset = [this](bool checked) { return checked ? this->width() - this->base_offset : this->base_offset; };
++    // The thumb's centre: one track radius in from either end
++    this->end_offset = [this](bool checked) {
++        return checked ? this->width() - this->track_radius : this->track_radius;
++    };
+     this->update_properties();
+ }
+ 
+ void Switch::update_properties()
+ {
+-    this->margin = std::max(0, this->thumb_radius - this->track_radius);
+-    this->base_offset = std::max(this->thumb_radius, this->track_radius);
+     this->offset = this->end_offset(this->isChecked());
+     this->updateGeometry();
+ }
+ 
+ QSize Switch::sizeHint() const
+ {
+-    return QSize(4.5 * this->track_radius + 2 * this->margin, 2 * this->track_radius + 2 * this->margin);
++    return QSize(std::ceil(3.25 * this->track_radius), 2 * this->track_radius);
+ }
+ 
+ void Switch::paintEvent(QPaintEvent*)
+ {
+     QPainter painter(this);
+-
+     painter.setRenderHint(QPainter::Antialiasing);
+-    painter.setPen(Qt::NoPen);
+-
+-    QColor track_brush = this->isChecked() ? palette().color(QPalette::AlternateBase) : this->track_color;
+-    QColor thumb_brush = this->isChecked() ? palette().color(QPalette::Base) : this->thumb_color;
++    if (!this->isEnabled())
++        painter.setOpacity(0.38);
++
++    const double r = this->track_radius;
++    const double left = r, right = this->width() - r;
++    // 0 off ... 1 on, following the thumb as it slides
++    const double p = right > left ? qBound(0.0, (this->offset - left) / (right - left), 1.0) : 0.0;
++    const bool on = p >= 0.5;
++
++    const QRectF track(1, 1, this->width() - 2, 2 * r - 2);
++    if (on) {
++        painter.setPen(Qt::NoPen);
++        painter.setBrush(this->checked_track_color);
++    } else {
++        painter.setPen(QPen(this->outline_color, 2));
++        painter.setBrush(this->track_color);
++    }
++    painter.drawRoundedRect(track, r - 1, r - 1);
+ 
+-    painter.setBrush(track_brush);
+-    painter.drawRoundedRect(this->margin, this->margin, this->width() - 2 * this->margin,
+-                            this->height() - 2 * this->margin, this->track_radius, this->track_radius);
+-    painter.setBrush(thumb_brush);
+-    painter.drawEllipse(this->offset - this->thumb_radius, this->base_offset - this->thumb_radius,
+-                        2 * this->thumb_radius, 2 * this->thumb_radius);
++    // Thumb: 16 px off, 24 px on (28 while pressed)
++    double thumb = r * (0.5 + 0.25 * p);
++    if (this->isDown())
++        thumb = r * 0.875;
++    painter.setPen(Qt::NoPen);
++    painter.setBrush(on ? this->checked_thumb_color : this->thumb_color);
++    painter.drawEllipse(QPointF(this->offset, r), thumb, thumb);
+ }
+ 
+ void Switch::resizeEvent(QResizeEvent* event)
+@@ -52,14 +66,17 @@ void Switch::resizeEvent(QResizeEvent* event)
+ 
+ void Switch::mouseReleaseEvent(QMouseEvent* event)
+ {
++    // The click flips the state (and jumps the thumb): slide it from where it was
++    const int from = this->offset;
+     QAbstractButton::mouseReleaseEvent(event);
+ 
+-    if (event->button() == Qt::LeftButton) {
++    if (event->button() == Qt::LeftButton && from != this->end_offset(this->isChecked())) {
+         QPropertyAnimation *offset_animation = new QPropertyAnimation(this, "offset");
+-        offset_animation->setDuration(120);
+-        offset_animation->setStartValue(this->offset);
++        offset_animation->setDuration(150);
++        offset_animation->setEasingCurve(QEasingCurve::OutCubic);
++        offset_animation->setStartValue(from);
+         offset_animation->setEndValue(this->end_offset(this->isChecked()));
+-        offset_animation->start();
++        offset_animation->start(QAbstractAnimation::DeleteWhenStopped);
+     }
+ }
+ 
+diff --git a/src/app/widgets/tuner.cpp b/src/app/widgets/tuner.cpp
+index 2a2ea2c..68a4b62 100644
+--- a/src/app/widgets/tuner.cpp
++++ b/src/app/widgets/tuner.cpp
+@@ -93,8 +93,13 @@ void Tuner::paintEvent(QPaintEvent *event)
+         painter.drawLine(QLineF(x, y, x, bottom));
+     }
+ 
++    // The needle: a rounded bar with a dot on top (Material 3 slider handle style)
++    painter.setRenderHint(QPainter::Antialiasing);
+     painter.setPen(QPen(this->accent, 6 * this->scale, Qt::SolidLine, Qt::RoundCap));
+     painter.drawLine(QLineF(needle_x, needle_y, needle_x, bottom));
++    painter.setPen(Qt::NoPen);
++    painter.setBrush(this->accent);
++    painter.drawEllipse(QPointF(needle_x, needle_y), 8 * this->scale, 8 * this->scale);
+ }
+ 
+ void Tuner::resizeEvent(QResizeEvent *event)
+-- 
+2.43.0
+

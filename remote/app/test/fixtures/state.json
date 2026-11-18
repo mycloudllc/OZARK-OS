@@ -1,0 +1,192 @@
+{
+ "dash": {
+  "brightness": 255,
+  "color": "#ffffff",
+  "media": {
+   "active": "radio",
+   "bluetooth": {
+    "album": "Eagles",
+    "artist": "Eagles",
+    "available": true,
+    "device": "Pixel 8",
+    "duration_ms": 211000,
+    "playing": true,
+    "position_ms": 71000,
+    "title": "Take It Easy"
+   },
+   "local": {
+    "album": "",
+    "artist": "",
+    "available": false,
+    "duration_ms": -1,
+    "playing": false,
+    "position_ms": 0,
+    "title": ""
+   },
+   "radio": {
+    "available": true,
+    "band": "fm",
+    "freq_hz": 100300000,
+    "label": "100.3",
+    "max": 1080,
+    "min": 880,
+    "playing": true,
+    "presets": [
+     {
+      "index": 0,
+      "label": "101.5",
+      "value": 1015
+     },
+     {
+      "index": 1,
+      "label": "",
+      "value": 0
+     },
+     {
+      "index": 2,
+      "label": "",
+      "value": 0
+     },
+     {
+      "index": 3,
+      "label": "",
+      "value": 0
+     },
+     {
+      "index": 4,
+      "label": "",
+      "value": 0
+     },
+     {
+      "index": 5,
+      "label": "",
+      "value": 0
+     }
+    ],
+    "title": "100.3 MHz",
+    "unit": "MHz",
+    "value": 1003
+   }
+  },
+  "mode": "light",
+  "page": "Media",
+  "pages": [
+   "Android Auto",
+   "Media",
+   "Vehicle",
+   "Camera",
+   "Launcher",
+   "Settings"
+  ],
+  "volume": 25
+ },
+ "lighting": {
+  "status": {
+   "connected": false,
+   "firmware": "",
+   "max_leds": 600,
+   "orders": [],
+   "pins": [],
+   "port": "auto",
+   "sensitivity": 100,
+   "type": "ozark"
+  },
+  "zones": {
+   "E": {
+    "background": "#000000",
+    "brightness": 200,
+    "color": "#ff0000",
+    "color2": "#0078ff",
+    "pattern": 1,
+    "speed": 128
+   },
+   "F": {
+    "background": "#000000",
+    "brightness": 255,
+    "color": "#00ff40",
+    "color2": "#0078ff",
+    "pattern": 2,
+    "speed": 128
+   },
+   "R": {
+    "background": "#000000",
+    "brightness": 255,
+    "color": "#ff0050",
+    "color2": "#0078ff",
+    "pattern": 1,
+    "speed": 128
+   }
+  }
+ },
+ "vehicle": {
+  "dtcs": {
+   "ok": true,
+   "stored": [
+    {
+     "code": "P0442",
+     "description": "Evaporative emission system leak detected (small leak)",
+     "ecu": "7E8"
+    }
+   ],
+   "pending": [],
+   "permanent": []
+  },
+  "status": {
+   "hub": {
+    "forwarding": true,
+    "last_sent": "",
+    "message": "No hub set up (connect one on the TrailCommand tab)",
+    "state": "no-hub",
+    "url": ""
+   },
+   "illumination": {
+    "line": "",
+    "message": "",
+    "ok": false,
+    "on": false
+   },
+   "obd": {
+    "state": "connected",
+    "message": "Connected: ISO 15765-4 (CAN 11/500)",
+    "protocol": "ISO 15765-4"
+   },
+   "tpms": {
+    "ble": true,
+    "hub": true,
+    "message": "Listening for tire sensors",
+    "seen": 0
+   }
+  },
+  "tires": {
+   "front_left": {
+    "pressure_kpa": 241,
+    "temp_c": 27,
+    "low": false,
+    "hot": false
+   },
+   "front_right": {
+    "pressure_kpa": 238,
+    "temp_c": 27
+   },
+   "rear_left": {
+    "pressure_kpa": 172,
+    "temp_c": 26,
+    "low": true
+   },
+   "rear_right": {
+    "pressure_kpa": 240,
+    "temp_c": 26
+   }
+  },
+  "values": {
+   "speed_kmh": 88.5,
+   "rpm": 2150,
+   "coolant_c": 91,
+   "intake_c": 24,
+   "voltage_v": 14.2,
+   "fuel_pct": 63,
+   "load_pct": 31,
+   "ambient_c": 18
+  }
+ }
+}

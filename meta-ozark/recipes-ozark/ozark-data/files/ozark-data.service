@@ -1,8 +1,9 @@
 [Unit]
 Description=Keep settings on the data partition
 DefaultDependencies=no
-RequiresMountsFor=/data
-ConditionPathIsMountPoint=/data
+# Not Requires: if /data is late or gets unmounted, ozark-data mounts it
+# itself (and fails loudly if it can't) instead of being skipped silently
+Wants=data.mount
 After=data.mount systemd-growfs@data.service
 Before=local-fs.target systemd-tmpfiles-setup.service shutdown.target
 Conflicts=shutdown.target

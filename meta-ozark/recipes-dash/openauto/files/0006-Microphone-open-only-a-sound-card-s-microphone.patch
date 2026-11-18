@@ -1,0 +1,101 @@
+From 970898cdb213def22299106ab996cfa2fb0064b4 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 1 Nov 2026 00:14:19 -0500
+Subject: [PATCH] Microphone: open only a sound card's microphone
+
+Tapping Android Auto's microphone froze the head unit and could end in the
+app or the whole unit restarting. Opening the input runs on the GUI thread,
+so anything that holds up PulseAudio stalls the screen while decoded video
+piles up in memory (3.6 GB in 40 s, then the out-of-memory killer). Qt's
+PulseAudio backend also never returned from start() on a source that had
+gone ("Stream error: No such entity"); qtmultimedia is patched for that.
+
+With no microphone fitted, the default source can only be a monitor of our
+own output or the phone's Bluetooth link. Neither is a microphone, and
+PulseAudio blocks on D-Bus when it opens a Bluetooth source. Each recording
+now picks a sound card input, preferring the default; without one the phone
+gets "input open failed" and projection carries on.
+---
+ openauto/Projection/QtAudioInput.cpp | 50 ++++++++++++++++++++++++++++
+ 1 file changed, 50 insertions(+)
+
+diff --git a/openauto/Projection/QtAudioInput.cpp b/openauto/Projection/QtAudioInput.cpp
+index 5796c18..698bdb3 100644
+--- a/openauto/Projection/QtAudioInput.cpp
++++ b/openauto/Projection/QtAudioInput.cpp
+@@ -16,7 +16,9 @@
+ *  along with openauto. If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++#include <algorithm>
+ #include <QApplication>
++#include <QAudioDeviceInfo>
+ #include "openauto/Projection/QtAudioInput.hpp"
+ #include "OpenautoLog.hpp"
+ 
+@@ -25,6 +27,35 @@ namespace openauto
+ namespace projection
+ {
+ 
++namespace
++{
++
++// Only a sound card's input is a microphone. PulseAudio's default source can
++// otherwise be a monitor of our own output or the phone's own Bluetooth link.
++// Recording those gives the phone no voice, and opening a Bluetooth source
++// makes PulseAudio wait on BlueZ/oFono, for as long as the D-Bus timeout: this
++// runs on the GUI thread, so the screen freezes while decoded video queues up
++// in memory. The name is PulseAudio's: alsa_input.usb-..., bluez_source...,
++// <sink>.monitor.
++QAudioDeviceInfo findMicrophone()
++{
++    const auto isMicrophone = [](const QAudioDeviceInfo &device) {
++        return device.deviceName().startsWith(QLatin1String("alsa_input."));
++    };
++
++    const QAudioDeviceInfo defaultDevice = QAudioDeviceInfo::defaultInputDevice();
++    if(isMicrophone(defaultDevice))
++    {
++        return defaultDevice;
++    }
++
++    const QList<QAudioDeviceInfo> devices = QAudioDeviceInfo::availableDevices(QAudio::AudioInput);
++    const auto found = std::find_if(devices.begin(), devices.end(), isMicrophone);
++    return found != devices.end() ? *found : QAudioDeviceInfo();
++}
++
++}
++
+ QtAudioInput::QtAudioInput(uint32_t channelCount, uint32_t sampleSize, uint32_t sampleRate)
+     : ioDevice_(nullptr)
+ {
+@@ -110,7 +141,26 @@ void QtAudioInput::onStartRecording(StartPromise::Pointer promise)
+ {
+     std::lock_guard<decltype(mutex_)> lock(mutex_);
+ 
++    // Choose when the phone asks: the device from when projection started can
++    // be gone by now. Without a microphone the phone is told the input is
++    // unavailable and projection carries on.
++    const QAudioDeviceInfo device = findMicrophone();
++    if(device.isNull())
++    {
++        OPENAUTO_LOG(error) << "[AudioInput] no microphone (default input: "
++                            << QAudioDeviceInfo::defaultInputDevice().deviceName().toStdString() << ").";
++        promise->reject();
++        return;
++    }
++    audioInput_ = std::make_unique<QAudioInput>(device, audioFormat_);
++
+     ioDevice_ = audioInput_->start();
++    if(ioDevice_ != nullptr && audioInput_->error() != QAudio::NoError)
++    {
++        OPENAUTO_LOG(error) << "[AudioInput] microphone failed to start, error " << audioInput_->error() << ".";
++        audioInput_->stop();
++        ioDevice_ = nullptr;
++    }
+ 
+     if(ioDevice_ != nullptr)
+     {
+-- 
+2.43.0
+

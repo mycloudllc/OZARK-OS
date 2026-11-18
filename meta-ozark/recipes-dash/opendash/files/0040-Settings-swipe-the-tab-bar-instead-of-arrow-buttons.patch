@@ -1,0 +1,156 @@
+From 0dc046cb9f556a20effdee4e70c5b0250d1fac39 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 17 Nov 2026 21:03:17 -0600
+Subject: [PATCH] Settings: swipe the tab bar instead of arrow buttons
+
+Settings has nine tabs, more than fit across the 8" panel, so Qt's tab bar
+showed scroll arrows. The tabs now sit in a strip that scrolls with a swipe
+(the same touch scroller as the settings lists), with no arrows; a tap
+still picks a tab, and the strip scrolls to keep the selected tab in view.
+Qt's own tab bar is hidden and the strip mirrors it.
+---
+ include/app/pages/settings.hpp | 12 +++++
+ src/app/pages/settings.cpp     | 97 ++++++++++++++++++++++++++++++++++
+ 2 files changed, 109 insertions(+)
+
+diff --git a/include/app/pages/settings.hpp b/include/app/pages/settings.hpp
+index 6106035..9ed09b9 100644
+--- a/include/app/pages/settings.hpp
++++ b/include/app/pages/settings.hpp
+@@ -17,6 +17,18 @@ class SettingsPage : public QTabWidget, public Page {
+     SettingsPage(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+     void init() override;
++
++   protected:
++    bool event(QEvent *event) override;
++
++   private:
++    // Swipeable tab strip shown in place of Qt's tab bar (no arrow buttons)
++    QWidget *tab_header = nullptr;
++    QScrollArea *tab_scroller = nullptr;
++    QTabBar *tab_strip = nullptr;
++
++    void place_tab_strip();
++    void show_tab(int index);
+ };
+ 
+ class MainSettingsTab : public QWidget {
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 4621ca1..f24097d 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -3,6 +3,9 @@
+ #include <QLabel>
+ #include <QLayoutItem>
+ #include <QScrollArea>
++#include <QStackedWidget>
++#include <QTabBar>
++#include <QTimer>
+ 
+ #include <aasdk_proto/ButtonCodeEnum.pb.h>
+ #include <aasdk_proto/VideoFPSEnum.pb.h>
+@@ -46,6 +49,100 @@ void SettingsPage::init()
+     this->addTab(new ActionsSettingsTab(this->arbiter), "Actions");
+     this->addTab(new UpdateSettingsTab(this->arbiter, this), "Update");
+     this->addTab(new AboutSettingsTab(this->arbiter), "About");
++
++    // Nine tabs don't fit across the screen. Qt's tab bar would add arrow
++    // buttons; instead the tabs sit in a strip that scrolls with a swipe, like
++    // the settings themselves. Qt's own bar is hidden and the strip mirrors it.
++    this->setDocumentMode(true);
++    this->tabBar()->hide();
++
++    this->tab_strip = new QTabBar();
++    this->tab_strip->setUsesScrollButtons(false);
++    this->tab_strip->setExpanding(false);
++    this->tab_strip->setDrawBase(false);
++    this->tab_strip->setFocusPolicy(Qt::NoFocus);
++    for (int i = 0; i < this->count(); i++)
++        this->tab_strip->addTab(this->tabText(i));
++    this->tab_strip->setCurrentIndex(this->currentIndex());
++
++    this->tab_header = new QWidget(this);
++    auto header = new QVBoxLayout(this->tab_header);
++    header->setContentsMargins(0, 0, 0, 0);
++    header->setSpacing(0);
++
++    this->tab_scroller = new QScrollArea(this->tab_header);
++    this->tab_scroller->setWidget(this->tab_strip);
++    this->tab_scroller->setWidgetResizable(false);
++    this->tab_scroller->setFrameShape(QFrame::NoFrame);
++    this->tab_scroller->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    Session::Forge::to_touch_scroller(this->tab_scroller);
++    header->addWidget(this->tab_scroller);
++
++    auto line = Session::Forge::br();
++    line->setLineWidth(1);
++    header->addWidget(line);
++
++    connect(this->tab_strip, &QTabBar::currentChanged, this, &QTabWidget::setCurrentIndex);
++    connect(this, &QTabWidget::currentChanged, this, &SettingsPage::show_tab);
++
++    this->place_tab_strip();
++}
++
++void SettingsPage::show_tab(int index)
++{
++    if (!this->tab_strip)
++        return;
++    this->tab_strip->setCurrentIndex(index);
++    // Scroll the strip so the selected tab, and a bit of its neighbours, show
++    const QRect r = this->tab_strip->tabRect(index);
++    this->tab_scroller->ensureVisible(r.center().x(), r.center().y(), r.width() / 2 + r.width() / 3, 0);
++}
++
++// QTabWidget lays its page stack over the whole widget (the tab bar is
++// hidden), on resizes, style changes and so on; put the strip on top and the
++// pages below it after each of those
++void SettingsPage::place_tab_strip()
++{
++    if (!this->tab_header)
++        return;
++    const QSize hint = this->tab_strip->sizeHint();
++    if (this->tab_strip->size() != hint)
++        this->tab_strip->resize(hint);
++    if (this->tab_scroller->height() != hint.height())
++        this->tab_scroller->setFixedHeight(hint.height());
++
++    const int height = this->tab_header->sizeHint().height();
++    const QRect top(0, 0, this->width(), height);
++    if (this->tab_header->geometry() != top)
++        this->tab_header->setGeometry(top);
++    this->tab_header->raise();
++
++    if (auto stack = this->findChild<QStackedWidget *>("qt_tabwidget_stackedwidget", Qt::FindDirectChildrenOnly)) {
++        const QRect rest(0, height, this->width(), std::max(0, this->height() - height));
++        if (stack->geometry() != rest)
++            stack->setGeometry(rest);
++    }
++}
++
++bool SettingsPage::event(QEvent *event)
++{
++    const bool result = QTabWidget::event(event);
++    switch (event->type()) {
++        case QEvent::Resize:
++        case QEvent::Show:
++        case QEvent::LayoutRequest:
++        case QEvent::FontChange:
++            this->place_tab_strip();
++            break;
++        case QEvent::StyleChange:
++            // A theme or scale change resizes the tabs once they're re-polished
++            this->place_tab_strip();
++            QTimer::singleShot(0, this, [this]{ this->place_tab_strip(); this->show_tab(this->currentIndex()); });
++            break;
++        default:
++            break;
++    }
++    return result;
+ }
+ 
+ MainSettingsTab::MainSettingsTab(Arbiter &arbiter, QWidget *parent)
+-- 
+2.43.0
+

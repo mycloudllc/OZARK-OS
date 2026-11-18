@@ -29,4 +29,4 @@ SYSTEMD_SERVICE:${PN} = "ozark-data.service ozark-data-grow.service"
 
 FILES:${PN} += "/data"
 
-RDEPENDS:${PN} = "util-linux-sfdisk util-linux-partx e2fsprogs-e2fsck"
+RDEPENDS:${PN} = "util-linux-sfdisk util-linux-partx util-linux-mount udev e2fsprogs-e2fsck"

@@ -8,6 +8,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda
 
 SRC_URI = " \
     file://ozark-hotspot \
+    file://ozark-aa-recover \
     file://ozark-hotspot-setup.service \
     file://ozark-hotspot.service \
     file://ozark-hotspot-radio@.service \
@@ -19,6 +20,7 @@ inherit systemd
 
 do_install() {
     install -D -m 0755 ${S}/ozark-hotspot ${D}${sbindir}/ozark-hotspot
+    install -D -m 0755 ${S}/ozark-aa-recover ${D}${sbindir}/ozark-aa-recover
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${S}/ozark-hotspot-setup.service ${S}/ozark-hotspot.service \
         ${S}/ozark-hotspot-radio@.service ${D}${systemd_system_unitdir}/
@@ -32,4 +34,5 @@ FILES:${PN} += "${systemd_system_unitdir}/ozark-hotspot-radio@.service ${nonarch
 # hostapd's own service stays off (its recipe default); this one runs it
 # Drivers for USB adapters are in kernel-modules (ozark-image-base); their
 # firmware is in ozark-wifi-firmware
-RDEPENDS:${PN} = "hostapd iw ozark-wifi-firmware"
+# hostapd_cli (in hostapd) and bluetoothctl (bluez5) for ozark-aa-recover
+RDEPENDS:${PN} = "hostapd iw ozark-wifi-firmware bluez5"

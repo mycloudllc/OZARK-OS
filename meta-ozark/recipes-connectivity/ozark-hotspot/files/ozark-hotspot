@@ -203,6 +203,9 @@ ieee80211ac=1"
 interface=$1
 bridge=$bridge
 driver=nl80211
+# for ozark-aa-recover (hostapd_cli -p /run/hostapd), which disconnects a
+# phone that stopped talking so it joins again from scratch
+ctrl_interface=/run/hostapd
 ssid=$SSID
 country_code=$COUNTRY
 ieee80211d=1

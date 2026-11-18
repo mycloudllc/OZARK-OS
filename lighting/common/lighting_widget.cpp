@@ -114,26 +114,40 @@ void LightingWidget::build_ui()
 
     // zone buttons (one per zone, plus "Both"), only with more than one zone
     if (this->zones.size() > 1) {
+        // A Material 3 segmented button: one segment per zone, then "Both"
         auto buttons = new QHBoxLayout();
+        buttons->setSpacing(0);
         auto group = new QButtonGroup(this);
         for (int i = 0; i < this->zones.size(); ++i) {
             auto button = new QPushButton(zone_name(this->zones[i]), content);
             button->setCheckable(true);
             button->setFont(font14);
+            button->setProperty("segment", i == 0 ? "first" : "middle");
             group->addButton(button, i);
-            buttons->addWidget(button);
+            buttons->addWidget(button, 1);
         }
         auto all = new QPushButton(this->zones.size() == 2 ? "Both" : "All", content);
         all->setCheckable(true);
         all->setFont(font14);
+        all->setProperty("segment", "last");
         all->setChecked(true);
         group->addButton(all, -1);
-        buttons->addWidget(all);
+        buttons->addWidget(all, 1);
         connect(group, QOverload<QAbstractButton *>::of(&QButtonGroup::buttonClicked), this,
                 [this, group](QAbstractButton *button) { this->set_target(group->id(button)); });
         layout->addLayout(buttons);
-        layout->addWidget(Session::Forge::br());
     }
+
+    // Material 3 cards: the look (pattern and colours), then speed and brightness
+    auto card = [content, layout]() {
+        auto frame = new QFrame(content);
+        frame->setProperty("md", "card");
+        auto l = new QVBoxLayout(frame);
+        l->setContentsMargins(12, 8, 12, 12);
+        layout->addWidget(frame);
+        return l;
+    };
+    QVBoxLayout *look = card();
 
     // pattern
     this->pattern_selector = new Selector(kPatterns, kPatterns.value(1), font14, this->arbiter, content);
@@ -141,7 +155,7 @@ void LightingWidget::build_ui()
         if (!this->loading)
             this->set_look({{"pattern", idx}});
     });
-    layout->addLayout(this->row("Pattern", this->pattern_selector));
+    look->addLayout(this->row("Pattern", this->pattern_selector));
 
     // colours: a wheel for whichever of the two swatches is selected
     const double scale = this->arbiter.layout().scale;
@@ -166,7 +180,8 @@ void LightingWidget::build_ui()
     this->swatches[0]->setChecked(true);
     connect(swatch_group, &QButtonGroup::idClicked, this, [this](int id) { this->select_color(id); });
     colors->addLayout(swatch_column, 1);
-    layout->addLayout(colors);
+    look->addLayout(colors);
+    QVBoxLayout *levels = card();
 
     // Send the wheel's colour at most every 50 ms while dragging, and on release
     this->send_timer = new QTimer(this);
@@ -192,7 +207,7 @@ void LightingWidget::build_ui()
         if (!this->loading)
             this->set_look({{"speed", value}});
     });
-    layout->addLayout(this->row("Speed", this->speed_slider));
+    levels->addLayout(this->row("Speed", this->speed_slider));
 
     this->brightness_slider = new QSlider(Qt::Horizontal, content);
     this->brightness_slider->setRange(0, 255);
@@ -200,7 +215,7 @@ void LightingWidget::build_ui()
         if (!this->loading)
             this->set_look({{"brightness", value}});
     });
-    layout->addLayout(this->row("Brightness", this->brightness_slider));
+    levels->addLayout(this->row("Brightness", this->brightness_slider));
 
     auto music_hint = new QLabel("VU Meter, Spectrum and Beat Pulse react to the music playing on this unit.", content);
     music_hint->setWordWrap(true);
@@ -263,7 +278,7 @@ void LightingWidget::show_swatch(int which, const QColor &color)
     const int luma = (299 * color.red() + 587 * color.green() + 114 * color.blue()) / 1000;
     const QColor text = luma > 150 ? Qt::black : Qt::white;
     this->swatches[which]->setStyleSheet(
-        QString("QPushButton { background-color: %1; color: %2; border: 2px solid transparent; border-radius: 8px; }"
+        QString("QPushButton { background-color: %1; color: %2; border: 2px solid transparent; border-radius: 16px; }"
                 "QPushButton:checked { border: 3px solid palette(text); }")
             .arg(color.name(), text.name()));
 }

@@ -1,0 +1,167 @@
+From 5c5876071abe2c296f05545b63905a57d0b79c74 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 18:53:36 -0600
+Subject: [PATCH] Versions read vX.Y.Z_mmddyy
+
+Every version on the Update page (this one, the one available, the one
+installed or tried, the one updated from) and on the About page now
+reads like "v0.2.0_111626": the version and its build date, from the
+build stamp. Without a stamp it's just "v0.2.0". "Updated from" uses
+the previous build's stamp, which ozark-update now records
+(state.from_build).
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ include/app/pages/update_settings.hpp |  4 +++
+ src/app/pages/settings.cpp            | 24 +++++++++++++-----
+ src/app/pages/update_settings.cpp     | 35 +++++++++++++++------------
+ 3 files changed, 41 insertions(+), 22 deletions(-)
+
+diff --git a/include/app/pages/update_settings.hpp b/include/app/pages/update_settings.hpp
+index 6583c1b..7b07ce5 100644
+--- a/include/app/pages/update_settings.hpp
++++ b/include/app/pages/update_settings.hpp
+@@ -5,6 +5,10 @@
+ #include <QMap>
+ #include <QtWidgets>
+ 
++// How a version shows: "v0.2.0_111626", the version and its build date
++// (mmddyy) from a build stamp (YYYYMMDDHHMMSS); just "v0.2.0" without one
++QString ozark_version(const QString &version, const QString &build);
++
+ class Arbiter;
+ class Dialog;
+ class Selector;
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index 7eb09e0..e86c228 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -665,20 +665,32 @@ void AboutSettingsTab::resizeEvent(QResizeEvent *event)
+ }
+ 
+ namespace {
+-// PRETTY_NAME from os-release, e.g. "Ozark OS 0.1.0 (trailhead)"
+-QString os_name()
++// KEY=value (quotes dropped) from the first of these files that has it
++QString read_value(const QStringList &paths, const QString &key)
+ {
+-    for (const QString &path : {QString("/etc/os-release"), QString("/usr/lib/os-release")}) {
++    for (const QString &path : paths) {
+         QFile file(path);
+         if (!file.open(QFile::ReadOnly | QFile::Text))
+             continue;
+         while (!file.atEnd()) {
+             const QString line = QString::fromUtf8(file.readLine()).trimmed();
+-            if (line.startsWith("PRETTY_NAME="))
+-                return line.mid(12).remove('"');
++            if (line.startsWith(key + "="))
++                return line.mid(key.size() + 1).remove('"');
+         }
+     }
+-    return "Ozark OS";
++    return QString();
++}
++
++// "Ozark OS v0.2.0_111626": NAME and VERSION_ID from os-release, and the
++// build stamp from /etc/ozark-build
++QString os_name()
++{
++    const QStringList release{"/etc/os-release", "/usr/lib/os-release"};
++    QString name = read_value(release, "NAME");
++    if (name.isEmpty())
++        name = "Ozark OS";
++    const QString version = ozark_version(read_value(release, "VERSION_ID"), read_value({"/etc/ozark-build"}, "BUILD"));
++    return version.isEmpty() ? name : name + " " + version;
+ }
+ }  // namespace
+ 
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+index 1f3b129..a044e5a 100644
+--- a/src/app/pages/update_settings.cpp
++++ b/src/app/pages/update_settings.cpp
+@@ -7,6 +7,7 @@
+ 
+ #include "app/pages/update_settings.hpp"
+ 
++#include <QDate>
+ #include <unistd.h>
+ 
+ namespace {
+@@ -16,15 +17,17 @@ const char *kTool = "/usr/sbin/ozark-update";
+ const char *kUpdatingText = "Updating (Please do not cycle key, or cut power during update)";
+ const QString kNoUsb = "no update files found";
+ 
+-// "0.2.0, built 1 Nov 2026 19:27" from a version and a build stamp (YYYYMMDDHHMMSS)
+-QString describe(const QString &version, const QString &build)
++}  // namespace
++
++QString ozark_version(const QString &version, const QString &build)
+ {
+-    const QDateTime built = QDateTime::fromString(build.left(12), "yyyyMMddHHmm");
++    if (version.isEmpty())
++        return QString();
++    const QDate built = QDate::fromString(build.left(8), "yyyyMMdd");
+     if (!built.isValid())
+-        return version;
+-    return QString("%1, built %2").arg(version, built.toString("d MMM yyyy HH:mm"));
++        return "v" + version;
++    return QString("v%1_%2").arg(version, built.toString("MMddyy"));
+ }
+-}  // namespace
+ 
+ UpdateSettingsTab::UpdateSettingsTab(Arbiter &arbiter, QWidget *parent)
+     : QWidget(parent)
+@@ -288,10 +291,10 @@ void UpdateSettingsTab::refresh()
+ void UpdateSettingsTab::show_status(const QMap<QString, QString> &s)
+ {
+     this->status = s;
+-    this->version->setText(describe(s.value("version"), s.value("build")));
+-
+     const QString state = s.value("state");
+-    const QString target = s.value("state.version");
++    const QString target = ozark_version(s.value("state.version"), s.value("state.build"));
++    const QString current = ozark_version(s.value("version"), s.value("build"));
++    this->version->setText(current);
+     const bool supported = s.value("supported") == "yes";
+     QString text;
+     if (!supported)
+@@ -299,21 +302,21 @@ void UpdateSettingsTab::show_status(const QMap<QString, QString> &s)
+     else if (s.value("busy") == "yes")
+         text = kUpdatingText;
+     else if (state == "pending")
+-        text = QString("Version %1 is installed. Restart to start it.").arg(target);
++        text = QString("%1 is installed. Restart to start it.").arg(target);
+     else if (state == "trying")
+-        text = QString("Starting version %1 for the first time...").arg(target);
++        text = QString("Starting %1 for the first time...").arg(target);
+     else if (state == "failed")
+         text = QString("The update to %1 didn't work: %2. Still on %3.")
+-                   .arg(target, s.value("state.reason").toLower(), s.value("version"));
+-    else if (state == "committed" && target == s.value("version"))
+-        text = QString("Updated from %1.").arg(s.value("state.from"));
++                   .arg(target, s.value("state.reason").toLower(), current);
++    else if (state == "committed" && s.value("state.version") == s.value("version"))
++        text = QString("Updated from %1.").arg(ozark_version(s.value("state.from"), s.value("state.from_build")));
+     else
+         text = "Up to date with what this radio knows of.";
+     this->state->setText(text);
+ 
+     const bool pending = state == "pending";
+     this->restart_button->setVisible(pending);
+-    this->restart_question->setText(QString("Restart into version %1 now?").arg(target));
++    this->restart_question->setText(QString("Restart into %1 now?").arg(target));
+ 
+     if (!this->filled) {
+         this->loading = true;
+@@ -332,7 +335,7 @@ void UpdateSettingsTab::show_status(const QMap<QString, QString> &s)
+     else {
+         const QString when = QDateTime::fromSecsSinceEpoch(checked.toLongLong()).toString("d MMM HH:mm");
+         this->available->setText(newer
+-            ? QString("%1 (checked %2)").arg(describe(s.value("available.version"), s.value("available.build")), when)
++            ? QString("%1 (checked %2)").arg(ozark_version(s.value("available.version"), s.value("available.build")), when)
+             : QString("this version is the newest (checked %1)").arg(when));
+     }
+     const QString notes = QString(s.value("available.notes")).replace("\\n", "\n");
+-- 
+2.43.0
+

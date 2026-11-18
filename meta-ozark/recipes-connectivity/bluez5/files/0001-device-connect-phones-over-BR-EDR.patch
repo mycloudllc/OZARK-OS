@@ -1,0 +1,103 @@
+From 7c55a37b2cd9dc3cc575ca7c3d68c252ed4c36e9 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 20:28:18 -0600
+Subject: [PATCH] device: connect phones over BR/EDR
+
+A phone paired over BR/EDR is usually bonded over LE as well
+(cross-transport key derivation). Reconnecting it from the head unit,
+select_conn_bearer() could pick the LE address: right after start, when
+neither bearer had been seen, or whenever the phone had advertised over
+LE lately. LE then scanned for an advertisement and timed out, or, with
+LE disabled (ControllerMode = bredr), failed at once with "Connection
+refused". Nothing ever tried BR/EDR.
+
+Pick BR/EDR for a device bonded over BR/EDR, for any device that has it
+when the adapter has no LE, and when neither bearer has been seen
+lately. LE-only devices are unaffected (the head unit reads Bluetooth LE
+tire sensors).
+
+Upstream-Status: Inappropriate [head unit policy]
+---
+ src/adapter.c |  8 ++++++++
+ src/adapter.h |  1 +
+ src/device.c  | 25 ++++++++++++++++++++++++-
+ 3 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/src/adapter.c b/src/adapter.c
+index 022390f..77587fa 100644
+--- a/src/adapter.c
++++ b/src/adapter.c
+@@ -5343,6 +5343,14 @@ bool btd_adapter_get_bredr(struct btd_adapter *adapter)
+ 	return false;
+ }
+ 
++bool btd_adapter_get_le(struct btd_adapter *adapter)
++{
++	if (adapter->current_settings & MGMT_SETTING_LE)
++		return true;
++
++	return false;
++}
++
+ struct btd_gatt_database *btd_adapter_get_database(struct btd_adapter *adapter)
+ {
+ 	if (!adapter)
+diff --git a/src/adapter.h b/src/adapter.h
+index ca96c1f..6078e2b 100644
+--- a/src/adapter.h
++++ b/src/adapter.h
+@@ -69,6 +69,7 @@ bool btd_adapter_get_powered(struct btd_adapter *adapter);
+ bool btd_adapter_get_connectable(struct btd_adapter *adapter);
+ bool btd_adapter_get_discoverable(struct btd_adapter *adapter);
+ bool btd_adapter_get_bredr(struct btd_adapter *adapter);
++bool btd_adapter_get_le(struct btd_adapter *adapter);
+ 
+ struct btd_gatt_database *btd_adapter_get_database(struct btd_adapter *adapter);
+ 
+diff --git a/src/device.c b/src/device.c
+index 17bcfbc..339ef39 100644
+--- a/src/device.c
++++ b/src/device.c
+@@ -2479,6 +2479,25 @@ static uint8_t select_conn_bearer(struct btd_device *dev)
+ 	time_t bredr_last = NVAL_TIME, le_last = NVAL_TIME;
+ 	time_t current = time(NULL);
+ 
++	/* No LE on this adapter (ControllerMode = bredr): a device that does
++	 * BR/EDR can only be reached over BR/EDR. Phones pair over both
++	 * (cross-transport keys), and picking LE then failed every time.
++	 */
++	if (dev->bredr && btd_adapter_get_bredr(dev->adapter) &&
++					!btd_adapter_get_le(dev->adapter))
++		return BDADDR_BREDR;
++
++	/* Bonded over BR/EDR: connect over BR/EDR, whatever LE has seen.
++	 * Phones pair over both (cross-transport keys) and advertise over LE
++	 * now and then, which made LE look fresher; but calls, music and
++	 * wireless Android Auto are all BR/EDR, and an LE connect to a phone
++	 * waits for an advertisement it may never send. LE-only devices
++	 * (tire sensors, beacons) don't have a BR/EDR bond and aren't affected.
++	 */
++	if (dev->bredr && dev->bredr_state.bonded &&
++					btd_adapter_get_bredr(dev->adapter))
++		return BDADDR_BREDR;
++
+ 	/* Prefer bonded bearer in case only one is bonded */
+ 	if (dev->bredr_state.bonded && !dev->le_state.bonded )
+ 		return BDADDR_BREDR;
+@@ -2501,8 +2520,12 @@ static uint8_t select_conn_bearer(struct btd_device *dev)
+ 			le_last = NVAL_TIME;
+ 	}
+ 
++	/* Neither seen lately (e.g. reconnecting at start): BR/EDR if the
++	 * device has it. LE would wait for an advertisement that a phone
++	 * doesn't send.
++	 */
+ 	if (le_last == NVAL_TIME && bredr_last == NVAL_TIME)
+-		return dev->bdaddr_type;
++		return dev->bredr ? BDADDR_BREDR : dev->bdaddr_type;
+ 
+ 	if (dev->bredr && (!dev->le || le_last == NVAL_TIME))
+ 		return BDADDR_BREDR;
+-- 
+2.43.0
+

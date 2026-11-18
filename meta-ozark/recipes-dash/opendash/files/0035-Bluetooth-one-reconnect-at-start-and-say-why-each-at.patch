@@ -1,0 +1,193 @@
+From f0d887c480691474c81ceb837fdb51a6f98d67af Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 19:26:45 -0600
+Subject: [PATCH] Bluetooth: one reconnect at start, and say why each attempt
+ failed
+
+On the Orange Pi the last phone wasn't reconnected: the Phone page's own
+one-shot reconnect (trusted phones, at start) and the Bluetooth
+service's retries started together, so the service's first attempt got
+"Operation already in progress", and the later ones failed without
+saying why (only the first error was logged).
+
+- The Phone page no longer reconnects at start; the Bluetooth service
+  (last phone, retried until it's in range) is the only one.
+- Every attempt's result is logged with BlueZ's reason and how long it
+  took, for the first two minutes, then every tenth; and a phone that
+  connects some other way while we're trying is logged too.
+- "In progress" (someone else is connecting it) isn't a failed try:
+  check again in 3 s.
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ include/app/pages/phone.hpp    |  5 +----
+ src/app/pages/phone.cpp        | 41 +---------------------------------
+ src/app/services/bluetooth.cpp | 39 ++++++++++++++++++++++++--------
+ 3 files changed, 32 insertions(+), 53 deletions(-)
+
+diff --git a/include/app/pages/phone.hpp b/include/app/pages/phone.hpp
+index 6571323..f4a4999 100644
+--- a/include/app/pages/phone.hpp
++++ b/include/app/pages/phone.hpp
+@@ -50,8 +50,7 @@ class PairingAgent : public BluezQt::Agent {
+ };
+ 
+ // Settings > Phone: paired phones (connect, disconnect, forget) and pairing a
+-// new one. Trusted phones are reconnected when Dash starts, the most recently
+-// used first.
++// new one. (Reconnecting the last phone at start is the Bluetooth service's.)
+ class PhoneSettingsTab : public QWidget {
+     Q_OBJECT
+ 
+@@ -65,13 +64,11 @@ class PhoneSettingsTab : public QWidget {
+     void update_header();
+     void update_device(BluezQt::DevicePtr device);
+     void remove_device(const QString &address);
+-    void reconnect();
+ 
+     Arbiter &arbiter;
+     BluezQt::Manager *manager = nullptr;
+     BluezQt::AdapterPtr adapter;
+     PairingAgent *agent = nullptr;
+-    bool reconnected = false;
+ 
+     QLabel *status = nullptr;
+     QLabel *hint = nullptr;
+diff --git a/src/app/pages/phone.cpp b/src/app/pages/phone.cpp
+index 44838b2..e0b423a 100644
+--- a/src/app/pages/phone.cpp
++++ b/src/app/pages/phone.cpp
+@@ -259,16 +259,11 @@ void PhoneSettingsTab::set_adapter(BluezQt::AdapterPtr adapter)
+             if (!discoverable && this->agent->pairing_mode)
+                 this->set_pairing(false);
+         });
+-        connect(this->adapter.data(), &BluezQt::Adapter::poweredChanged, this, [this](bool powered){
+-            if (powered)
+-                this->reconnect();
+-            this->update_header();
+-        });
++        connect(this->adapter.data(), &BluezQt::Adapter::poweredChanged, this, [this](bool){ this->update_header(); });
+         connect(this->adapter.data(), &BluezQt::Adapter::nameChanged, this, [this]{ this->update_header(); });
+ 
+         for (auto device : this->adapter->devices())
+             this->update_device(device);
+-        this->reconnect();
+     }
+     this->update_header();
+ }
+@@ -414,37 +409,3 @@ void PhoneSettingsTab::remove_device(const QString &address)
+     this->update_header();
+ }
+ 
+-// Once per start (and when the adapter powers up): connect trusted phones,
+-// trying the last one used first, until one connects
+-void PhoneSettingsTab::reconnect()
+-{
+-    if (this->reconnected || !this->adapter || !this->adapter->isPowered())
+-        return;
+-    this->reconnected = true;
+-
+-    const QString last = this->arbiter.settings().value(kLastDevice).toString();
+-    QList<BluezQt::DevicePtr> candidates;
+-    for (auto device : this->adapter->devices()) {
+-        if (!device->isPaired() || !device->isTrusted() || device->isBlocked())
+-            continue;
+-        if (device->isConnected())
+-            return;
+-        if (device->address() == last)
+-            candidates.prepend(device);
+-        else
+-            candidates.append(device);
+-    }
+-
+-    auto try_next = std::make_shared<std::function<void(int)>>();
+-    *try_next = [candidates, try_next](int i){
+-        if (i >= candidates.size())
+-            return;
+-        DASH_LOG(info) << "[Phone] Reconnecting " << candidates[i]->name().toStdString();
+-        BluezQt::PendingCall *call = candidates[i]->connectToDevice();
+-        QObject::connect(call, &BluezQt::PendingCall::finished, [try_next, i](BluezQt::PendingCall *call){
+-            if (call->error())
+-                (*try_next)(i + 1);
+-        });
+-    };
+-    (*try_next)(0);
+-}
+diff --git a/src/app/services/bluetooth.cpp b/src/app/services/bluetooth.cpp
+index ed35a87..069beb8 100644
+--- a/src/app/services/bluetooth.cpp
++++ b/src/app/services/bluetooth.cpp
+@@ -14,6 +14,7 @@
+ #include <QBluetoothLocalDevice>
+ #include <QBluetoothServiceDiscoveryAgent>
+ #include <QBluetoothServiceInfo>
++#include <QElapsedTimer>
+ #include <QTimer>
+ 
+ #include "DashLog.hpp"
+@@ -104,6 +105,9 @@ void Bluetooth::remember_phone(BluezQt::DevicePtr device)
+         return;
+ 
+     // A phone is here: no need to call one
++    if (this->reconnect_attempts > 0 || this->reconnect_timer->isActive())
++        DASH_LOG(info) << "[Bluetooth] " << device->name().toStdString() << " is connected (reconnect attempts: "
++                       << this->reconnect_attempts << ")";
+     this->stop_reconnecting();
+ 
+     auto config = Config::get_instance()->openauto_config;
+@@ -152,26 +156,43 @@ void Bluetooth::reconnect_last_phone()
+     // Every 10 s for the first two minutes (the phone's Bluetooth may still be
+     // starting, or it's on the way to the car), then every minute
+     ++this->reconnect_attempts;
+-    const int next = (this->reconnect_attempts < 12) ? 10000 : 60000;
+-    if (this->reconnect_attempts == 1 || this->reconnect_attempts % 10 == 0)
++    const int attempt = this->reconnect_attempts;
++    const int next = (attempt < 12) ? 10000 : 60000;
++    // Every attempt for the first two minutes, then every tenth: the reason
++    // each one failed is what tells a phone out of range from a refusal
++    const bool verbose = attempt <= 12 || attempt % 10 == 0;
++    if (verbose)
+         DASH_LOG(info) << "[Bluetooth] Reconnecting " << device->name().toStdString() << " (" << address.toStdString()
+-                       << "), attempt " << this->reconnect_attempts;
++                       << "), attempt " << attempt;
+ 
+     this->reconnect_pending = true;
++    auto started = std::make_shared<QElapsedTimer>();
++    started->start();
+     BluezQt::PendingCall *call = device->connectToDevice();
+-    connect(call, &BluezQt::PendingCall::finished, this, [this, device, next](BluezQt::PendingCall *call){
++    connect(call, &BluezQt::PendingCall::finished, this, [this, device, next, attempt, verbose, started](BluezQt::PendingCall *call){
+         this->reconnect_pending = false;
++        const double secs = started->elapsed() / 1000.0;
+         if (!call->error() || call->error() == BluezQt::PendingCall::AlreadyConnected) {
+-            DASH_LOG(info) << "[Bluetooth] Reconnected " << device->name().toStdString();
++            DASH_LOG(info) << "[Bluetooth] Reconnected " << device->name().toStdString() << " on attempt " << attempt
++                           << " (" << secs << " s)";
+             this->remember_phone(device);
+             this->stop_reconnecting();
+             return;
+         }
+-        if (this->reconnect_attempts == 1)
+-            DASH_LOG(info) << "[Bluetooth] Phone not reachable yet (" << call->errorText().toStdString() << "), trying again";
++        if (verbose)
++            DASH_LOG(info) << "[Bluetooth] Attempt " << attempt << " failed after " << secs << " s: "
++                           << call->errorText().toStdString();
+         // stop_reconnecting() may have run meanwhile (a phone connected)
+-        if (this->reconnect_attempts > 0)
+-            this->reconnect_timer->start(next);
++        if (this->reconnect_attempts == 0)
++            return;
++        // Someone else's connect to it is under way: see how it went shortly,
++        // without counting this as a try
++        if (call->error() == BluezQt::PendingCall::InProgress) {
++            --this->reconnect_attempts;
++            this->reconnect_timer->start(3000);
++            return;
++        }
++        this->reconnect_timer->start(next);
+     });
+ }
+ 
+-- 
+2.43.0
+

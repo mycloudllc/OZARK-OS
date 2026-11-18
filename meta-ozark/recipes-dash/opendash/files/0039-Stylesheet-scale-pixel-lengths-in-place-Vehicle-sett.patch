@@ -1,0 +1,87 @@
+From 07b023725a6385a07a08ac1d1356991459a24a89 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 17 Nov 2026 20:55:55 -0600
+Subject: [PATCH] Stylesheet: scale pixel lengths in place; Vehicle settings
+ status wraps
+
+Dash scales every "Npx" in the stylesheet for the screen's DPI. It replaced
+each " Npx" match everywhere with the scaled value without its leading
+space, so a multi-value property such as "padding: 10px 16px" came out as
+"10px16px" and Qt dropped it (the Material 3 stylesheet uses many of
+those: buttons, tabs and chips lost their padding and shape), and a value
+equal to an already-scaled one was scaled twice. Lengths are now replaced
+once each, in place. Radii round down, sizes up: at 1.875x a 24px handle
+became 45px with a 23px radius, which Qt draws square.
+
+Settings > Vehicle: the OBD status line takes the whole column and wraps
+instead of being cut off ("Vehicle service not ...").
+---
+ src/app/pages/vehicle_settings.cpp |  7 ++++++-
+ src/app/session.cpp                | 28 +++++++++++++++++++++-------
+ 2 files changed, 27 insertions(+), 8 deletions(-)
+
+diff --git a/src/app/pages/vehicle_settings.cpp b/src/app/pages/vehicle_settings.cpp
+index fd0c7f3..f715715 100644
+--- a/src/app/pages/vehicle_settings.cpp
++++ b/src/app/pages/vehicle_settings.cpp
+@@ -80,7 +80,12 @@ QWidget *VehicleSettingsTab::row(const QString &label, QWidget *control, bool st
+     auto text = new QLabel(label, widget);
+     text->setWordWrap(true);
+     layout->addWidget(text, 1);
+-    if (stretch)
++    // A wrapping status label takes the whole column, centred, so a long
++    // message wraps onto a second line instead of being cut off
++    auto status = qobject_cast<QLabel *>(control);
++    if (status && status->wordWrap())
++        status->setAlignment(Qt::AlignCenter);
++    if (stretch || (status && status->wordWrap()))
+         layout->addWidget(control, 1);
+     else
+         layout->addWidget(control, 1, Qt::AlignHCenter);
+diff --git a/src/app/session.cpp b/src/app/session.cpp
+index fea9e72..1a87ca1 100644
+--- a/src/app/session.cpp
++++ b/src/app/session.cpp
+@@ -516,18 +516,32 @@ Session::Core::Core(QSettings &settings, Arbiter &arbiter)
+ 
+ QString Session::Core::stylesheet(Theme::Mode mode, float scale) const
+ {
+-    QRegularExpression regex(" (-?\\d+)px");
++    // Every pixel length, scaled once, in place. (Replacing each " Npx" match
++    // everywhere dropped the space before it, so a multi-value property such as
++    // "padding: 10px 16px" became "10px16px", which Qt ignores, and values that
++    // appeared again after scaling were scaled twice.)
++    static const QRegularExpression regex("(?<![\\w.#-])(-?\\d+)px\\b");
+ 
+     // Material 3 colours from the theme colour (@md-<role> in the stylesheets)
+-    auto stylesheet = Md3::scheme(this->arbiter_.theme().color(mode), mode == Theme::Dark).apply(this->stylesheet(mode));
+-    auto it = regex.globalMatch(stylesheet);
++    const QString source = Md3::scheme(this->arbiter_.theme().color(mode), mode == Theme::Dark).apply(this->stylesheet(mode));
++    QString stylesheet;
++    stylesheet.reserve(source.size());
++    int last = 0;
++    auto it = regex.globalMatch(source);
+     while (it.hasNext()) {
+         auto match = it.next();
+-        if (match.hasMatch()) {
+-            int scaled_px = std::ceil(match.captured(1).toInt() * scale);
+-            stylesheet.replace(match.captured(), QString("%1px").arg(scaled_px));
+-        }
++        const int px = match.captured(1).toInt();
++        // Sizes round up; radii round down, since Qt draws square corners when a
++        // radius is more than half the side (24px -> 45px wide, 12px -> 23px)
++        const int decl = std::max(source.lastIndexOf(';', match.capturedStart()), source.lastIndexOf('{', match.capturedStart()));
++        const bool radius = source.midRef(decl + 1, match.capturedStart() - decl - 1).contains("radius");
++        const double v = std::abs(px) * scale;
++        const int scaled_px = (px < 0 ? -1 : 1) * int(radius ? std::floor(v) : std::ceil(v));
++        stylesheet += source.midRef(last, match.capturedStart() - last);
++        stylesheet += QString("%1px").arg(scaled_px);
++        last = match.capturedEnd();
+     }
++    stylesheet += source.midRef(last);
+ 
+     return stylesheet;
+ }
+-- 
+2.43.0
+

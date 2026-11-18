@@ -1,0 +1,1006 @@
+From 000608043f3b2408d009066387922805443b5dd2 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 17 Nov 2026 21:54:42 -0600
+Subject: [PATCH] Remote control: org.ozark.Dash1 for the phone app, pairing
+ code on screen, Phone app list
+
+ozark-remoted (remote/ in the Ozark OS repository) lets a phone app control
+the radio over Wi-Fi or Bluetooth LE. Dash's part:
+
+- org.ozark.Dash1 on the system bus (DashRemote): GetState() and
+  StateChanged give volume, brightness, theme, the page and the media
+  sources; Control(method, params) runs the remote protocol's dash.*,
+  media.* and radio.* methods (volume, brightness, theme, page; play,
+  pause, toggle, next, previous, source; tune, step, band, presets).
+  Bad parameters come back as org.ozark.Dash1.Error.BadParams.
+- MediaRemote: the Radio, Bluetooth and Local tabs report what they play
+  (title, artist, position, radio band, station and presets) and act on
+  the remote's requests. The source that played last gets play/pause.
+  The radio's save-preset and play/stop became methods both use.
+- ozark-remoted's PairingStarted puts the 6-digit code on screen with a
+  countdown (cancel stops the pairing); PairingEnded closes it and says
+  the phone is paired.
+- Settings > Bluetooth lists the phones paired with the app ("Phone app"),
+  connected or when last used, with "remove" (RevokeClient).
+
+Also: the Bluetooth player's hint points at Settings > Bluetooth.
+---
+ include/app/pages/media.hpp           |   8 +
+ include/app/pages/phone.hpp           |   7 +
+ include/app/services/dash_remote.hpp  |  45 +++++
+ include/app/services/media_remote.hpp |  35 ++++
+ src/app/pages/media.cpp               | 195 ++++++++++++++++---
+ src/app/pages/phone.cpp               |  93 +++++++++-
+ src/app/services/dash_remote.cpp      | 258 ++++++++++++++++++++++++++
+ src/app/services/media_remote.cpp     |  43 +++++
+ src/app/window.cpp                    |   4 +
+ 9 files changed, 658 insertions(+), 30 deletions(-)
+ create mode 100644 include/app/services/dash_remote.hpp
+ create mode 100644 include/app/services/media_remote.hpp
+ create mode 100644 src/app/services/dash_remote.cpp
+ create mode 100644 src/app/services/media_remote.cpp
+
+diff --git a/include/app/pages/media.hpp b/include/app/pages/media.hpp
+index c8b1a12..dfdc5b2 100644
+--- a/include/app/pages/media.hpp
++++ b/include/app/pages/media.hpp
+@@ -37,6 +37,9 @@ class BluetoothPlayerTab : public QWidget {
+     void attach(const QString &device, BluezQt::MediaPlayerPtr player);
+     void show_track(const BluezQt::MediaPlayerTrack &track);
+     void tick();
++    // To the remote control (MediaRemote)
++    void report(const QVariantMap &changes = {});
++    bool aa_playing = false;  // Android Auto's media, which has no player to control here
+ 
+     Arbiter &arbiter;
+     NowPlaying *now_playing;
+@@ -78,6 +81,9 @@ class RadioPlayerTab : public QWidget {
+     void load_plugin();
+     void set_band(Tuner::Band band);
+     void update_presets();
++    void set_playing(bool playing);
++    void save_preset(int index);
++    void report();
+     QString band_key() const;
+     QWidget *dialog_body();
+     QWidget *top_widget();
+@@ -98,6 +104,8 @@ class LocalPlayerTab : public QWidget {
+     QWidget *browser_widget();
+     void open_folder(const QString &path);
+     void show_current();
++    void play();
++    void report(const QVariantMap &changes = {});
+ 
+     Arbiter &arbiter;
+     Config *config;
+diff --git a/include/app/pages/phone.hpp b/include/app/pages/phone.hpp
+index 1981781..1c1f1b5 100644
+--- a/include/app/pages/phone.hpp
++++ b/include/app/pages/phone.hpp
+@@ -60,6 +60,9 @@ class PairingAgent : public BluezQt::Agent {
+ class PhoneSettingsTab : public QWidget {
+     Q_OBJECT
+ 
++   private slots:
++    void app_phones_changed() { this->refresh_app_phones(); }
++
+    public:
+     PhoneSettingsTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+@@ -80,6 +83,7 @@ class PhoneSettingsTab : public QWidget {
+     void pair_device(BluezQt::DevicePtr device, QStringList pins);
+     void choose_wheel(BluezQt::DevicePtr device);
+     void use_for_obd(const QString &address);
++    void refresh_app_phones();
+ 
+     Arbiter &arbiter;
+     BluezQt::Manager *manager = nullptr;
+@@ -97,6 +101,9 @@ class PhoneSettingsTab : public QWidget {
+     QMap<QString, QWidget *> nearby_rows;
+     QMap<QString, QString> wheels;  // tire sensor address -> wheel, from the vehicle service
+     QString obd_address;            // the vehicle service's OBD adapter
++    QWidget *app_section = nullptr; // phones paired with the remote control app (ozark-remoted)
++    QVBoxLayout *app_list = nullptr;
++    QLabel *app_hint = nullptr;
+     QVBoxLayout *device_list = nullptr;
+     QLabel *no_devices = nullptr;
+     QTimer *countdown = nullptr;
+diff --git a/include/app/services/dash_remote.hpp b/include/app/services/dash_remote.hpp
+new file mode 100644
+index 0000000..a5e6e0b
+--- /dev/null
++++ b/include/app/services/dash_remote.hpp
+@@ -0,0 +1,45 @@
++#pragma once
++
++#include <QDBusContext>
++#include <QObject>
++#include <QPointer>
++#include <QTimer>
++#include <QVariantMap>
++
++class Arbiter;
++class Dialog;
++class QLabel;
++
++// org.ozark.Dash1 on the system bus: what ozark-remoted (the phone app)
++// controls in Dash. GetState() and StateChanged give volume, brightness,
++// theme, page and media; Control(method, params) runs one of the remote
++// protocol's dash.*, media.* and radio.* methods (remote/PROTOCOL.md).
++// Also puts ozark-remoted's pairing code on the screen.
++class DashRemote : public QObject, protected QDBusContext {
++    Q_OBJECT
++    Q_CLASSINFO("D-Bus Interface", "org.ozark.Dash1")
++
++   public:
++    DashRemote(Arbiter &arbiter, QObject *parent = nullptr);
++
++   public slots:
++    Q_SCRIPTABLE QVariantMap GetState() const;
++    Q_SCRIPTABLE QVariantMap Control(const QString &method, const QVariantMap &params);
++
++   signals:
++    Q_SCRIPTABLE void StateChanged(const QVariantMap &state);
++
++   private slots:
++    void on_pairing_started(const QString &code, const QString &name, int seconds);
++    void on_pairing_ended(const QString &name, bool paired);
++
++   private:
++    Arbiter &arbiter;
++    QTimer coalesce;
++    QPointer<Dialog> pairing;
++    QLabel *countdown = nullptr;
++    int seconds_left = 0;
++    QTimer ticker;
++
++    QVariantMap fail(const QString &message);
++};
+diff --git a/include/app/services/media_remote.hpp b/include/app/services/media_remote.hpp
+new file mode 100644
+index 0000000..38ef171
+--- /dev/null
++++ b/include/app/services/media_remote.hpp
+@@ -0,0 +1,35 @@
++#pragma once
++
++#include <QObject>
++#include <QVariantMap>
++
++// Where the media tabs meet the remote control (org.ozark.Dash1, the phone
++// app): each tab reports what it's playing, and acts on requests for it.
++// Sources: "radio", "bluetooth" (the phone's music, or Android Auto's), "local".
++class MediaRemote : public QObject {
++    Q_OBJECT
++
++   public:
++    static MediaRemote &instance();
++
++    // Merges into the source's state: available, playing, title, artist,
++    // album, position_ms, duration_ms, ... (radio: band, freq_hz, label, presets)
++    void report(const QString &source, const QVariantMap &state);
++    QVariantMap state() const;
++    QVariantMap state(const QString &source) const { return this->sources.value(source).toMap(); }
++    // The source that played last: where play/pause/next go without a source
++    QString active() const { return this->active_; }
++    void set_active(const QString &source);
++
++   signals:
++    // For the tab that is `source`
++    void request(const QString &source, const QString &action, const QVariantMap &params);
++    // Show that source's tab on the Media page
++    void show(const QString &source);
++    void changed();
++
++   private:
++    MediaRemote() = default;
++    QVariantMap sources;
++    QString active_ = "radio";
++};
+diff --git a/src/app/pages/media.cpp b/src/app/pages/media.cpp
+index edf5aca..fb47be9 100644
+--- a/src/app/pages/media.cpp
++++ b/src/app/pages/media.cpp
+@@ -4,6 +4,7 @@
+ #include <tpropertymap.h>
+ #include <tvariant.h>
+ #include <BluezQt/PendingCall>
++#include "app/services/media_remote.hpp"
+ #include <QDirIterator>
+ #include <QListWidget>
+ #include <QListWidgetItem>
+@@ -28,6 +29,15 @@ void MediaPage::init()
+     this->addTab(new BluetoothPlayerTab(this->arbiter, this), "Bluetooth");
+     this->addTab(new LocalPlayerTab(this->arbiter, this), "Local");
+     this->addTab(new EqualizerTab(this->arbiter, this), "Equalizer");
++
++    // The remote control picked a source: show its tab
++    connect(&MediaRemote::instance(), &MediaRemote::show, this, [this](const QString &source) {
++        const int tab = source == "radio" ? 0 : source == "bluetooth" ? 1 : source == "local" ? 2 : -1;
++        if (tab < 0)
++            return;
++        this->setCurrentIndex(tab);
++        this->arbiter.set_curr_page(this);
++    });
+ }
+ 
+ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+@@ -54,6 +64,19 @@ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+     connect(this->now_playing, &NowPlaying::previous, [this]{ if (this->player) this->player->previous(); });
+     connect(this->now_playing, &NowPlaying::next, [this]{ if (this->player) this->player->next(); });
+ 
++    connect(&MediaRemote::instance(), &MediaRemote::request, this, [this](const QString &source, const QString &action, const QVariantMap &) {
++        if (source != "bluetooth" || !this->player)
++            return;
++        if (action == "play" || (action == "toggle" && !this->playing))
++            this->player->play();
++        else if (action == "pause" || action == "toggle")
++            this->player->pause();
++        else if (action == "next")
++            this->player->next();
++        else if (action == "previous")
++            this->player->previous();
++    });
++
+     Bluetooth &bluetooth = this->arbiter.system().bluetooth;
+     connect(&bluetooth, &Bluetooth::media_player_changed, this, [this](QString device, BluezQt::MediaPlayerPtr player){
+         this->attach(device, player);
+@@ -67,6 +90,7 @@ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+         this->playing = status == BluezQt::MediaPlayer::Status::Playing;
+         this->now_playing->set_playing(this->playing);
+         this->tick();
++        this->report();
+     });
+ 
+     // Android Auto's media (it calls from its own threads: copy, then update here)
+@@ -85,6 +109,7 @@ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+             this->now_playing->set_track(title, artist, album);
+             this->now_playing->set_art(art);
+             this->duration = length;
++            this->report({{"title", title}, {"artist", artist}, {"album", album}, {"device", "Android Auto"}});
+         }, Qt::QueuedConnection);
+     });
+     connect(aa, &AAHandler::aa_media_playback_update, [this](const aasdk::proto::messages::MediaInfoChannelPlaybackData &playback){
+@@ -96,6 +121,8 @@ BluetoothPlayerTab::BluetoothPlayerTab(Arbiter &arbiter, QWidget *parent)
+             this->since_report.restart();
+             this->now_playing->set_playing(playing);
+             this->tick();
++            this->aa_playing = playing;
++            this->report();
+         }, Qt::QueuedConnection);
+     });
+ 
+@@ -118,9 +145,10 @@ void BluetoothPlayerTab::attach(const QString &device, BluezQt::MediaPlayerPtr p
+         this->playing = false;
+         this->duration = 0;
+         this->now_playing->set_source(QString());
+-        this->now_playing->set_message("Nothing playing over Bluetooth", "Connect your phone in Settings > Phone");
++        this->now_playing->set_message("Nothing playing over Bluetooth", "Connect your phone in Settings > Bluetooth");
+         this->now_playing->set_playing(false);
+         this->now_playing->set_position(0, 0);
++        this->report({{"title", QString()}, {"artist", QString()}, {"album", QString()}, {"device", QString()}});
+         return;
+     }
+ 
+@@ -133,6 +161,7 @@ void BluetoothPlayerTab::attach(const QString &device, BluezQt::MediaPlayerPtr p
+     });
+     this->playing = player->status() == BluezQt::MediaPlayer::Status::Playing;
+     this->now_playing->set_playing(this->playing);
++    this->report({{"device", device}});
+     this->show_track(player->track());
+ }
+ 
+@@ -143,6 +172,21 @@ void BluetoothPlayerTab::show_track(const BluezQt::MediaPlayerTrack &track)
+     this->position_base = this->player ? this->player->position() : 0;
+     this->since_report.restart();
+     this->tick();
++    this->report({{"title", track.title()}, {"artist", track.artist()}, {"album", track.album()}});
++}
++
++// Position as of now; the app counts on from it while playing
++void BluetoothPlayerTab::report(const QVariantMap &changes)
++{
++    qint64 position = this->position_base;
++    if (this->playing && this->since_report.isValid())
++        position += this->since_report.elapsed();
++    QVariantMap state = changes;
++    state["available"] = bool(this->player);
++    state["playing"] = this->playing;
++    state["position_ms"] = position;
++    state["duration_ms"] = this->duration;
++    MediaRemote::instance().report("bluetooth", state);
+ }
+ 
+ void BluetoothPlayerTab::tick()
+@@ -179,16 +223,35 @@ RadioPlayerTab::RadioPlayerTab(Arbiter &arbiter, QWidget *parent)
+     this->play_button->setFlat(true);
+     this->play_button->setCheckable(true);
+     this->arbiter.forge().iconize("play", "stop", this->play_button, 48);
+-    connect(this->play_button, &QPushButton::clicked, [this](bool checked){
+-        if (RadioPlugin *plugin = qobject_cast<RadioPlugin *>(this->loader.instance())) {
+-            if (checked)
+-                plugin->play();
+-            else
+-                plugin->stop();
++    connect(this->play_button, &QPushButton::clicked, [this](bool checked){ this->set_playing(checked); });
++
++    connect(&MediaRemote::instance(), &MediaRemote::request, this, [this](const QString &source, const QString &action, const QVariantMap &params) {
++        if (source != "radio")
++            return;
++        if (action == "play" || (action == "toggle" && !this->play_button->isChecked()))
++            this->set_playing(true);
++        else if (action == "stop" || action == "pause" || action == "toggle")
++            this->set_playing(false);
++        else if (action == "next" || action == "previous" || action == "step") {
++            const int delta = action == "step" ? params.value("delta", 1).toInt() : action == "next" ? 1 : -1;
++            this->tuner->setValue(this->tuner->value() + delta);
+         }
+-        else {
+-            this->play_button->setChecked(false);
++        else if (action == "tune") {
++            // freq_hz, or the value the radio shows (1015 = 101.5 MHz, 101 = 1010 kHz)
++            const bool am = this->tuner->band() == Tuner::Band::AM;
++            const int value = params.contains("freq_hz") ? qRound(params.value("freq_hz").toDouble() / (am ? 10000 : 100000))
++                                                         : params.value("value").toInt();
++            this->tuner->setValue(value);  // clamped to the band
++        }
++        else if (action == "band")
++            this->set_band(params.value("band").toString() == "am" ? Tuner::Band::AM : Tuner::Band::FM);
++        else if (action == "preset") {
++            const int station = this->settings.value("Pages/Media/Radio/Presets/" + this->band_key()).toStringList().value(params.value("index").toInt()).toInt();
++            if (station > 0)
++                this->tuner->setValue(station);
+         }
++        else if (action == "save_preset")
++            this->save_preset(params.value("index").toInt());
+     });
+ 
+     auto layout = new QVBoxLayout(this);
+@@ -208,6 +271,54 @@ RadioPlayerTab::RadioPlayerTab(Arbiter &arbiter, QWidget *parent)
+     this->set_band(am ? Tuner::Band::AM : Tuner::Band::FM);
+ }
+ 
++void RadioPlayerTab::set_playing(bool playing)
++{
++    RadioPlugin *plugin = qobject_cast<RadioPlugin *>(this->loader.instance());
++    if (plugin) {
++        if (playing)
++            plugin->play();
++        else
++            plugin->stop();
++    }
++    this->play_button->setChecked(plugin && playing);
++    this->report();
++}
++
++void RadioPlayerTab::save_preset(int index)
++{
++    const QString key = "Pages/Media/Radio/Presets/" + this->band_key();
++    QStringList presets = this->settings.value(key).toStringList();
++    while (presets.size() < PRESETS)
++        presets << QString();
++    presets[index] = QString::number(this->tuner->value());
++    this->settings.setValue(key, presets);
++    this->update_presets();
++}
++
++void RadioPlayerTab::report()
++{
++    QVariantList presets;
++    const QStringList saved = this->settings.value("Pages/Media/Radio/Presets/" + this->band_key()).toStringList();
++    for (int i = 0; i < PRESETS; i++) {
++        const int station = saved.value(i).toInt();
++        presets << QVariantMap{{"index", i}, {"value", station}, {"label", station > 0 ? this->tuner->label(station) : QString()}};
++    }
++    const bool am = this->tuner->band() == Tuner::Band::AM;
++    MediaRemote::instance().report("radio", {
++        {"available", this->loader.isLoaded() && this->loader.instance()},
++        {"playing", this->play_button->isChecked()},
++        {"band", am ? "am" : "fm"},
++        {"value", this->tuner->value()},
++        {"freq_hz", this->tuner->hz()},
++        {"label", this->tuner->label(this->tuner->value())},
++        {"unit", am ? "kHz" : "MHz"},
++        {"min", this->tuner->minimum()},
++        {"max", this->tuner->maximum()},
++        {"presets", presets},
++        {"title", QString("%1 %2").arg(this->tuner->label(this->tuner->value()), am ? "kHz" : "MHz")},
++    });
++}
++
+ QString RadioPlayerTab::band_key() const
+ {
+     return this->tuner->band() == Tuner::Band::AM ? "am" : "fm";
+@@ -242,6 +353,7 @@ void RadioPlayerTab::update_presets()
+         button->setText(station > 0 ? this->tuner->label(station) : QString("+"));
+         button->setChecked(station > 0 && station == this->tuner->value());
+     }
++    this->report();
+ }
+ 
+ RadioPlayerTab::~RadioPlayerTab()
+@@ -265,6 +377,7 @@ void RadioPlayerTab::load_plugin()
+         }
+     }
+     this->config->set_radio_plugin(key);
++    this->report();
+ }
+ 
+ QWidget *RadioPlayerTab::dialog_body()
+@@ -361,15 +474,7 @@ QWidget *RadioPlayerTab::presets_widget()
+     auto layout = new QHBoxLayout(widget);
+     layout->setContentsMargins(0, 0, 0, 0);
+ 
+-    auto save = [this](int index) {
+-        const QString key = "Pages/Media/Radio/Presets/" + this->band_key();
+-        QStringList presets = this->settings.value(key).toStringList();
+-        while (presets.size() < PRESETS)
+-            presets << QString();
+-        presets[index] = QString::number(this->tuner->value());
+-        this->settings.setValue(key, presets);
+-        this->update_presets();
+-    };
++    auto save = [this](int index) { this->save_preset(index); };
+ 
+     for (int i = 0; i < PRESETS; i++) {
+         auto button = new QPushButton(widget);
+@@ -487,17 +592,25 @@ LocalPlayerTab::LocalPlayerTab(Arbiter &arbiter, QWidget *parent)
+     }
+ 
+     connect(this->now_playing, &NowPlaying::play_pause, [this](bool play){
+-        if (play) {
+-            if (this->playing_paths.isEmpty() && !this->track_paths.isEmpty()) {
+-                for (const QString &file : this->track_paths)
+-                    this->player->playlist()->addMedia(QMediaContent(QUrl::fromLocalFile(file)));
+-                this->playing_paths = this->track_paths;
+-                this->player->playlist()->setCurrentIndex(0);
+-            }
+-            this->player->play();
+-        }
+-        else {
++        if (play)
++            this->play();
++        else
++            this->player->pause();
++    });
++    connect(&MediaRemote::instance(), &MediaRemote::request, this, [this](const QString &source, const QString &action, const QVariantMap &) {
++        if (source != "local")
++            return;
++        const bool playing = this->player->state() == QMediaPlayer::PlayingState;
++        if (action == "play" || (action == "toggle" && !playing))
++            this->play();
++        else if (action == "pause" || action == "toggle")
+             this->player->pause();
++        else if (action == "next" || action == "previous") {
++            if (action == "next")
++                this->player->playlist()->next();
++            else
++                this->player->playlist()->previous();
++            this->player->play();
+         }
+     });
+     connect(this->now_playing, &NowPlaying::previous, [this]{
+@@ -512,12 +625,15 @@ LocalPlayerTab::LocalPlayerTab(Arbiter &arbiter, QWidget *parent)
+ 
+     connect(this->player, &QMediaPlayer::stateChanged, [this](QMediaPlayer::State state){
+         this->now_playing->set_playing(state == QMediaPlayer::PlayingState);
++        this->report();
+     });
++    connect(this->player, &QMediaPlayer::seekableChanged, [this]{ this->report(); });
+     connect(this->player, &QMediaPlayer::positionChanged, [this](qint64 position){
+         this->now_playing->set_position(position, this->player->duration());
+     });
+     connect(this->player, &QMediaPlayer::durationChanged, [this](qint64 duration){
+         this->now_playing->set_position(this->player->position(), duration);
++        this->report();
+     });
+     connect(playlist, &QMediaPlaylist::currentIndexChanged, [this](int){ this->show_current(); });
+ 
+@@ -636,10 +752,32 @@ void LocalPlayerTab::open_folder(const QString &path)
+     this->show_current();
+ }
+ 
++void LocalPlayerTab::play()
++{
++    if (this->playing_paths.isEmpty() && !this->track_paths.isEmpty()) {
++        for (const QString &file : this->track_paths)
++            this->player->playlist()->addMedia(QMediaContent(QUrl::fromLocalFile(file)));
++        this->playing_paths = this->track_paths;
++        this->player->playlist()->setCurrentIndex(0);
++    }
++    this->player->play();
++}
++
++void LocalPlayerTab::report(const QVariantMap &changes)
++{
++    QVariantMap state = changes;
++    state["available"] = !this->playing_paths.isEmpty() || !this->track_paths.isEmpty();
++    state["playing"] = this->player->state() == QMediaPlayer::PlayingState;
++    state["position_ms"] = this->player->position();
++    state["duration_ms"] = this->player->duration();
++    MediaRemote::instance().report("local", state);
++}
++
+ void LocalPlayerTab::show_current()
+ {
+     const int index = this->player->playlist()->currentIndex();
+     if (index < 0 || index >= this->playing_paths.size()) {
++        this->report({{"title", QString()}, {"artist", QString()}, {"album", QString()}});
+         this->now_playing->set_art(QImage());
+         if (this->track_paths.isEmpty())
+             this->now_playing->set_message("No music in this folder", "Copy music to the radio, then open its folder here");
+@@ -649,6 +787,7 @@ void LocalPlayerTab::show_current()
+         return;
+     }
+     const TrackTags tags = read_tags(this->playing_paths[index], true);
++    this->report({{"title", tags.title}, {"artist", tags.artist}, {"album", tags.album}});
+     this->now_playing->set_message(QString());
+     this->now_playing->set_track(tags.title, tags.artist, tags.album);
+     this->now_playing->set_art(tags.art);
+diff --git a/src/app/pages/phone.cpp b/src/app/pages/phone.cpp
+index 20d7a87..02cc427 100644
+--- a/src/app/pages/phone.cpp
++++ b/src/app/pages/phone.cpp
+@@ -9,6 +9,9 @@
+ 
+ #include "app/arbiter.hpp"
+ #include "app/services/vehicle_client.hpp"
++#include <QDBusConnection>
++#include <QDBusPendingCallWatcher>
++#include <QDBusPendingReply>
+ #include "app/widgets/dialog.hpp"
+ 
+ #include "app/pages/phone.hpp"
+@@ -263,6 +266,25 @@ QWidget *PhoneSettingsTab::phones_tab()
+     this->no_devices->setAlignment(Qt::AlignCenter);
+     this->device_list->addWidget(this->no_devices);
+ 
++    // Phones paired with the Ozark Remote app (ozark-remoted)
++    this->app_section = new QWidget(list);
++    auto app_layout = new QVBoxLayout(this->app_section);
++    app_layout->setContentsMargins(0, 12, 0, 0);
++    auto app_title = new QLabel("Phone app", this->app_section);
++    QFont app_font(this->arbiter.forge().font(14));
++    app_font.setBold(true);
++    app_title->setFont(app_font);
++    app_layout->addWidget(app_title);
++    this->app_hint = new QLabel(this->app_section);
++    this->app_hint->setFont(this->arbiter.forge().font(11));
++    this->app_hint->setProperty("muted", true);
++    this->app_hint->setWordWrap(true);
++    app_layout->addWidget(this->app_hint);
++    this->app_list = new QVBoxLayout();
++    this->app_list->setContentsMargins(0, 0, 0, 0);
++    app_layout->addLayout(this->app_list);
++    this->device_list->addWidget(this->app_section);
++
+     // Found by "add device"
+     this->nearby = new QWidget(list);
+     auto nearby_layout = new QVBoxLayout(this->nearby);
+@@ -305,6 +327,12 @@ QWidget *PhoneSettingsTab::phones_tab()
+                 this->update_device(device);
+     };
+     connect(&client, &VehicleClient::config_changed, this, read_config);
++
++    QDBusConnection::systemBus().connect("org.ozark.Remote1", "/org/ozark/Remote1", "org.ozark.Remote1", "ClientsChanged",
++                                         this, SLOT(app_phones_changed()));
++    QDBusConnection::systemBus().connect("org.ozark.Remote1", "/org/ozark/Remote1", "org.ozark.Remote1", "StatusChanged",
++                                         this, SLOT(app_phones_changed()));
++    this->refresh_app_phones();
+     client.call("GetConfig", {}, [read_config](const QVariantList &r){ read_config(r.value(0).toMap()); });
+     layout->addWidget(scroll, 1);
+ 
+@@ -479,8 +507,8 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+         });
+         layout->addWidget(forget);
+ 
+-        // Paired devices above the "Nearby devices" section
+-        this->device_list->insertWidget(this->device_list->indexOf(this->nearby), row);
++        // Paired devices above the "Phone app" and "Nearby devices" sections
++        this->device_list->insertWidget(this->device_list->indexOf(this->app_section), row);
+         this->rows.insert(address, row);
+         this->no_devices->hide();
+     }
+@@ -771,3 +799,64 @@ void PhoneSettingsTab::use_for_obd(const QString &address)
+         if (auto device = this->adapter->deviceForAddress(address))
+             this->update_device(device);
+ }
++
++// ---------------------------------------------------------------- phone app
++
++void PhoneSettingsTab::refresh_app_phones()
++{
++    auto call = QDBusConnection::systemBus().asyncCall(
++        QDBusMessage::createMethodCall("org.ozark.Remote1", "/org/ozark/Remote1", "org.ozark.Remote1", "ListClients"), 5000);
++    auto watch = new QDBusPendingCallWatcher(call, this);
++    connect(watch, &QDBusPendingCallWatcher::finished, this, [this](QDBusPendingCallWatcher *w) {
++        w->deleteLater();
++        while (QLayoutItem *item = this->app_list->takeAt(0)) {
++            if (item->widget())
++                item->widget()->deleteLater();
++            delete item;
++        }
++        if (w->isError()) {
++            this->app_hint->setText("The remote control service isn't running.");
++            return;
++        }
++        const QVariantMap clients = VehicleClient::unwrap(w->reply().arguments().value(0)).toMap();
++        this->app_hint->setText(clients.isEmpty()
++            ? "Control the radio from your phone with the Ozark Remote app, over Bluetooth or the radio's Wi-Fi. "
++              "The app asks for a code that appears on this screen."
++            : "These phones can control the radio with the Ozark Remote app.");
++        for (const QVariant &v : clients) {
++            const QVariantMap c = v.toMap();
++            auto row = new QFrame();
++            row->setProperty("md", "card");
++            auto layout = new QHBoxLayout(row);
++            layout->setContentsMargins(12, 6, 12, 6);
++            auto icon = new QPushButton(row);
++            icon->setFlat(true);
++            icon->setFocusPolicy(Qt::NoFocus);
++            icon->setAttribute(Qt::WA_TransparentForMouseEvents);
++            this->arbiter.forge().iconize("smartphone", icon, 28);
++            layout->addWidget(icon);
++            auto text = new QVBoxLayout();
++            auto name = new QLabel(c.value("name").toString(), row);
++            name->setFont(this->arbiter.forge().font(14));
++            text->addWidget(name);
++            const QDateTime seen = QDateTime::fromString(c.value("last_seen").toString(), Qt::ISODate).toLocalTime();
++            auto state = new QLabel(c.value("connected").toBool()
++                                        ? QString("Connected now")
++                                        : QString("Last used %1").arg(QLocale().toString(seen, QLocale::ShortFormat)), row);
++            state->setProperty("muted", true);
++            state->setFont(this->arbiter.forge().font(11));
++            text->addWidget(state);
++            layout->addLayout(text, 1);
++            auto remove = new QPushButton("remove", row);
++            remove->setFont(this->arbiter.forge().font(14));
++            remove->setFlat(true);
++            const QString id = c.value("id").toString();
++            connect(remove, &QPushButton::clicked, this, [id] {
++                QDBusConnection::systemBus().asyncCall(QDBusMessage::createMethodCall(
++                    "org.ozark.Remote1", "/org/ozark/Remote1", "org.ozark.Remote1", "RevokeClient") << id);
++            });
++            layout->addWidget(remove);
++            this->app_list->addWidget(row);
++        }
++    });
++}
+diff --git a/src/app/services/dash_remote.cpp b/src/app/services/dash_remote.cpp
+new file mode 100644
+index 0000000..8182ecd
+--- /dev/null
++++ b/src/app/services/dash_remote.cpp
+@@ -0,0 +1,258 @@
++#include "app/services/dash_remote.hpp"
++
++#include <QDBusConnection>
++#include <QDBusMessage>
++#include <QLabel>
++#include <QPushButton>
++#include <QVBoxLayout>
++
++#include "DashLog.hpp"
++#include "app/arbiter.hpp"
++#include "app/services/media_remote.hpp"
++#include "app/widgets/dialog.hpp"
++
++namespace {
++const char *kBadParams = "org.ozark.Dash1.Error.BadParams";
++const QString kRemote = "org.ozark.Remote1";
++const QString kRemotePath = "/org/ozark/Remote1";
++const QStringList kSources = {"radio", "bluetooth", "local"};
++}  // namespace
++
++DashRemote::DashRemote(Arbiter &arbiter, QObject *parent)
++    : QObject(parent)
++    , arbiter(arbiter)
++{
++    // Many changes come in bursts (a theme change, a new track): one signal for them
++    this->coalesce.setSingleShot(true);
++    this->coalesce.setInterval(150);
++    connect(&this->coalesce, &QTimer::timeout, this, [this] { emit StateChanged(this->GetState()); });
++    auto changed = [this] { this->coalesce.start(); };
++    connect(&arbiter, &Arbiter::volume_changed, this, changed);
++    connect(&arbiter, &Arbiter::brightness_changed, this, changed);
++    connect(&arbiter, &Arbiter::mode_changed, this, changed);
++    connect(&arbiter, &Arbiter::color_changed, this, changed);
++    connect(&arbiter, &Arbiter::curr_page_changed, this, changed);
++    connect(&arbiter, &Arbiter::page_changed, this, changed);
++    connect(&MediaRemote::instance(), &MediaRemote::changed, this, changed);
++
++    QDBusConnection bus = QDBusConnection::systemBus();
++    if (!bus.registerObject("/org/ozark/Dash1", this, QDBusConnection::ExportScriptableContents) ||
++        !bus.registerService("org.ozark.Dash1"))
++        DASH_LOG(error) << "[Remote] Can't register org.ozark.Dash1: " << bus.lastError().message().toStdString();
++    else
++        DASH_LOG(info) << "[Remote] org.ozark.Dash1 ready";
++
++    bus.connect(kRemote, kRemotePath, kRemote, "PairingStarted", this, SLOT(on_pairing_started(QString, QString, int)));
++    bus.connect(kRemote, kRemotePath, kRemote, "PairingEnded", this, SLOT(on_pairing_ended(QString, bool)));
++
++    this->ticker.setInterval(1000);
++    connect(&this->ticker, &QTimer::timeout, this, [this] {
++        if (--this->seconds_left <= 0) {
++            this->ticker.stop();
++            if (this->pairing)
++                this->pairing->close();
++            return;
++        }
++        if (this->countdown)
++            this->countdown->setText(QString("%1:%2").arg(this->seconds_left / 60).arg(this->seconds_left % 60, 2, 10, QChar('0')));
++    });
++}
++
++QVariantMap DashRemote::GetState() const
++{
++    QVariantList pages;
++    for (auto page : this->arbiter.layout().pages())
++        if (page->enabled())
++            pages << page->name();
++    auto curr = this->arbiter.layout().curr_page;
++    return {
++        {"volume", int(this->arbiter.system().volume)},
++        {"brightness", int(this->arbiter.system().brightness.value)},
++        {"mode", this->arbiter.theme().mode == Session::Theme::Dark ? "dark" : "light"},
++        {"color", this->arbiter.theme().color().name()},
++        {"page", curr ? curr->name() : QString()},
++        {"pages", pages},
++        {"media", MediaRemote::instance().state()},
++    };
++}
++
++QVariantMap DashRemote::fail(const QString &message)
++{
++    if (this->calledFromDBus())
++        this->sendErrorReply(kBadParams, message);
++    return {};
++}
++
++QVariantMap DashRemote::Control(const QString &method, const QVariantMap &params)
++{
++    const QVariantMap ok{{"ok", true}};
++    MediaRemote &media = MediaRemote::instance();
++
++    // ---- dash.*
++    if (method == "dash.volume") {
++        if (!params.contains("value"))
++            return this->fail("value: 0 to 100");
++        this->arbiter.set_volume(uint8_t(qBound(0, params.value("value").toInt(), 100)));
++        return ok;
++    }
++    if (method == "dash.volume_step") {
++        const int delta = params.value("delta", 2).toInt();
++        if (delta >= 0)
++            this->arbiter.increase_volume(uint8_t(qBound(0, delta, 100)));
++        else
++            this->arbiter.decrease_volume(uint8_t(qBound(0, -delta, 100)));
++        return ok;
++    }
++    if (method == "dash.brightness") {
++        if (!params.contains("value"))
++            return this->fail("value: 0 to 255");
++        this->arbiter.set_brightness(uint8_t(qBound(0, params.value("value").toInt(), 255)));
++        return ok;
++    }
++    if (method == "dash.theme") {
++        if (params.contains("mode")) {
++            const QString mode = params.value("mode").toString();
++            if (mode != "light" && mode != "dark")
++                return this->fail("mode: light or dark");
++            this->arbiter.set_mode(mode == "dark" ? Session::Theme::Dark : Session::Theme::Light);
++        }
++        if (params.contains("color")) {
++            const QColor color(params.value("color").toString());
++            if (!color.isValid())
++                return this->fail("color: #rrggbb");
++            this->arbiter.set_color(color);
++        }
++        return ok;
++    }
++    if (method == "dash.page") {
++        const QString name = params.value("name").toString();
++        for (auto page : this->arbiter.layout().pages()) {
++            if (page->enabled() && page->name().compare(name, Qt::CaseInsensitive) == 0) {
++                this->arbiter.set_curr_page(page);
++                return ok;
++            }
++        }
++        return this->fail("name: one of the enabled pages (state's \"pages\")");
++    }
++
++    // ---- media.*: to a source's tab
++    if (method.startsWith("media.")) {
++        const QString action = method.mid(6);
++        if (action == "source") {
++            const QString source = params.value("source").toString();
++            if (!kSources.contains(source))
++                return this->fail("source: radio, bluetooth or local");
++            media.set_active(source);
++            emit media.show(source);
++            return ok;
++        }
++        static const QStringList actions = {"play", "pause", "toggle", "next", "previous"};
++        if (!actions.contains(action))
++            return this->fail("media: play, pause, toggle, next, previous or source");
++        const QString source = params.value("source", media.active()).toString();
++        if (!kSources.contains(source))
++            return this->fail("source: radio, bluetooth or local");
++        if (!media.state(source).value("available").toBool())
++            return this->fail(source == "bluetooth" ? "Nothing is playing over Bluetooth"
++                              : source == "radio"   ? "No radio tuner is loaded"
++                                                    : "No music on the radio");
++        emit media.request(source, action, params);
++        return ok;
++    }
++
++    // ---- radio.*
++    if (method.startsWith("radio.")) {
++        const QString action = method.mid(6);
++        if (action == "band") {
++            const QString band = params.value("band").toString();
++            if (band != "fm" && band != "am")
++                return this->fail("band: fm or am");
++        }
++        else if (action == "tune") {
++            if (!params.contains("freq_hz") && !params.contains("value"))
++                return this->fail("freq_hz (e.g. 101500000), or value as the radio shows it (1015 = 101.5 MHz)");
++        }
++        else if (action == "preset" || action == "save_preset") {
++            const int index = params.value("index", -1).toInt();
++            if (index < 0 || index >= 6)
++                return this->fail("index: 0 to 5");
++        }
++        else if (action != "play" && action != "stop" && action != "step") {
++            return this->fail("radio: play, stop, tune, step, band, preset or save_preset");
++        }
++        emit media.request("radio", action, params);
++        return ok;
++    }
++
++    return this->fail(QString("Dash has no method %1").arg(method));
++}
++
++// ---------------------------------------------------------------- pairing
++
++void DashRemote::on_pairing_started(const QString &code, const QString &name, int seconds)
++{
++    if (this->pairing)
++        this->pairing->close();
++    DASH_LOG(info) << "[Remote] Pairing code shown for " << name.toStdString();
++
++    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    dialog->setAttribute(Qt::WA_DeleteOnClose);
++    dialog->set_title(QString("Pair %1 with the radio?").arg(name));
++
++    auto body = new QWidget();
++    auto layout = new QVBoxLayout(body);
++    auto code_label = new QLabel(code.left(3) + " " + code.mid(3), body);
++    QFont code_font(this->arbiter.forge().font(32));
++    code_font.setBold(true);
++    code_font.setLetterSpacing(QFont::AbsoluteSpacing, 4);
++    code_label->setFont(code_font);
++    code_label->setAlignment(Qt::AlignCenter);
++    layout->addWidget(code_label);
++    auto hint = new QLabel(QString("Enter this code in the Ozark Remote app on %1.").arg(name), body);
++    hint->setFont(this->arbiter.forge().font(12));
++    hint->setAlignment(Qt::AlignCenter);
++    hint->setWordWrap(true);
++    layout->addWidget(hint);
++    this->countdown = new QLabel(body);
++    this->countdown->setProperty("muted", true);
++    this->countdown->setFont(this->arbiter.forge().font(11));
++    this->countdown->setAlignment(Qt::AlignCenter);
++    layout->addWidget(this->countdown);
++    dialog->set_body(body);
++    dialog->set_cancel_text("cancel");
++
++    // Closing it (cancel, or tapping outside) stops the pairing
++    connect(dialog, &QObject::destroyed, this, [this] {
++        this->countdown = nullptr;
++        this->ticker.stop();
++        if (this->seconds_left > 0)
++            QDBusConnection::systemBus().asyncCall(
++                QDBusMessage::createMethodCall(kRemote, kRemotePath, kRemote, "CancelPairing"));
++        this->seconds_left = 0;
++    });
++
++    this->pairing = dialog;
++    this->seconds_left = seconds;
++    this->countdown->setText(QString("%1:%2").arg(seconds / 60).arg(seconds % 60, 2, 10, QChar('0')));
++    this->ticker.start();
++    dialog->open();
++}
++
++void DashRemote::on_pairing_ended(const QString &name, bool paired)
++{
++    this->seconds_left = 0;  // ended by the service: don't cancel it again
++    if (this->pairing)
++        this->pairing->close();
++    if (!paired)
++        return;
++    DASH_LOG(info) << "[Remote] Paired " << name.toStdString();
++    auto done = new Dialog(this->arbiter, true, this->arbiter.window());
++    done->setAttribute(Qt::WA_DeleteOnClose);
++    done->set_title(QString("%1 is paired").arg(name));
++    auto body = new QLabel("It can now control the radio. Remove it in Settings > Bluetooth.");
++    body->setWordWrap(true);
++    body->setFont(this->arbiter.forge().font(12));
++    done->set_body(body);
++    done->set_cancel_text("ok");
++    done->open(4000);
++}
+diff --git a/src/app/services/media_remote.cpp b/src/app/services/media_remote.cpp
+new file mode 100644
+index 0000000..056d8ce
+--- /dev/null
++++ b/src/app/services/media_remote.cpp
+@@ -0,0 +1,43 @@
++#include "app/services/media_remote.hpp"
++
++MediaRemote &MediaRemote::instance()
++{
++    static MediaRemote remote;
++    return remote;
++}
++
++void MediaRemote::report(const QString &source, const QVariantMap &state)
++{
++    QVariantMap current = this->sources.value(source).toMap();
++    bool changed = false;
++    for (auto it = state.begin(); it != state.end(); ++it) {
++        if (current.value(it.key()) != it.value()) {
++            current[it.key()] = it.value();
++            changed = true;
++        }
++    }
++    // Starting to play makes a source the one the remote's controls go to
++    if (state.value("playing").toBool() && this->active_ != source) {
++        this->active_ = source;
++        changed = true;
++    }
++    if (!changed)
++        return;
++    this->sources[source] = current;
++    emit this->changed();
++}
++
++QVariantMap MediaRemote::state() const
++{
++    QVariantMap out = this->sources;
++    out["active"] = this->active_;
++    return out;
++}
++
++void MediaRemote::set_active(const QString &source)
++{
++    if (this->active_ == source)
++        return;
++    this->active_ = source;
++    emit this->changed();
++}
+diff --git a/src/app/window.cpp b/src/app/window.cpp
+index b24c706..c774fde 100644
+--- a/src/app/window.cpp
++++ b/src/app/window.cpp
+@@ -9,6 +9,7 @@
+ #include "app/widgets/osd.hpp"
+ #include "app/widgets/touch_input.hpp"
+ #include "app/window.hpp"
++#include "app/services/dash_remote.hpp"
+ 
+ Dash::NavRail::NavRail()
+     : group()
+@@ -99,6 +100,9 @@ void Dash::init()
+     this->style_rail();
+     connect(&this->arbiter, &Arbiter::mode_changed, [this]{ this->style_rail(); });
+     connect(&this->arbiter, &Arbiter::color_changed, [this]{ this->style_rail(); });
++
++    // The phone app's way in (through ozark-remoted), once the pages exist
++    new DashRemote(this->arbiter, this);
+ }
+ 
+ // The app stylesheet is at 1x; the nav rail gets its own copy at the bar
+-- 
+2.43.0
+

@@ -7,7 +7,9 @@ LICENSE = "RtAudio"
 NO_GENERIC_LICENSE[RtAudio] = "LICENSE"
 LIC_FILES_CHKSUM = "file://LICENSE;md5=34bd14de91674a563fe79386431546bb"
 
-SRC_URI = "git://github.com/thestk/rtaudio.git;protocol=https;nobranch=1"
+SRC_URI = "git://github.com/thestk/rtaudio.git;protocol=https;nobranch=1 \
+           file://0001-PulseAudio-reconnect-when-the-server-goes-away-inste.patch \
+           "
 SRCREV = "46b01b5b134f33d8ddc3dab76829d4b1350e0522"
 
 S = "${WORKDIR}/git"

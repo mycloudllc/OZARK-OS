@@ -1,0 +1,51 @@
+From b17718535efff02f58bf0cfa5a36858a51423aae Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 17 Nov 2026 21:07:06 -0600
+Subject: [PATCH] Android Auto page: whole icon, "Android Auto will connect
+ automatically"
+
+The connect card came out shorter than its contents (a wrapped label's size
+hint doesn't count its extra lines), so the layout squeezed the Android
+Auto icon, cutting off its rounded top and the notch at the bottom, and
+cut the text off after "connects over". The icon now has a fixed size and
+the text a fixed width with the height it needs. The text is now
+"Android Auto will connect automatically".
+---
+ src/app/pages/openauto.cpp | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/app/pages/openauto.cpp b/src/app/pages/openauto.cpp
+index 362a387..2c7e3a0 100644
+--- a/src/app/pages/openauto.cpp
++++ b/src/app/pages/openauto.cpp
+@@ -469,17 +469,23 @@ QWidget *OpenAutoPage::connect_msg()
+     const int side = 88 * scale;
+     icon->setPixmap(QIcon(QString(":/icons/%1.svg").arg(this->connected_icon_name)).pixmap(side, side));
+     icon->setAlignment(Qt::AlignCenter);
+-    card_layout->addWidget(icon);
++    // Fixed size: when the card came out short the layout squeezed the icon
++    // and cut off its rounded top and the notch at the bottom
++    icon->setFixedSize(side, side);
++    card_layout->addWidget(icon, 0, Qt::AlignHCenter);
+     auto headline = new QLabel("Connect your phone", card);
+     headline->setFont(this->arbiter.forge().font(22, true));
+     headline->setAlignment(Qt::AlignCenter);
+     card_layout->addWidget(headline);
+-    QLabel *label = new QLabel("Android Auto starts by itself when your phone connects over Bluetooth, "
+-                               "or when you plug it in with a USB cable.", card);
++    QLabel *label = new QLabel("Android Auto will connect automatically", card);
+     label->setProperty("muted", true);
+     label->setWordWrap(true);
+     label->setAlignment(Qt::AlignCenter);
+-    label->setMaximumWidth(460 * scale);
++    // A wrapped label's size hint doesn't count its extra lines, which made the
++    // card too short: give it a fixed width and the height that width needs
++    const int text_width = 460 * scale;
++    label->setFixedWidth(text_width);
++    label->setMinimumHeight(label->heightForWidth(text_width));
+     card_layout->addWidget(label, 0, Qt::AlignHCenter);
+ 
+     QHBoxLayout *layout2 = new QHBoxLayout();
+-- 
+2.43.0
+

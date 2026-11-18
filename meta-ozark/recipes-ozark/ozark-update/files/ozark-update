@@ -71,7 +71,7 @@ CONF
 }
 
 load_state() {
-    STATE= TARGET= VERSION= BUILD= FROM= REASON=
+    STATE= TARGET= VERSION= BUILD= FROM= FROM_BUILD= REASON=
     [ -f "$state_file" ] && . "$state_file"
 }
 
@@ -87,6 +87,7 @@ TARGET=$(q "$TARGET")
 VERSION=$(q "$VERSION")
 BUILD=$(q "$BUILD")
 FROM=$(q "$FROM")
+FROM_BUILD=$(q "$FROM_BUILD")
 REASON=$(q "$REASON")
 STATE
     mv "$state_file.tmp" "$state_file"
@@ -150,6 +151,7 @@ status() {
     echo "state.version=$VERSION"
     echo "state.build=$BUILD"
     echo "state.from=$FROM"
+    echo "state.from_build=$FROM_BUILD"
     echo "state.reason=$REASON"
     if [ -f "$available_file" ]; then
         sed 's/^/available./' "$available_file"
@@ -254,6 +256,9 @@ download() {
 install() {
     file=${1:-$download}
     supported || fail "Updates need the A/B SD card layout (flash an Ozark OS image from 0.2 on)."
+    # Settings live on the data partition only while ozark-data keeps them
+    # there; otherwise they're in this system slot, and the update leaves them behind
+    [ -e /run/ozark-data.ok ] || fail "Settings aren't being saved to the data partition right now, so an update would lose them. Restart the radio and try again."
     [ -f "$file" ] || fail "No update file: $file"
     lock
     current=$(this_slot)
@@ -267,7 +272,7 @@ install() {
     build=$(value description "$run/swu" | sed -n 's/.*(build \([0-9]*\)).*/\1/p')
 
     # Until it's done, the other slot is neither the old system nor the new
-    STATE=installing TARGET=$target VERSION=$version BUILD=$build FROM=$(this_version) REASON=
+    STATE=installing TARGET=$target VERSION=$version BUILD=$build FROM=$(this_version) FROM_BUILD=$(this_build) REASON=
     save_state
 
     echo "step Checking the update"
@@ -295,7 +300,7 @@ install() {
         elif grep -q 'ardware\|hwrevision' "$log"; then
             why="This update is for different hardware"
         else
-            why=$(grep -v 'endupdate\|image_write' | head -n 1 | sed 's/.*ERROR [^:]*: [^:]*: [0-9]* : //; s/.*\[ERROR\][^:]*: *//')
+            why=$(grep -v 'endupdate\|image_write' "$log" | head -n 1 | sed 's/.*ERROR [^:]*: [^:]*: [0-9]* : //; s/.*\[ERROR\][^:]*: *//')
             why=${why:-SWUpdate exit code $rc}
         fi
         STATE=failed REASON=$why
@@ -328,9 +333,12 @@ usb() {
         fi
         for f in "$dir"/*.swu "$dir"/*/*.swu; do
             [ -f "$f" ] || continue
-            # Not an update (no sw-description): leave it out
-            v=$("$helper" swu-version "$f" 2>/dev/null | sed -n 's/^version=//p')
-            [ -n "$v" ] && echo "swu=$f|$v"
+            # Not an update (no sw-description): leave it out. Prints
+            # swu=PATH|VERSION|BUILD (build stamp, if the file has one)
+            "$helper" swu-version "$f" > "$run/usb.swu" 2>/dev/null || continue
+            v=$(value version "$run/usb.swu")
+            b=$(value description "$run/usb.swu" | sed -n 's/.*(build \([0-9]*\)).*/\1/p')
+            [ -n "$v" ] && echo "swu=$f|$v|$b"
         done
     done
 }

@@ -9,10 +9,13 @@
 #                      the system's own (overlayfs). Files the system ships
 #                      there still come from the system, so an update can
 #                      change them, unless they were changed on this unit.
+#                      Writes /run/ozark-data.ok when every one is kept;
+#                      ozark-update won't install an update without it.
 
 # Directories with settings or state worth keeping
 dirs="/etc/ozark /etc/systemd/network /root /var/lib/bluetooth /var/lib/ozark-lightd /var/lib/systemd/timesync"
 overlay=/data/overlay
+ok=/run/ozark-data.ok
 
 grow() {
     dev=$(readlink -f /dev/disk/by-label/ozarkdata) || exit 0
@@ -28,17 +31,36 @@ grow() {
     echo "Growing $dev to the end of $disk"
     echo ", +" | sfdisk --quiet --no-reread --no-tell-kernel -N "$part" "$disk" || exit 1
     partx -u --nr "$part" "$disk"
+    # Let udev take in the new size now, before /data is mounted: handled
+    # later, it briefly dropped the device, systemd unmounted /data, and the
+    # first boot ran without keeping settings (lost at the first update)
+    udevadm settle --timeout=15 || true
 }
 
 mount_dirs() {
+    rm -f "$ok"
+    # /data can be late, or was unmounted under us: mount it ourselves
+    tries=0
+    until mountpoint -q /data; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 15 ]; then
+            echo "/data isn't mounted: settings changed now won't survive an update" >&2
+            exit 1
+        fi
+        mount /data 2>/dev/null || sleep 1
+    done
+
+    failed=0
     for dir in $dirs; do
         name=$(echo "${dir#/}" | tr / -)
         mkdir -p "$overlay/$name/upper" "$overlay/$name/work" "$dir"
         mountpoint -q "$dir" && continue
         mount -t overlay "data-$name" \
             -o "lowerdir=$dir,upperdir=$overlay/$name/upper,workdir=$overlay/$name/work" "$dir" ||
-            echo "Can't keep $dir on /data: changes there won't survive an update" >&2
+            { echo "Can't keep $dir on /data: changes there won't survive an update" >&2; failed=1; }
     done
+    [ "$failed" -eq 0 ] || exit 1
+    touch "$ok"
 }
 
 case "$1" in

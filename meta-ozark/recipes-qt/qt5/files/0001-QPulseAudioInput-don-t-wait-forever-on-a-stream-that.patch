@@ -1,0 +1,45 @@
+From 7da19cf903535606803a9e2276b238af7e974630 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Thu, 5 Nov 2026 20:01:11 -0600
+Subject: [PATCH] QPulseAudioInput: don't wait forever on a stream that failed
+
+open() waited for PA_STREAM_READY without looking for PA_STREAM_FAILED,
+so a capture stream the server refuses ("Stream error: No such entity")
+blocked start() and its thread for good. Treat it as an open error.
+---
+ src/plugins/pulseaudio/qaudioinput_pulse.cpp | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/src/plugins/pulseaudio/qaudioinput_pulse.cpp b/src/plugins/pulseaudio/qaudioinput_pulse.cpp
+index b68b4af1b..7f78a39aa 100644
+--- a/src/plugins/pulseaudio/qaudioinput_pulse.cpp
++++ b/src/plugins/pulseaudio/qaudioinput_pulse.cpp
+@@ -327,8 +327,24 @@ bool QPulseAudioInput::open()
+         return false;
+     }
+ 
+-    while (pa_stream_get_state(m_stream) != PA_STREAM_READY)
++    pa_stream_state_t state;
++    while ((state = pa_stream_get_state(m_stream)) != PA_STREAM_READY) {
++        if (!PA_STREAM_IS_GOOD(state)) {
++            // A failed stream never becomes ready: without this check the
++            // caller's thread waits here forever.
++            pa_stream_set_state_callback(m_stream, nullptr, nullptr);
++            pa_stream_set_read_callback(m_stream, nullptr, nullptr);
++            pa_stream_set_underflow_callback(m_stream, nullptr, nullptr);
++            pa_stream_set_overflow_callback(m_stream, nullptr, nullptr);
++            pa_stream_unref(m_stream);
++            m_stream = 0;
++            pulseEngine->unlock();
++            setError(QAudio::OpenError);
++            setState(QAudio::StoppedState);
++            return false;
++        }
+         pa_threaded_mainloop_wait(pulseEngine->mainloop());
++    }
+ 
+     const pa_buffer_attr *actualBufferAttr = pa_stream_get_buffer_attr(m_stream);
+     m_periodSize = actualBufferAttr->fragsize;
+-- 
+2.43.0
+

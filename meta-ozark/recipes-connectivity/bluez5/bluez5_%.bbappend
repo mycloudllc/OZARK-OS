@@ -3,6 +3,7 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
 SRC_URI += " \
     file://ozark.conf \
     file://main.conf \
+    file://0001-device-connect-phones-over-BR-EDR.patch \
 "
 
 do_install:append() {

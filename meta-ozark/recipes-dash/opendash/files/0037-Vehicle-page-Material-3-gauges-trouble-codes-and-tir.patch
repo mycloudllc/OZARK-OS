@@ -1,0 +1,2284 @@
+From b4114961424b600b06228bcc783ba5881baa93f2 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Mon, 16 Nov 2026 22:40:26 -0600
+Subject: [PATCH] Vehicle page: Material 3 gauges, trouble codes and tires from
+ the vehicle service; Settings > Vehicle
+
+---
+ include/app/pages/vehicle.hpp           |  177 ++--
+ include/app/pages/vehicle_settings.hpp  |   90 ++
+ include/app/services/vehicle_client.hpp |   54 ++
+ src/app/pages/settings.cpp              |    2 +
+ src/app/pages/vehicle.cpp               | 1066 +++++++++++++++--------
+ src/app/pages/vehicle_settings.cpp      |  486 +++++++++++
+ src/app/services/vehicle_client.cpp     |  199 +++++
+ 7 files changed, 1662 insertions(+), 412 deletions(-)
+ create mode 100644 include/app/pages/vehicle_settings.hpp
+ create mode 100644 include/app/services/vehicle_client.hpp
+ create mode 100644 src/app/pages/vehicle_settings.cpp
+ create mode 100644 src/app/services/vehicle_client.cpp
+
+diff --git a/include/app/pages/vehicle.hpp b/include/app/pages/vehicle.hpp
+index 0401dcc..9154559 100644
+--- a/include/app/pages/vehicle.hpp
++++ b/include/app/pages/vehicle.hpp
+@@ -1,92 +1,157 @@
+ #pragma once
+ 
+-#include <QPair>
+-#include <QtWidgets>
+-#include <QPluginLoader>
+ #include <QMap>
+-
+-#include "canbus/socketcanbus.hpp"
+-#include "obd/message.hpp"
+-#include "obd/command.hpp"
+-#include "app/widgets/selector.hpp"
+-#include "app/widgets/dialog.hpp"
++#include <QPluginLoader>
++#include <QtWidgets>
+ 
+ #include "app/pages/page.hpp"
++#include "app/widgets/dialog.hpp"
++#include "app/widgets/selector.hpp"
+ 
+ class Arbiter;
++class Config;
++
++// The car, from the vehicle service (ozark-vehicled, through VehicleClient):
++// live gauges, trouble codes (read and clear), tire pressures, then any
++// vehicle plugin's tabs (TrailCommand). The service owns the OBD adapter, so
++// Dash no longer opens one itself; it's set up in Settings > Vehicle.
++// Also: switches to dark mode and night brightness while the headlights are
++// on, when the illumination input is wired and that's turned on.
++class VehiclePage : public QTabWidget, public Page {
++    Q_OBJECT
++
++   public:
++    VehiclePage(Arbiter &arbiter, QWidget *parent = nullptr);
++    void init() override;
++
++   private:
++    void get_plugins();
++    void load_plugin();
++    QWidget *dialog_body();
++    QWidget *si_units_row_widget();
++    void follow_headlights(bool on);
+ 
+-typedef std::function<double(double, bool)> obd_decoder_t;
+-typedef QPair<QString, QString> units_t;
++    QMap<QString, QFileInfo> plugins;
++    QPluginLoader *active_plugin;
++    Selector *plugin_selector;
++    Config *config;
++    bool headlights_applied = false;
++};
+ 
+-class Gauge : public QWidget {
++// Units for the vehicle pages: Dash's "SI units" switch
++namespace vehicle_units {
++QString speed(double kmh, bool si);
++QString temp(double c, bool si);
++QString pressure(double kpa, bool si);
++QString pressure_unit(bool si);
++}  // namespace vehicle_units
++
++// A Material 3 style dial on a rounded card: a 270° track with the value
++// arc in the theme's accent colour, a warning zone in red, the value and unit
++// in the middle and the name in the gap at the bottom. Big ones get ticks.
++class DialGauge : public QWidget {
+     Q_OBJECT
+ 
+    public:
+-    enum Orientation { BOTTOM, RIGHT };
++    DialGauge(Arbiter &arbiter, const QString &name, bool big, QWidget *parent = nullptr);
++    void set_range(double min, double max);
++    // Red from `warn_high` up (and below `warn_low`); NaN for none
++    void set_warning(double warn_low, double warn_high);
++    // Major ticks every `step`, labelled value / `label_divisor` (big dials)
++    void set_ticks(double step, double label_divisor = 1);
++    void set_unit(const QString &unit) { this->unit = unit; this->update(); }
++    // valid false: no reading (empty arc, "--")
++    void set_value(double value, const QString &text, bool valid = true);
++
++   protected:
++    void paintEvent(QPaintEvent *event) override;
++    QSize sizeHint() const override;
++
++   private:
++    Arbiter &arbiter;
++    QString name, unit, text = "--";
++    bool big;
++    bool valid = false;
++    double min = 0, max = 100, value = 0, shown = 0;
++    double warn_low, warn_high;
++    double tick_step = 0, tick_divisor = 1;
++    QVariantAnimation *animation;
++};
+ 
+-    Gauge(units_t units, QFont value_font, QFont unit_font, Orientation orientation, int rate,
+-          std::vector<Command> cmds, int precision, obd_decoder_t decoder, QWidget *parent = nullptr);
++class GaugesTab : public QWidget {
++    Q_OBJECT
+ 
+-    inline void start() { this->timer->start(this->rate); }
+-    inline void stop() { this->timer->stop(); }
+-    void can_callback(QByteArray payload);
++   public:
++    GaugesTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+    private:
+-    QString format_value(double value);
+-    QString null_value();
+-    QLabel *value_label;
++    void update_values();
++    void update_status();
++    void update_ranges();
++
++    Arbiter &arbiter;
++    QLabel *status;
++    QMap<QString, DialGauge *> gauges;  // by value key
++};
+ 
+-    obd_decoder_t decoder;
+-    std::vector<Command> cmds;
++// The hub's top-down vehicle or trailer drawing, in the theme's colours
++class VehicleOutline : public QWidget {
++    Q_OBJECT
++
++   public:
++    VehicleOutline(Arbiter &arbiter, bool trailer, QWidget *parent = nullptr);
+ 
+-    bool si;
+-    int rate;
+-    int precision;
+-    QTimer *timer;
++   protected:
++    void paintEvent(QPaintEvent *event) override;
++    QSize sizeHint() const override { return QSize(110, 220); }
+ 
+-   signals:
+-    void toggle_unit(bool si);
++   private:
++    Arbiter &arbiter;
++    bool trailer;
+ };
+ 
+-class VehiclePage : public QTabWidget, public Page {
++class DiagnosticsTab : public QWidget {
+     Q_OBJECT
+ 
+    public:
+-    VehiclePage(Arbiter &arbiter, QWidget *parent = nullptr);
+-
+-    void init() override;
++    DiagnosticsTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+    private:
+-    void get_plugins();
+-    void load_plugin();
+-    QWidget *dialog_body();
+-    QWidget *can_bus_toggle_row();
+-    QWidget *si_units_row_widget();
++    void show_result(const QVariantMap &result);
++    void update_status();
++    void confirm_clear();
+ 
+-    QMap<QString, int> capabilities;
+-    QMap<QString, QFileInfo> plugins;
+-    QStringList can_devices;
+-    QStringList serial_devices;
+-    QMap<QString, QString> paired_bt_devices;
+-    QPluginLoader *active_plugin;
+-    Selector *plugin_selector;
+-    Config *config;
++    Arbiter &arbiter;
++    QLabel *mil;
++    QLabel *info;
++    QLabel *message;
++    QPushButton *read;
++    QPushButton *clear;
++    QWidget *codes;
++    QVBoxLayout *codes_layout;
+ };
+ 
+-class DataTab : public QWidget {
++class TiresTab : public QWidget {
+     Q_OBJECT
+ 
+    public:
+-    DataTab(Arbiter &arbiter, QWidget *parent = nullptr);
++    TiresTab(Arbiter &arbiter, QWidget *parent = nullptr);
+ 
+    private:
+-    Arbiter &arbiter;
+-    QWidget *speedo_tach_widget();
+-    // QWidget *mileage_data_widget();
+-    QWidget *engine_data_widget();
+-    QWidget *coolant_temp_widget();
+-    QWidget *engine_load_widget();
++    struct Tile {
++        QFrame *frame;
++        QLabel *pressure;
++        QLabel *detail;
++    };
++    void update_tires();
++    void restyle();
++    Tile make_tile(const QString &name, QWidget *parent);
++    QFrame *card(const QString &title, QWidget *parent);
+ 
+-    std::vector<Gauge *> gauges;
++    Arbiter &arbiter;
++    QMap<QString, Tile> tiles;  // by position
++    QMap<QString, bool> alert;  // low or hot, by position
++    QList<QFrame *> cards;
++    QWidget *trailer;
++    QLabel *empty;
+ };
+-
+diff --git a/include/app/pages/vehicle_settings.hpp b/include/app/pages/vehicle_settings.hpp
+new file mode 100644
+index 0000000..2fed172
+--- /dev/null
++++ b/include/app/pages/vehicle_settings.hpp
+@@ -0,0 +1,90 @@
++#pragma once
++
++#include <QtWidgets>
++
++class Arbiter;
++class Selector;
++class Switch;
++class TextEntry;
++
++// Settings > Vehicle: the vehicle service (ozark-vehicled). How the OBD
++// adapter is connected (ELM327 on USB or Bluetooth, or the CAN bus), the
++// illumination input (a GPIO line, and what Dash does when the headlights
++// come on), tire sensors (Bluetooth LE ones put on wheels here, and the
++// TrailCommand hub's), and sending it all to the hub.
++class VehicleSettingsTab : public QWidget {
++    Q_OBJECT
++
++   public:
++    VehicleSettingsTab(Arbiter &arbiter, QWidget *parent = nullptr);
++
++   protected:
++    void showEvent(QShowEvent *event) override;
++    void hideEvent(QHideEvent *event) override;
++
++   private:
++    QWidget *settings_widget();
++    QWidget *row(const QString &label, QWidget *control, bool stretch = false);
++    QLabel *heading(const QString &text);
++    QLabel *note(const QString &text);
++
++    void refresh();
++    void show_config(const QVariantMap &config);
++    void show_status();
++    void show_mode();
++    void refresh_sensors();
++    void set(const QVariantMap &changes);
++
++    Arbiter &arbiter;
++    QVariantMap config;
++    bool loading = false;
++    QTimer sensor_timer;
++
++    // OBD
++    QLabel *obd_state;
++    Selector *link;
++    Selector *port;
++    QWidget *port_row;
++    Selector *bt;
++    QWidget *bt_row;
++    QStringList bt_addresses;
++    Selector *can;
++    QWidget *can_row;
++    Selector *bitrate;
++    QWidget *bitrate_row;
++
++    // Illumination
++    QLabel *illum_state;
++    Selector *line;
++    QStringList line_ids;
++    Switch *active_low;
++    QWidget *active_low_row;
++    Selector *bias;
++    QWidget *bias_row;
++    Switch *dark;
++    Switch *dim;
++    QSlider *night;
++    QWidget *night_row;
++
++    // Tires
++    QLabel *tpms_state;
++    Switch *ble;
++    Switch *hub_tires;
++    QSpinBox *low;
++    QSpinBox *hot;
++    QWidget *sensors;
++    QVBoxLayout *sensors_layout;
++    struct SensorRow {
++        QWidget *widget;
++        QLabel *label;
++        Selector *position;
++    };
++    QMap<QString, SensorRow> sensor_rows;  // by sensor address
++    QLabel *no_sensors;
++
++    // Hub
++    QLabel *hub_state;
++    Switch *forward;
++    TextEntry *hub_url;
++    TextEntry *hub_pin;
++};
+diff --git a/include/app/services/vehicle_client.hpp b/include/app/services/vehicle_client.hpp
+new file mode 100644
+index 0000000..15066e1
+--- /dev/null
++++ b/include/app/services/vehicle_client.hpp
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include <functional>
++
++#include <QtDBus>
++
++// The vehicle service (ozark-vehicled, org.ozark.Vehicle1): OBD-II values and
++// trouble codes, the illumination input, tire pressures. One per Dash, shared
++// by the Vehicle page and Settings > Vehicle. Keeps the latest of everything,
++// and picks it all up again when the service (re)starts.
++class VehicleClient : public QObject {
++    Q_OBJECT
++
++   public:
++    static VehicleClient &instance();
++
++    // Async call; `done` gets the reply's arguments, unwrapped from D-Bus
++    // types into plain QVariantMap/QVariantList (on error, never called)
++    void call(const QString &method, const QVariantList &args = {},
++              std::function<void(const QVariantList &)> done = nullptr);
++    void refresh();
++
++    QVariantMap status;    // GetStatus
++    QVariantMap values;    // GetValues
++    QVariantMap tires;     // GetTires
++    QVariantMap dtcs;      // the last trouble code read
++    bool illumination = false;
++    bool running = false;  // the service is there
++
++    // Nested D-Bus maps and lists arrive as QDBusArgument: make them plain
++    static QVariant unwrap(const QVariant &value);
++
++   signals:
++    void status_changed();
++    void values_changed();
++    void tires_changed();
++    void dtcs_read(const QVariantMap &result);
++    void dtcs_cleared(bool ok, const QString &message);
++    void illumination_changed(bool on);
++    void config_changed(const QVariantMap &config);
++
++   private slots:
++    void on_status(const QDBusMessage &message);
++    void on_values(const QDBusMessage &message);
++    void on_tires(const QDBusMessage &message);
++    void on_dtcs(const QDBusMessage &message);
++    void on_cleared(bool ok, const QString &message);
++    void on_illumination(bool on);
++    void on_config(const QDBusMessage &message);
++
++   private:
++    VehicleClient();
++    QDBusServiceWatcher *watcher;
++};
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index e86c228..4621ca1 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -18,6 +18,7 @@
+ #include "app/window.hpp"
+ #include "app/pages/settings.hpp"
+ #include "app/pages/lighting_settings.hpp"
++#include "app/pages/vehicle_settings.hpp"
+ #include "app/services/server.hpp"
+ #include "app/widgets/color_picker.hpp"
+ #include "app/widgets/dialog.hpp"
+@@ -41,6 +42,7 @@ void SettingsPage::init()
+     this->addTab(new PhoneSettingsTab(this->arbiter, this), "Phone");
+     this->addTab(new NetworkSettingsTab(this->arbiter, this), "Network");
+     this->addTab(new LightingSettingsTab(this->arbiter, this), "Lighting");
++    this->addTab(new VehicleSettingsTab(this->arbiter, this), "Vehicle");
+     this->addTab(new ActionsSettingsTab(this->arbiter), "Actions");
+     this->addTab(new UpdateSettingsTab(this->arbiter, this), "Update");
+     this->addTab(new AboutSettingsTab(this->arbiter), "About");
+diff --git a/src/app/pages/vehicle.cpp b/src/app/pages/vehicle.cpp
+index 1193568..00a003f 100644
+--- a/src/app/pages/vehicle.cpp
++++ b/src/app/pages/vehicle.cpp
+@@ -1,111 +1,62 @@
+-#include <QPalette>
+-#include <QSerialPortInfo>
+-
+-#include "app/config.hpp"
+ #include "app/pages/vehicle.hpp"
+-#include "app/window.hpp"
+-#include "obd/conversions.hpp"
+-#include "canbus/elm327.hpp"
+-#include "plugins/vehicle_plugin.hpp"
+-
+-Gauge::Gauge(units_t units, QFont value_font, QFont unit_font, Gauge::Orientation orientation, int rate,
+-             std::vector<Command> cmds, int precision, obd_decoder_t decoder, QWidget *parent)
+-: QWidget(parent)
+-{
+-    Config *config = Config::get_instance();
+-    ICANBus *bus;
+-    switch(config->get_vehicle_can_bus()){
+-        //ELM327 USB
+-        case ICANBus::VehicleBusType::ELM327USB:
+-            bus = (ICANBus *)elm327::get_usb_instance();
+-            break;
+-        //ELM327 Bluetooth
+-        case ICANBus::VehicleBusType::ELM327BT:
+-            bus = (ICANBus *)elm327::get_bt_instance();
+-            break;
+-        //SocketCAN
+-        case ICANBus::VehicleBusType::SocketCAN:
+-        default:
+-            bus = (ICANBus *)SocketCANBus::get_instance();
+-            break;
+-    }
+ 
+-    using namespace std::placeholders;
+-    std::function<void(QByteArray)> callback = std::bind(&Gauge::can_callback, this, std::placeholders::_1);
++#include <QSvgRenderer>
++#include <QtMath>
+ 
+-    bus->registerFrameHandler(cmds[0].frame.frameId()+0x9, callback);
+-    DASH_LOG(info)<<"[Gauges] Registered frame handler for id "<<(cmds[0].frame.frameId()+0x9);
+-
+-    this->si = config->get_si_units();
+-
+-    this->rate = rate;
+-    this->precision = precision;
+-
+-    this->cmds = cmds;
+-    this->decoder = decoder;
+-
+-    QBoxLayout *layout;
+-    if (orientation == BOTTOM)
+-        layout = new QVBoxLayout(this);
+-    else
+-        layout = new QHBoxLayout(this);
++#include "app/arbiter.hpp"
++#include "app/config.hpp"
++#include "app/services/vehicle_client.hpp"
++#include "app/widgets/switch.hpp"
++#include "canbus/socketcanbus.hpp"
++#include "plugins/vehicle_plugin.hpp"
+ 
+-    value_label = new QLabel(this->null_value(), this);
+-    value_label->setFont(value_font);
+-    value_label->setAlignment(Qt::AlignCenter);
++namespace {
++const QString kRed = "#d93025";
+ 
+-    QLabel *unit_label = new QLabel(this->si ? units.second : units.first, this);
+-    unit_label->setFont(unit_font);
+-    unit_label->setAlignment(Qt::AlignCenter);
++const QList<QPair<QString, QString>> kPositions = {
++    {"front_left", "Front left"},     {"front_right", "Front right"}, {"rear_left", "Rear left"},
++    {"rear_right", "Rear right"},     {"spare", "Spare"},             {"trailer_left", "Trailer left"},
++    {"trailer_right", "Trailer right"},
++};
+ 
+-    this->timer = new QTimer(this);
+-    connect(this->timer, &QTimer::timeout, [this, bus, cmds]() {
+-        for (auto cmd : cmds) {
+-            bus->writeFrame(cmd.frame);
+-        }
+-    });
++QString obd_hint(const QVariantMap &status)
++{
++    const QVariantMap obd = status.value("obd").toMap();
++    const QString state = obd.value("state").toString();
++    if (status.isEmpty())
++        return "The vehicle service isn't running";
++    if (state == "off")
++        return "OBD is off. Set up the adapter in Settings > Vehicle.";
++    if (state == "connected")
++        return QString();
++    return obd.value("message").toString();
++}
++}  // namespace
+ 
+-    connect(config, &Config::si_units_changed, [this, units, unit_label](bool si) {
+-        this->si = si;
+-        unit_label->setText(this->si ? units.second : units.first);
+-        value_label->setText(this->null_value());
+-    });
++/* ---------- units ---------- */
+ 
+-    layout->addStretch(6);
+-    layout->addWidget(value_label);
+-    layout->addStretch(1);
+-    layout->addWidget(unit_label);
+-    layout->addStretch(4);
++QString vehicle_units::speed(double kmh, bool si)
++{
++    return si ? QString("%1 km/h").arg(qRound(kmh)) : QString("%1 mph").arg(qRound(kmh * 0.621371));
+ }
+ 
+-void Gauge::can_callback(QByteArray payload){
+-    Response resp = Response(payload);
+-    for(auto cmd : cmds){
+-        if(cmd.frame.payload().at(2) == resp.PID){
+-            value_label->setText(this->format_value(this->decoder(cmd.decoder(resp), this->si)));
+-        }
+-    }
++QString vehicle_units::temp(double c, bool si)
++{
++    return si ? QString("%1 °C").arg(qRound(c)) : QString("%1 °F").arg(qRound(c * 9 / 5 + 32));
+ }
+ 
+-QString Gauge::format_value(double value)
++QString vehicle_units::pressure(double kpa, bool si)
+ {
+-    if (this->precision == 0)
+-        return QString::number((int)value);
+-    else
+-        return QString::number(value, 'f', this->precision);
++    return si ? QString::number(qRound(kpa)) : QString::number(kpa / 6.89476, 'f', 1);
+ }
+ 
+-QString Gauge::null_value()
++QString vehicle_units::pressure_unit(bool si)
+ {
+-    QString null_str = "-";
+-    if (this->precision > 0)
+-        null_str += ".-";
+-    else
+-        null_str += '-';
+-
+-    return null_str;
++    return si ? "kPa" : "psi";
+ }
+ 
++/* ---------- the page ---------- */
++
+ VehiclePage::VehiclePage(Arbiter &arbiter, QWidget *parent)
+     : QTabWidget(parent)
+     , Page(arbiter, "Vehicle", "directions_car", true, this)
+@@ -114,23 +65,14 @@ VehiclePage::VehiclePage(Arbiter &arbiter, QWidget *parent)
+ 
+ void VehiclePage::init()
+ {
+-    this->addTab(new DataTab(this->arbiter, this), "Data");
+     this->config = Config::get_instance();
++    // The vehicle service owns the adapter now: Dash must not open it too
++    if (this->config->get_vehicle_interface() != "disabled")
++        this->config->set_vehicle_interface("disabled");
+ 
+-    for (auto device : QCanBus::instance()->availableDevices("socketcan"))
+-        this->can_devices.append(device.name());
+-
+-    for (auto port : QSerialPortInfo::availablePorts())
+-        this->serial_devices.append(port.systemLocation());
+-
+-    connect(&this->arbiter.system().bluetooth, &Bluetooth::init, [this]{
+-        for (auto device: this->arbiter.system().bluetooth.get_devices())
+-        {
+-            if(device->isPaired()){
+-                this->paired_bt_devices.insert(device->name(), device->address());
+-            }
+-        }
+-    });
++    this->addTab(new GaugesTab(this->arbiter, this), "Gauges");
++    this->addTab(new DiagnosticsTab(this->arbiter, this), "Diagnostics");
++    this->addTab(new TiresTab(this->arbiter, this), "Tires");
+ 
+     this->get_plugins();
+     this->active_plugin = new QPluginLoader(this);
+@@ -147,124 +89,62 @@ void VehiclePage::init()
+     this->setCornerWidget(settings_button);
+ 
+     this->load_plugin();
++
++    VehicleClient &client = VehicleClient::instance();
++    connect(&client, &VehicleClient::illumination_changed, this, &VehiclePage::follow_headlights);
++    if (client.illumination)
++        this->follow_headlights(true);
+ }
+ 
+-QWidget *VehiclePage::dialog_body()
++// Headlights on: dark mode and/or night brightness (Settings > Vehicle);
++// off: back to what it was
++void VehiclePage::follow_headlights(bool on)
+ {
+-    QWidget *widget = new QWidget(this);
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-
+-    QStringList plugins = this->plugins.keys();
+-    this->plugin_selector = new Selector(plugins, this->config->get_vehicle_plugin(), this->arbiter.forge().font(14), this->arbiter, widget, "unloader");
+-
+-    layout->addWidget(this->si_units_row_widget(), 1);
+-    layout->addWidget(Session::Forge::br(), 1);
+-    layout->addWidget(this->can_bus_toggle_row(), 1);
+-
+-    QStringList devices;
+-    switch(config->get_vehicle_can_bus()){
+-        //ELM327 USB
+-        case ICANBus::VehicleBusType::ELM327USB:
+-            devices = this->serial_devices;
+-            break;
+-        //ELM327 Bluetooth
+-        case ICANBus::VehicleBusType::ELM327BT:
+-            
+-            break;
+-        //SocketCAN
+-        case ICANBus::VehicleBusType::SocketCAN:
+-        default:
+-            devices = this->can_devices;
+-            break;
+-    }
+-   
+-    Selector *interface_selector = new Selector(devices, this->config->get_vehicle_interface(), this->arbiter.forge().font(14), this->arbiter, widget, "disabled");
+-    interface_selector->setVisible((this->can_devices.size() > 0) || (this->serial_devices.size() > 0) || (this->paired_bt_devices.size() > 0));
+-    connect(interface_selector, &Selector::item_changed, [this](QString item){
+-        if(this->config->get_vehicle_can_bus()==ICANBus::VehicleBusType::ELM327BT && item != QString("disabled"))
+-        {
+-            this->config->set_vehicle_interface(this->paired_bt_devices[item]);
+-        }
+-        else
+-        {
+-            this->config->set_vehicle_interface(item);
++    QSettings &s = this->arbiter.settings();
++    const bool dark = s.value("Vehicle/headlights_dark", true).toBool();
++    const bool dim = s.value("Vehicle/headlights_dim", false).toBool();
++    const uint8_t night = uint8_t(s.value("Vehicle/night_brightness", 76).toUInt());
++    if (on == this->headlights_applied)
++        return;
++    this->headlights_applied = on;
++    if (on) {
++        if (dark) {
++            // Started with the lights on: what's showing is already the night look
++            if (this->arbiter.theme().mode != Session::Theme::Dark)
++                s.setValue("Vehicle/day_mode", Session::Theme::to_str(this->arbiter.theme().mode));
++            this->arbiter.set_mode(Session::Theme::Dark);
+         }
+-    });
+-    connect(this->config, &Config::vehicle_can_bus_changed, [this, interface_selector](int state){
+-        switch(state){
+-            //ELM327 USB
+-            case ICANBus::VehicleBusType::ELM327USB:
+-                interface_selector->set_options(this->serial_devices);
+-                break;
+-            //ELM327 Bluetooth
+-            case ICANBus::VehicleBusType::ELM327BT:
+-                interface_selector->set_options(this->paired_bt_devices.keys());
+-                break;
+-            //SocketCAN
+-            case ICANBus::VehicleBusType::SocketCAN:
+-            default:
+-                interface_selector->set_options(this->can_devices);
+-                break;
++        if (dim) {
++            if (this->arbiter.system().brightness.value != night)
++                s.setValue("Vehicle/day_brightness", this->arbiter.system().brightness.value);
++            this->arbiter.set_brightness(night);
+         }
+-    });
+-    connect(&this->arbiter.system().bluetooth, &Bluetooth::init, [this, interface_selector]{
+-        interface_selector->setVisible((this->can_devices.size() > 0) || (this->serial_devices.size() > 0) || (this->paired_bt_devices.size() > 0));
+-        if(this->config->get_vehicle_can_bus()==ICANBus::VehicleBusType::ELM327BT){
+-            QString current = this->config->get_vehicle_interface();
+-            interface_selector->set_options(this->paired_bt_devices.keys());
+-            if(current != "disabled")
+-                interface_selector->set_current(this->paired_bt_devices.key(current));
+-
+-        }
+-    });
+-    layout->addWidget(interface_selector, 1);
+-
+-    layout->addWidget(Session::Forge::br(), 1);
+-    layout->addWidget(this->plugin_selector, 1);
+-
+-    return widget;
++    } else {
++        if (dark)
++            this->arbiter.set_mode(Session::Theme::from_str(s.value("Vehicle/day_mode", "Light").toString()));
++        if (dim && s.contains("Vehicle/day_brightness"))
++            this->arbiter.set_brightness(uint8_t(s.value("Vehicle/day_brightness").toUInt()));
++    }
+ }
+ 
+-QWidget *VehiclePage::can_bus_toggle_row()
++QWidget *VehiclePage::dialog_body()
+ {
+     QWidget *widget = new QWidget(this);
+-    QHBoxLayout *layout = new QHBoxLayout(widget);
+-
+-    QLabel *label = new QLabel("Interface", widget);
+-    layout->addWidget(label, 1);
+-
+-    QGroupBox *group = new QGroupBox();
+-    QVBoxLayout *group_layout = new QVBoxLayout(group);
+-
+-    ICANBus::VehicleBusType can_bus_selected = this->config->get_vehicle_can_bus();
+-    QRadioButton *socketcan_button = new QRadioButton("SocketCAN", group);
+-    socketcan_button->setChecked(can_bus_selected==ICANBus::VehicleBusType::SocketCAN);
+-    socketcan_button->setEnabled(this->can_devices.size() > 0);
+-    connect(socketcan_button, &QRadioButton::clicked, [config = this->config]{
+-        config->set_vehicle_can_bus(ICANBus::VehicleBusType::SocketCAN);
+-    });
+-    group_layout->addWidget(socketcan_button);
++    QVBoxLayout *layout = new QVBoxLayout(widget);
+ 
+-    QRadioButton *elm_usb_button = new QRadioButton("ELM327 (USB)", group);
+-    elm_usb_button->setChecked(can_bus_selected==ICANBus::VehicleBusType::ELM327USB);
+-    elm_usb_button->setEnabled(this->serial_devices.size() > 0);
+-    connect(elm_usb_button, &QRadioButton::clicked, [config = this->config]{
+-        config->set_vehicle_can_bus(ICANBus::VehicleBusType::ELM327USB);
+-    });
+-    group_layout->addWidget(elm_usb_button);
++    layout->addWidget(this->si_units_row_widget(), 1);
++    layout->addWidget(Session::Forge::br(), 1);
+ 
+-    QRadioButton *elm_bt_button = new QRadioButton("ELM327 (Bluetooth)", group);
+-    elm_bt_button->setChecked(can_bus_selected==ICANBus::VehicleBusType::ELM327BT);
+-    elm_bt_button->setEnabled(false);
+-    connect(elm_bt_button, &QRadioButton::clicked, [config = this->config]{
+-        config->set_vehicle_can_bus(ICANBus::VehicleBusType::ELM327BT);
+-    });
+-    connect(&this->arbiter.system().bluetooth, &Bluetooth::init, [this, elm_bt_button]{
+-            elm_bt_button->setEnabled(this->paired_bt_devices.size() > 0);
+-    });
+-    group_layout->addWidget(elm_bt_button);
++    QLabel *hint = new QLabel("The OBD adapter, illumination input and tire sensors are set up in Settings > Vehicle.",
++                              widget);
++    hint->setWordWrap(true);
++    layout->addWidget(hint, 1);
++    layout->addWidget(Session::Forge::br(), 1);
+ 
+-    layout->addWidget(group, 1, Qt::AlignHCenter);
++    QStringList plugins = this->plugins.keys();
++    this->plugin_selector = new Selector(plugins, this->config->get_vehicle_plugin(), this->arbiter.forge().font(14),
++                                         this->arbiter, widget, "unloader");
++    layout->addWidget(this->plugin_selector, 1);
+ 
+     return widget;
+ }
+@@ -305,21 +185,8 @@ void VehiclePage::load_plugin()
+ 
+         if (VehiclePlugin *plugin = qobject_cast<VehiclePlugin *>(this->active_plugin->instance())) {
+             plugin->dashize(&this->arbiter);
+-            switch(config->get_vehicle_can_bus()){
+-                //ELM327 USB
+-                case ICANBus::VehicleBusType::ELM327USB:
+-                    plugin->init((ICANBus *)elm327::get_usb_instance());
+-                    break;
+-                //ELM327 Bluetooth
+-                case ICANBus::VehicleBusType::ELM327BT:
+-                    plugin->init((ICANBus *)elm327::get_bt_instance());
+-                    break;
+-                //SocketCAN
+-                case ICANBus::VehicleBusType::SocketCAN:
+-                default:
+-                    plugin->init((ICANBus *)SocketCANBus::get_instance());
+-                    break;
+-            }
++            // Plugins still get a bus; it stays closed (interface "disabled")
++            plugin->init((ICANBus *)SocketCANBus::get_instance());
+             for (QWidget *tab : plugin->widgets())
+                 this->addTab(tab, tab->objectName());
+         }
+@@ -327,172 +194,659 @@ void VehiclePage::load_plugin()
+     this->config->set_vehicle_plugin(key);
+ }
+ 
+-DataTab::DataTab(Arbiter &arbiter, QWidget *parent)
+-    : QWidget(parent)
+-    , arbiter(arbiter)
++/* ---------- Material 3 colours ---------- */
++
++namespace {
++struct Md3 {
++    QColor surface, surface_high, on_surface, on_variant, track, accent, error;
++};
++
++// Neutral surfaces that sit on Dash's own backgrounds, the theme colour as
++// the accent (or Material's baseline blue when the theme colour is plain
++// black or white)
++Md3 md3(Arbiter &arbiter)
+ {
+-    QHBoxLayout *layout = new QHBoxLayout(this);
++    const bool dark = arbiter.theme().mode == Session::Theme::Dark;
++    Md3 c;
++    c.surface = dark ? QColor("#1f1f22") : QColor("#ffffff");
++    c.surface_high = dark ? QColor("#2a2a2e") : QColor("#f1f1f4");
++    c.on_surface = dark ? QColor("#e6e1e5") : QColor("#1c1b1f");
++    c.on_variant = dark ? QColor("#a8a4ad") : QColor("#5f5b66");
++    c.track = dark ? QColor("#38373d") : QColor("#e2e1e6");
++    c.error = dark ? QColor("#f2b8b5") : QColor("#b3261e");
++    c.accent = arbiter.theme().color();
++    if (c.accent.hsvSaturation() < 40)
++        c.accent = dark ? QColor("#a8c7fa") : QColor("#0b57d0");
++    return c;
++}
+ 
+-    QWidget *driving_data = this->speedo_tach_widget();
+-    layout->addWidget(driving_data);
+-    layout->addWidget(Session::Forge::br(true));
++QString css(const QColor &c)
++{
++    return c.name(QColor::HexArgb);
++}
++}  // namespace
+ 
+-    QWidget *engine_data = this->engine_data_widget();
+-    layout->addWidget(engine_data);
++/* ---------- a dial ---------- */
+ 
+-    QSizePolicy sp_left(QSizePolicy::Preferred, QSizePolicy::Preferred);
+-    sp_left.setHorizontalStretch(5);
+-    driving_data->setSizePolicy(sp_left);
+-    QSizePolicy sp_right(QSizePolicy::Preferred, QSizePolicy::Preferred);
+-    sp_right.setHorizontalStretch(2);
+-    engine_data->setSizePolicy(sp_right);
+-    for (auto &gauge : this->gauges)
+-        gauge->start();
++DialGauge::DialGauge(Arbiter &arbiter, const QString &name, bool big, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++    , name(name)
++    , big(big)
++    , warn_low(qQNaN())
++    , warn_high(qQNaN())
++{
++    this->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
++    // The needle glides to new readings instead of jumping
++    this->animation = new QVariantAnimation(this);
++    this->animation->setDuration(350);
++    this->animation->setEasingCurve(QEasingCurve::OutCubic);
++    connect(this->animation, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
++        this->shown = v.toDouble();
++        this->update();
++    });
++    connect(&arbiter, &Arbiter::mode_changed, this, [this] { this->update(); });
++    connect(&arbiter, &Arbiter::color_changed, this, [this] { this->update(); });
+ }
+ 
+-QWidget *DataTab::speedo_tach_widget()
++QSize DialGauge::sizeHint() const
+ {
+-    QWidget *widget = new QWidget(this);
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
++    return this->big ? QSize(300, 300) : QSize(150, 140);
++}
+ 
+-    layout->addStretch(3);
++void DialGauge::set_range(double min, double max)
++{
++    this->min = min;
++    this->max = max;
++    this->update();
++}
+ 
+-    QFont speed_value_font(this->arbiter.forge().font(36, true));
++void DialGauge::set_warning(double warn_low, double warn_high)
++{
++    this->warn_low = warn_low;
++    this->warn_high = warn_high;
++    this->update();
++}
+ 
+-    QFont speed_unit_font(this->arbiter.forge().font(16));
+-    speed_unit_font.setWeight(QFont::Light);
+-    speed_unit_font.setItalic(true);
++void DialGauge::set_ticks(double step, double label_divisor)
++{
++    this->tick_step = step;
++    this->tick_divisor = label_divisor;
++    this->update();
++}
+ 
+-    Gauge *speed = new Gauge({"mph", "km/h"}, speed_value_font, speed_unit_font,
+-                             Gauge::BOTTOM, 100, {cmds.SPEED}, 0,
+-                             [](double x, bool si) { return si ? x : kph_to_mph(x); }, widget);
+-    layout->addWidget(speed);
+-    this->gauges.push_back(speed);
++void DialGauge::set_value(double value, const QString &text, bool valid)
++{
++    this->text = valid ? text : QString("--");
++    if (!valid) {
++        this->valid = false;
++        this->animation->stop();
++        this->shown = this->min;
++        this->update();
++        return;
++    }
++    const double from = this->valid ? this->shown : this->min;
++    this->valid = true;
++    this->value = value;
++    this->animation->stop();
++    this->animation->setStartValue(from);
++    this->animation->setEndValue(value);
++    this->animation->start();
++}
+ 
+-    layout->addStretch(2);
++void DialGauge::paintEvent(QPaintEvent *)
++{
++    QPainter p(this);
++    p.setRenderHint(QPainter::Antialiasing);
++    const Md3 c = md3(this->arbiter);
++
++    // The card
++    const QRectF card = QRectF(this->rect()).adjusted(4, 4, -4, -4);
++    p.setPen(Qt::NoPen);
++    p.setBrush(c.surface);
++    p.drawRoundedRect(card, 20, 20);
++
++    // The dial: 270°, open at the bottom
++    const double side = qMin(card.width(), card.height()) - (this->big ? 28 : 18);
++    if (side < 40)
++        return;
++    const QPointF center(card.center().x(), card.center().y() + side * 0.05);
++    const double stroke = side * (this->big ? 0.065 : 0.085);
++    const QRectF arc(center.x() - side / 2 + stroke / 2, center.y() - side / 2 + stroke / 2, side - stroke,
++                     side - stroke);
++    const double radius = arc.width() / 2;
++    const double start = 225, sweep = -270;
++    auto frac = [this](double v) { return qBound(0.0, (v - this->min) / (this->max - this->min), 1.0); };
++    auto angle16 = [](double degrees) { return int(qRound(degrees * 16)); };
++
++    p.setBrush(Qt::NoBrush);
++    p.setPen(QPen(c.track, stroke, Qt::SolidLine, Qt::RoundCap));
++    p.drawArc(arc, angle16(start), angle16(sweep));
++
++    // Warning zones, faint, on the track
++    QColor zone = c.error;
++    zone.setAlphaF(0.35);
++    p.setPen(QPen(zone, stroke, Qt::SolidLine, Qt::FlatCap));
++    if (!qIsNaN(this->warn_high) && this->warn_high < this->max) {
++        const double f = frac(this->warn_high);
++        p.drawArc(arc, angle16(start + sweep * f), angle16(sweep * (1 - f)));
++    }
++    if (!qIsNaN(this->warn_low) && this->warn_low > this->min)
++        p.drawArc(arc, angle16(start), angle16(sweep * frac(this->warn_low)));
++
++    // Ticks and their numbers (big dials)
++    if (this->tick_step > 0) {
++        QFont tick_font = this->arbiter.forge().font(10);
++        tick_font.setPixelSize(qMax(9, int(side * 0.052)));
++        p.setFont(tick_font);
++        const double outer = radius - stroke * 0.9, inner = outer - stroke * 0.45;
++        for (double v = this->min; v <= this->max + this->tick_step / 1000; v += this->tick_step) {
++            const double a = qDegreesToRadians(start + sweep * frac(v));
++            const QPointF dir(qCos(a), -qSin(a));
++            p.setPen(QPen(c.on_variant, qMax(1.5, side * 0.006), Qt::SolidLine, Qt::RoundCap));
++            p.drawLine(center + dir * outer, center + dir * inner);
++            const QPointF at = center + dir * (inner - side * 0.06);
++            const QRectF box(at.x() - side * 0.06, at.y() - side * 0.035, side * 0.12, side * 0.07);
++            p.drawText(box, Qt::AlignCenter, QString::number(v / this->tick_divisor));
++        }
++    }
+ 
+-    QFont tach_value_font(this->arbiter.forge().font(24, true));
++    // The value
++    const bool warn = this->valid && ((!qIsNaN(this->warn_high) && this->value >= this->warn_high) ||
++                                      (!qIsNaN(this->warn_low) && this->value <= this->warn_low));
++    if (this->valid && frac(this->shown) > 0.002) {
++        const QColor fill = warn ? c.error : c.accent;
++        p.setPen(QPen(fill, stroke, Qt::SolidLine, Qt::RoundCap));
++        p.drawArc(arc, angle16(start), angle16(sweep * frac(this->shown)));
++        // A small dot riding the end of the arc
++        const double a = qDegreesToRadians(start + sweep * frac(this->shown));
++        p.setPen(Qt::NoPen);
++        p.setBrush(c.surface);
++        p.drawEllipse(center + QPointF(qCos(a), -qSin(a)) * radius, stroke * 0.22, stroke * 0.22);
++    }
+ 
+-    QFont tach_unit_font(this->arbiter.forge().font(12));
+-    tach_unit_font.setWeight(QFont::Light);
+-    tach_unit_font.setItalic(true);
++    // Text: the reading, its unit, and the name in the gap at the bottom
++    QFont value_font = this->arbiter.forge().font(10, true);
++    value_font.setPixelSize(int(side * (this->big ? 0.19 : 0.22)));
++    value_font.setBold(true);
++    p.setFont(value_font);
++    p.setPen(warn ? c.error : (this->valid ? c.on_surface : c.on_variant));
++    const QRectF value_box(center.x() - radius, center.y() - side * 0.15, radius * 2, side * 0.24);
++    p.drawText(value_box, Qt::AlignCenter, this->text);
++
++    QFont small = this->arbiter.forge().font(10);
++    small.setPixelSize(qMax(9, int(side * (this->big ? 0.065 : 0.09))));
++    p.setFont(small);
++    p.setPen(c.on_variant);
++    p.drawText(QRectF(center.x() - radius, value_box.bottom() - side * 0.01, radius * 2, side * 0.1), Qt::AlignCenter,
++               this->unit);
++
++    QFont label = small;
++    label.setWeight(QFont::DemiBold);
++    p.setFont(label);
++    p.setPen(c.on_surface);
++    p.drawText(QRectF(center.x() - radius, center.y() + radius * 0.62, radius * 2, side * 0.16), Qt::AlignCenter,
++               this->name);
++}
+ 
+-    Gauge *rpm = new Gauge({"x1000rpm", "x1000rpm"}, tach_value_font,
+-                           tach_unit_font, Gauge::BOTTOM, 100, {cmds.RPM}, 1,
+-                           [](double x, bool _) { return x / 1000.0; }, widget);
+-    layout->addWidget(rpm);
+-    this->gauges.push_back(rpm);
++/* ---------- gauges ---------- */
+ 
+-    layout->addStretch(1);
++GaugesTab::GaugesTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    auto grid = new QGridLayout(this);
++    grid->setContentsMargins(6, 6, 6, 6);
++    grid->setSpacing(4);
++    this->status = new QLabel(this);
++    this->status->setWordWrap(true);
++    this->status->setAlignment(Qt::AlignCenter);
++    grid->addWidget(this->status, 0, 0, 1, 4);
++
++    this->gauges["speed_kmh"] = new DialGauge(arbiter, "Speed", true, this);
++    this->gauges["rpm"] = new DialGauge(arbiter, "Engine", true, this);
++    grid->addWidget(this->gauges["speed_kmh"], 1, 0, 3, 1);
++    grid->addWidget(this->gauges["rpm"], 1, 1, 3, 1);
++
++    const QList<QPair<QString, QString>> small = {
++        {"coolant_c", "Coolant"}, {"oil_c", "Oil"},     {"intake_c", "Intake"},
++        {"voltage_v", "Battery"}, {"fuel_pct", "Fuel"}, {"load_pct", "Load"},
++    };
++    int i = 0;
++    for (const auto &g : small) {
++        this->gauges[g.first] = new DialGauge(arbiter, g.second, false, this);
++        grid->addWidget(this->gauges[g.first], 1 + i / 2, 2 + i % 2);
++        i++;
++    }
++    grid->setColumnStretch(0, 3);
++    grid->setColumnStretch(1, 3);
++    grid->setColumnStretch(2, 2);
++    grid->setColumnStretch(3, 2);
++    for (int r = 1; r <= 3; r++)
++        grid->setRowStretch(r, 1);
++
++    VehicleClient &client = VehicleClient::instance();
++    connect(&client, &VehicleClient::values_changed, this, &GaugesTab::update_values);
++    connect(&client, &VehicleClient::status_changed, this, &GaugesTab::update_status);
++    connect(Config::get_instance(), &Config::si_units_changed, this, [this](bool) {
++        this->update_ranges();
++        this->update_values();
++    });
++    this->update_ranges();
++    this->update_status();
++    this->update_values();
++}
+ 
+-    return widget;
++void GaugesTab::update_ranges()
++{
++    const bool si = Config::get_instance()->get_si_units();
++    const double nan = qQNaN();
++    auto f = [si](double c) { return si ? c : c * 9 / 5 + 32; };
++
++    DialGauge *speed = this->gauges["speed_kmh"];
++    speed->set_range(0, si ? 200 : 120);
++    speed->set_ticks(si ? 20 : 10);
++    speed->set_unit(si ? "km/h" : "mph");
++
++    DialGauge *rpm = this->gauges["rpm"];
++    rpm->set_range(0, 8000);
++    rpm->set_ticks(1000, 1000);
++    rpm->set_warning(nan, 6500);
++    rpm->set_unit("rpm");
++
++    const QString deg = si ? "°C" : "°F";
++    this->gauges["coolant_c"]->set_range(f(40), f(130));
++    this->gauges["coolant_c"]->set_warning(nan, f(110));
++    this->gauges["oil_c"]->set_range(f(40), f(150));
++    this->gauges["oil_c"]->set_warning(nan, f(130));
++    this->gauges["intake_c"]->set_range(f(-20), f(80));
++    for (const char *k : {"coolant_c", "oil_c", "intake_c"})
++        this->gauges[k]->set_unit(deg);
++
++    this->gauges["voltage_v"]->set_range(10, 16);
++    this->gauges["voltage_v"]->set_warning(11.8, 15.2);
++    this->gauges["voltage_v"]->set_unit("V");
++    this->gauges["fuel_pct"]->set_range(0, 100);
++    this->gauges["fuel_pct"]->set_warning(15, nan);
++    this->gauges["fuel_pct"]->set_unit("%");
++    this->gauges["load_pct"]->set_range(0, 100);
++    this->gauges["load_pct"]->set_unit("%");
+ }
+ 
+-/*  socketcan/elm327 rewrite right now only has support for one PID per gauge, so we can't calculate milage at this point.
+-    This is because gauges act more as event handlers now for each PID. 
+-    Multi-PID gauges could feasibly be reimplemented if there was a helper method that stored received values, and only calls
+-    the gauge update once all values have been updated since last gauge update.
+-
+-*/
+-
+-// QWidget *DataTab::mileage_data_widget()
+-// {
+-//     QWidget *widget = new QWidget(this);	
+-//	   QHBoxLayout *layout = new QHBoxLayout(widget);	
+-//		
+-//	   QFont value_font(Theme::font_36);	
+-//	   value_font.setFamily("Titillium Web");	
+-//		
+-//	   QFont unit_font(Theme::font_14);	
+-//	   unit_font.setWeight(QFont::Light);	
+-//	   unit_font.setItalic(true);
+-//
+-//     Gauge *mileage = new Gauge({"mpg", "km/L"}, value_font, unit_font,
+-//                                Gauge::BOTTOM, 100, {cmds.SPEED, cmds.MAF}, 1,
+-//                                [](std::vector<double> x, bool si) {
+-//                                    return (si ? x[0] : kph_to_mph(x[0])) / (si ? gps_to_lph(x[1]) : gps_to_gph(x[1]));
+-//                                },
+-//                                widget);
+-//     layout->addWidget(mileage);
+-//     this->gauges.push_back(mileage);
+-
+-//     return widget;
+-// }
+-
+-QWidget *DataTab::engine_data_widget()
++void GaugesTab::update_status()
+ {
+-    QWidget *widget = new QWidget(this);
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
+-    layout->setSpacing(0);
++    const QString hint = obd_hint(VehicleClient::instance().status);
++    this->status->setText(hint);
++    this->status->setVisible(!hint.isEmpty());
++}
+ 
+-    layout->addStretch();
+-    layout->addWidget(this->coolant_temp_widget());
+-    layout->addStretch();
++void GaugesTab::update_values()
++{
++    const QVariantMap v = VehicleClient::instance().values;
++    const bool si = Config::get_instance()->get_si_units();
++    for (auto it = this->gauges.begin(); it != this->gauges.end(); ++it) {
++        const QString &key = it.key();
++        if (!v.contains(key)) {
++            it.value()->set_value(0, QString(), false);
++            continue;
++        }
++        double x = v.value(key).toDouble();
++        QString text;
++        if (key == "speed_kmh") {
++            x = si ? x : x * 0.621371;
++            text = QString::number(qRound(x));
++        } else if (key == "rpm") {
++            text = QLocale().toString(qRound(x));
++        } else if (key.endsWith("_c")) {
++            x = si ? x : x * 9 / 5 + 32;
++            text = QString::number(qRound(x));
++        } else if (key == "voltage_v") {
++            text = QString::number(x, 'f', 1);
++        } else {
++            text = QString::number(qRound(x));
++        }
++        it.value()->set_value(x, text);
++    }
++}
++
++/* ---------- trouble codes ---------- */
++
++DiagnosticsTab::DiagnosticsTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    auto layout = new QVBoxLayout(this);
++
++    auto top = new QHBoxLayout();
++    this->mil = new QLabel("Check engine light: unknown", this);
++    this->mil->setFont(arbiter.forge().font(16, true));
++    top->addWidget(this->mil, 1);
++    this->read = new QPushButton("read codes", this);
++    this->read->setFlat(true);
++    top->addWidget(this->read);
++    this->clear = new QPushButton("clear codes", this);
++    this->clear->setFlat(true);
++    top->addWidget(this->clear);
++    layout->addLayout(top);
++
++    this->info = new QLabel(this);
++    this->info->setWordWrap(true);
++    layout->addWidget(this->info);
++    this->message = new QLabel(this);
++    this->message->setWordWrap(true);
++    layout->addWidget(this->message);
+     layout->addWidget(Session::Forge::br());
+-    layout->addStretch();
+-    layout->addWidget(this->engine_load_widget());
+-    layout->addStretch();
+ 
+-    return widget;
++    auto scroll = new QScrollArea(this);
++    Session::Forge::to_touch_scroller(scroll);
++    scroll->setWidgetResizable(true);
++    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    this->codes = new QWidget(scroll);
++    this->codes_layout = new QVBoxLayout(this->codes);
++    this->codes_layout->addStretch();
++    scroll->setWidget(this->codes);
++    layout->addWidget(scroll, 1);
++
++    VehicleClient &client = VehicleClient::instance();
++    connect(this->read, &QPushButton::clicked, this, [this, &client] {
++        this->message->setText("Reading...");
++        client.call("ReadDtcs");
++    });
++    connect(this->clear, &QPushButton::clicked, this, &DiagnosticsTab::confirm_clear);
++    connect(&client, &VehicleClient::dtcs_read, this, &DiagnosticsTab::show_result);
++    connect(&client, &VehicleClient::dtcs_cleared, this, [this](bool ok, const QString &text) {
++        this->message->setText(ok ? text + ". Reading again..." : text);
++    });
++    connect(&client, &VehicleClient::status_changed, this, &DiagnosticsTab::update_status);
++    this->update_status();
++    if (!client.dtcs.isEmpty())
++        this->show_result(client.dtcs);
+ }
+ 
+-QWidget *DataTab::coolant_temp_widget()
++void DiagnosticsTab::update_status()
+ {
+-    QWidget *widget = new QWidget(this);
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
+-    layout->setSpacing(0);
++    const QVariantMap status = VehicleClient::instance().status;
++    const QVariantMap obd = status.value("obd").toMap();
++    const bool connected = obd.value("state").toString() == "connected";
++    this->read->setEnabled(connected);
++    this->clear->setEnabled(connected);
++    QStringList lines;
++    const QString hint = obd_hint(status);
++    if (!hint.isEmpty())
++        lines << hint;
++    if (!obd.value("vin").toString().isEmpty())
++        lines << "VIN " + obd.value("vin").toString();
++    if (!obd.value("protocol").toString().isEmpty())
++        lines << obd.value("protocol").toString();
++    this->info->setText(lines.join("\n"));
++}
+ 
+-    QFont value_font(this->arbiter.forge().font(16, true));
++void DiagnosticsTab::show_result(const QVariantMap &result)
++{
++    this->message->setText(result.value("message").toString());
++    if (!result.value("ok").toBool())
++        return;
++
++    const bool on = result.value("mil").toBool();
++    this->mil->setText(on ? "Check engine light: ON" : "Check engine light: off");
++    this->mil->setStyleSheet(on ? QString("color: %1;").arg(kRed) : QString());
++
++    // Rebuild the list
++    while (this->codes_layout->count() > 1) {
++        QLayoutItem *item = this->codes_layout->takeAt(0);
++        delete item->widget();
++        delete item;
++    }
++    int row = 0;
++    const QList<QPair<QString, QString>> lists = {
++        {"stored", "Stored"},
++        {"pending", "Pending (seen once, not confirmed yet)"},
++        {"permanent", "Permanent (clear themselves once the car re-tests)"},
++    };
++    for (const auto &list : lists) {
++        const QVariantList items = result.value(list.first).toList();
++        if (items.isEmpty())
++            continue;
++        auto heading = new QLabel(list.second, this->codes);
++        QFont font = heading->font();
++        font.setBold(true);
++        heading->setFont(font);
++        this->codes_layout->insertWidget(row++, heading);
++        for (const QVariant &v : items) {
++            const QVariantMap c = v.toMap();
++            auto label = new QLabel(
++                QString("<b>%1</b>&nbsp;&nbsp;%2").arg(c.value("code").toString(), c.value("description").toString().toHtmlEscaped()),
++                this->codes);
++            label->setWordWrap(true);
++            this->codes_layout->insertWidget(row++, label);
++        }
++    }
++    if (row == 0) {
++        auto none = new QLabel("No trouble codes.", this->codes);
++        this->codes_layout->insertWidget(0, none);
++    }
++}
+ 
+-    QFont unit_font(this->arbiter.forge().font(12));
+-    unit_font.setWeight(QFont::Light);
+-    unit_font.setItalic(true);
++void DiagnosticsTab::confirm_clear()
++{
++    auto dialog = new Dialog(this->arbiter, false, this->window());
++    dialog->set_title("Clear trouble codes?");
++    auto body = new QLabel(
++        "This turns the check-engine light off and erases stored and pending codes. It also resets the "
++        "car's readiness monitors, so it may not pass an emissions test until it has been driven for a while. "
++        "If the fault is still there, the code comes back.\n\nTurn the engine off and leave the ignition on.");
++    body->setWordWrap(true);
++    dialog->set_body(body);
++    auto button = new QPushButton("clear");
++    connect(button, &QPushButton::clicked, this, [this, dialog] {
++        this->message->setText("Clearing...");
++        VehicleClient::instance().call("ClearDtcs");
++        dialog->close();
++    });
++    dialog->set_button(button);
++    dialog->open();
++}
+ 
+-    Gauge *coolant_temp = new Gauge(
+-        {"°F", "°C"}, value_font, unit_font, Gauge::RIGHT, 5000,
+-        {cmds.COOLANT_TEMP}, 1, [](double x, bool si) { return si ? x : c_to_f(x); }, widget);
+-    layout->addWidget(coolant_temp);
+-    this->gauges.push_back(coolant_temp);
++/* ---------- the vehicle drawing ---------- */
++
++namespace {
++// The hub's drawings (web/index.html), with the styling written out: Qt's
++// SVG renderer doesn't do CSS classes. %1 = outline colour, %2 = tires.
++const char *kVehicleSvg = R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 160">
++<g fill="none" stroke="%1" stroke-width="1.3" stroke-linejoin="round">
++<rect x="16" y="10" width="48" height="136" rx="8"/><path d="M30 10v5M35 10v5M40 10v5M45 10v5M50 10v5"/>
++<circle cx="22.5" cy="18" r="3"/><circle cx="57.5" cy="18" r="3"/><rect x="23" y="24" width="34" height="26" rx="3"/>
++<path d="M16 26h-5a3 3 0 0 0-3 3v24a3 3 0 0 0 3 3h5M64 26h5a3 3 0 0 1 3 3v24a3 3 0 0 1-3 3h-5M16 106h-5a3 3 0 0 0-3 3v24a3 3 0 0 0 3 3h5M64 106h5a3 3 0 0 1 3 3v24a3 3 0 0 1-3 3h-5"/>
++<rect x="20" y="50" width="40" height="8" rx="1.5"/><rect x="10" y="58" width="5" height="4" rx="1"/><rect x="65" y="58" width="5" height="4" rx="1"/>
++<rect x="18" y="62" width="44" height="64" rx="5"/><rect x="21" y="74" width="17" height="16" rx="4"/><rect x="42" y="74" width="17" height="16" rx="4"/>
++<circle cx="29.5" cy="68" r="3.5"/><rect x="21" y="100" width="38" height="14" rx="4"/><path d="M19 140h3M58 140h3"/><rect x="27" y="148" width="26" height="9" rx="4"/>
++</g>
++<g fill="%2" stroke="none"><rect x="9.5" y="30" width="6" height="22" rx="2"/><rect x="64.5" y="30" width="6" height="22" rx="2"/>
++<rect x="9.5" y="110" width="6" height="22" rx="2"/><rect x="64.5" y="110" width="6" height="22" rx="2"/></g></svg>)";
++
++const char *kTrailerSvg = R"(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 150">
++<g fill="none" stroke="%1" stroke-width="1.3" stroke-linejoin="round">
++<path d="M26 36L38 9M54 36L42 9"/><circle cx="40" cy="6" r="3.5"/><rect x="33" y="21" width="14" height="10" rx="2"/>
++<rect x="17" y="36" width="46" height="108" rx="6"/><rect x="22" y="42" width="36" height="46" rx="3"/><path d="M22 56h36"/>
++<rect x="22" y="94" width="36" height="42" rx="3"/><path d="M22 115h36"/>
++<path d="M17 76h-5a3 3 0 0 0-3 3v28a3 3 0 0 0 3 3h5M63 76h5a3 3 0 0 1 3 3v28a3 3 0 0 1-3 3h-5"/><path d="M18 139h4M58 139h4"/>
++</g>
++<g fill="%2" stroke="none"><rect x="10.5" y="80" width="6" height="26" rx="2.5"/><rect x="63.5" y="80" width="6" height="26" rx="2.5"/></g></svg>)";
++}  // namespace
++
++VehicleOutline::VehicleOutline(Arbiter &arbiter, bool trailer, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++    , trailer(trailer)
++{
++    this->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
++    connect(&arbiter, &Arbiter::mode_changed, this, [this] { this->update(); });
++}
+ 
+-    QFont label_font(this->arbiter.forge().font(10));
+-    label_font.setWeight(QFont::Light);
++void VehicleOutline::paintEvent(QPaintEvent *)
++{
++    const Md3 c = md3(this->arbiter);
++    const QString svg = QString(this->trailer ? kTrailerSvg : kVehicleSvg).arg(c.on_variant.name(), c.track.name());
++    QSvgRenderer renderer(svg.toUtf8());
++    renderer.setAspectRatioMode(Qt::KeepAspectRatio);
++    QPainter p(this);
++    p.setRenderHint(QPainter::Antialiasing);
++    renderer.render(&p, QRectF(this->rect()).adjusted(2, 2, -2, -2));
++}
+ 
+-    QLabel *coolant_temp_label = new QLabel("coolant", widget);
+-    coolant_temp_label->setFont(label_font);
+-    coolant_temp_label->setAlignment(Qt::AlignHCenter);
+-    layout->addWidget(coolant_temp_label);
++/* ---------- tires ---------- */
+ 
+-    return widget;
++TiresTab::TiresTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    auto layout = new QVBoxLayout(this);
++    layout->setContentsMargins(6, 6, 6, 6);
++    this->empty = new QLabel("No tire readings. Set up tire sensors in Settings > Vehicle.", this);
++    this->empty->setAlignment(Qt::AlignCenter);
++    this->empty->setWordWrap(true);
++    layout->addWidget(this->empty);
++
++    auto row = new QHBoxLayout();
++    row->setSpacing(8);
++    layout->addLayout(row, 1);
++
++    // The vehicle, seen from above, with its wheels around it (like the hub)
++    QFrame *vehicle = this->card("Vehicle", this);
++    auto vg = qobject_cast<QGridLayout *>(vehicle->layout());
++    for (const auto &p : kPositions) {
++        const bool on_trailer = p.first.startsWith("trailer");
++        // On the trailer card, just "Left" and "Right"
++        QString name = on_trailer ? p.second.section(' ', 1) : p.second;
++        name[0] = name[0].toUpper();
++        this->tiles[p.first] = this->make_tile(name, on_trailer ? nullptr : vehicle);
++    }
++    vg->addWidget(this->tiles["front_left"].frame, 1, 0);
++    vg->addWidget(this->tiles["front_right"].frame, 1, 2);
++    vg->addWidget(this->tiles["rear_left"].frame, 2, 0);
++    vg->addWidget(this->tiles["rear_right"].frame, 2, 2);
++    vg->addWidget(new VehicleOutline(arbiter, false, vehicle), 1, 1, 2, 1);
++    vg->addWidget(this->tiles["spare"].frame, 3, 0, 1, 3, Qt::AlignHCenter);
++    vg->setColumnStretch(0, 2);
++    vg->setColumnStretch(1, 1);
++    vg->setColumnStretch(2, 2);
++    vg->setRowStretch(1, 1);
++    vg->setRowStretch(2, 1);
++    row->addWidget(vehicle, 3);
++
++    // The trailer, when it has sensors
++    QFrame *trailer = this->card("Trailer", this);
++    auto tg = qobject_cast<QGridLayout *>(trailer->layout());
++    this->tiles["trailer_left"].frame->setParent(trailer);
++    this->tiles["trailer_right"].frame->setParent(trailer);
++    tg->addWidget(this->tiles["trailer_left"].frame, 1, 0, Qt::AlignVCenter);
++    tg->addWidget(new VehicleOutline(arbiter, true, trailer), 1, 1);
++    tg->addWidget(this->tiles["trailer_right"].frame, 1, 2, Qt::AlignVCenter);
++    tg->setColumnStretch(0, 2);
++    tg->setColumnStretch(1, 1);
++    tg->setColumnStretch(2, 2);
++    tg->setRowStretch(2, 1);  // the drawing and its wheels at the top, like the vehicle's
++    this->trailer = trailer;
++    row->addWidget(trailer, 2);
++
++    VehicleClient &client = VehicleClient::instance();
++    connect(&client, &VehicleClient::tires_changed, this, &TiresTab::update_tires);
++    connect(Config::get_instance(), &Config::si_units_changed, this, [this](bool) { this->update_tires(); });
++    connect(&arbiter, &Arbiter::mode_changed, this, [this] { this->restyle(); });
++    this->update_tires();
+ }
+ 
+-QWidget *DataTab::engine_load_widget()
++QFrame *TiresTab::card(const QString &title, QWidget *parent)
+ {
+-    QWidget *widget = new QWidget(this);
+-    QVBoxLayout *layout = new QVBoxLayout(widget);
+-    layout->setContentsMargins(0, 0, 0, 0);
+-    layout->setSpacing(0);
+-
+-    QFont value_font(this->arbiter.forge().font(16, true));
+-
+-    QFont unit_font(this->arbiter.forge().font(12));
+-    unit_font.setWeight(QFont::Light);
+-    unit_font.setItalic(true);
++    auto frame = new QFrame(parent);
++    frame->setObjectName("card");
++    auto grid = new QGridLayout(frame);
++    grid->setContentsMargins(14, 10, 14, 14);
++    grid->setSpacing(10);
++    auto heading = new QLabel(title, frame);
++    heading->setObjectName("cardTitle");
++    grid->addWidget(heading, 0, 0, 1, 3);
++    this->cards << frame;
++    return frame;
++}
+ 
+-    Gauge *engine_load =
+-        new Gauge({"%", "%"}, value_font, unit_font, Gauge::RIGHT,
+-                  500, {cmds.LOAD}, 1, [](double x, bool _) { return x; }, widget);
+-    layout->addWidget(engine_load);
+-    this->gauges.push_back(engine_load);
++TiresTab::Tile TiresTab::make_tile(const QString &name, QWidget *parent)
++{
++    Tile t;
++    t.frame = new QFrame(parent);
++    t.frame->setObjectName("tire");
++    t.frame->setMinimumWidth(130);
++    auto l = new QVBoxLayout(t.frame);
++    l->setSpacing(0);
++    auto title = new QLabel(name, t.frame);
++    title->setObjectName("tireName");
++    title->setAlignment(Qt::AlignCenter);
++    l->addWidget(title);
++    t.pressure = new QLabel("--", t.frame);
++    t.pressure->setObjectName("tirePressure");
++    t.pressure->setFont(this->arbiter.forge().font(24, true));
++    t.pressure->setAlignment(Qt::AlignCenter);
++    l->addWidget(t.pressure);
++    t.detail = new QLabel(t.frame);
++    t.detail->setObjectName("tireDetail");
++    t.detail->setAlignment(Qt::AlignCenter);
++    t.detail->setWordWrap(true);
++    l->addWidget(t.detail);
++    return t;
++}
+ 
+-    QFont label_font(this->arbiter.forge().font(10));
+-    label_font.setWeight(QFont::Light);
++// Card and tile colours follow the theme; tiles with a low or hot tire get a red outline
++void TiresTab::restyle()
++{
++    const Md3 c = md3(this->arbiter);
++    for (QFrame *card : this->cards)
++        card->setStyleSheet(QString("QFrame#card { background: %1; border-radius: 20px; }"
++                                    "QLabel#cardTitle { color: %2; font-weight: 600; }")
++                                .arg(css(c.surface), css(c.on_surface)));
++    for (auto it = this->tiles.begin(); it != this->tiles.end(); ++it) {
++        const bool bad = this->alert.value(it.key());
++        it->frame->setStyleSheet(
++            QString("QFrame#tire { background: %1; border-radius: 14px; border: 2px solid %2; }"
++                    "QLabel { background: transparent; border: none; }"
++                    "QLabel#tireName, QLabel#tireDetail { color: %3; }"
++                    "QLabel#tirePressure { color: %4; }")
++                .arg(css(c.surface_high), bad ? css(c.error) : QString("transparent"), css(c.on_variant),
++                     css(bad ? c.error : c.on_surface)));
++    }
++}
+ 
+-    QLabel *engine_load_label = new QLabel("load", widget);
+-    engine_load_label->setFont(label_font);
+-    engine_load_label->setAlignment(Qt::AlignHCenter);
+-    layout->addWidget(engine_load_label);
+-    return widget;
++void TiresTab::update_tires()
++{
++    const QVariantMap tires = VehicleClient::instance().tires;
++    const bool si = Config::get_instance()->get_si_units();
++    this->empty->setVisible(tires.isEmpty());
++    for (auto it = this->tiles.begin(); it != this->tiles.end(); ++it) {
++        Tile &t = it.value();
++        const QVariantMap tire = tires.value(it.key()).toMap();
++        if (tire.isEmpty()) {
++            t.pressure->setText("--");
++            t.detail->setText("no sensor");
++            this->alert[it.key()] = false;
++            continue;
++        }
++        const bool low = tire.value("low").toBool(), hot = tire.value("hot").toBool();
++        t.pressure->setText(vehicle_units::pressure(tire.value("pressure_kpa").toDouble(), si));
++        QStringList detail;
++        detail << vehicle_units::pressure_unit(si) + ", " + vehicle_units::temp(tire.value("temp_c").toDouble(), si);
++        if (low)
++            detail << "low";
++        if (hot)
++            detail << "hot";
++        if (tire.contains("battery") && tire.value("battery").toInt() < 20)
++            detail << QString("battery %1%").arg(tire.value("battery").toInt());
++        const int age = tire.value("age_s").toInt();
++        if (age >= 120)
++            detail << (age < 7200 ? QString("%1 min ago").arg(age / 60) : QString("%1 h ago").arg(age / 3600));
++        if (tire.value("source").toString() == "hub")
++            detail << "hub";
++        t.detail->setText(detail.join(", "));
++        this->alert[it.key()] = low || hot;
++    }
++    this->trailer->setVisible(tires.contains("trailer_left") || tires.contains("trailer_right"));
++    this->restyle();
+ }
+diff --git a/src/app/pages/vehicle_settings.cpp b/src/app/pages/vehicle_settings.cpp
+new file mode 100644
+index 0000000..fd0c7f3
+--- /dev/null
++++ b/src/app/pages/vehicle_settings.cpp
+@@ -0,0 +1,486 @@
++#include "app/pages/vehicle_settings.hpp"
++
++#include "app/arbiter.hpp"
++#include "app/config.hpp"
++#include "app/services/vehicle_client.hpp"
++#include "app/widgets/selector.hpp"
++#include "app/widgets/switch.hpp"
++#include "app/widgets/text_entry.hpp"
++
++namespace {
++const QList<QPair<QString, QString>> kLinks = {
++    {"off", "Off"}, {"elm327-usb", "ELM327 (USB)"}, {"elm327-bt", "ELM327 (Bluetooth)"}, {"can", "CAN bus"}};
++const QList<QPair<QString, QString>> kBitrates = {
++    {"500000", "500 kbit/s"}, {"250000", "250 kbit/s"}, {"125000", "125 kbit/s"}, {"0", "leave as set"}};
++const QList<QPair<QString, QString>> kBias = {{"none", "none"}, {"pull-up", "pull-up"}, {"pull-down", "pull-down"}};
++const QList<QPair<QString, QString>> kPositions = {
++    {"", "not used"},          {"front_left", "Front left"},   {"front_right", "Front right"},
++    {"rear_left", "Rear left"}, {"rear_right", "Rear right"},   {"spare", "Spare"},
++    {"trailer_left", "Trailer left"}, {"trailer_right", "Trailer right"},
++};
++const QString kNone = "none";
++
++QStringList labels(const QList<QPair<QString, QString>> &list)
++{
++    QStringList out;
++    for (const auto &p : list)
++        out << p.second;
++    return out;
++}
++QString label_for(const QList<QPair<QString, QString>> &list, const QString &key)
++{
++    for (const auto &p : list)
++        if (p.first == key)
++            return p.second;
++    return list.first().second;
++}
++QString key_for(const QList<QPair<QString, QString>> &list, const QString &label)
++{
++    for (const auto &p : list)
++        if (p.second == label)
++            return p.first;
++    return list.first().first;
++}
++// "/dev/serial/by-id/usb-FTDI_..." is long: show the name
++QString port_label(const QString &path)
++{
++    return path.section('/', -1);
++}
++bool si()
++{
++    return Config::get_instance()->get_si_units();
++}
++}  // namespace
++
++VehicleSettingsTab::VehicleSettingsTab(Arbiter &arbiter, QWidget *parent)
++    : QWidget(parent)
++    , arbiter(arbiter)
++{
++    auto layout = new QVBoxLayout(this);
++    layout->setContentsMargins(6, 0, 6, 0);
++    auto scroll = new QScrollArea(this);
++    Session::Forge::to_touch_scroller(scroll);
++    scroll->setWidgetResizable(true);
++    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    scroll->setWidget(this->settings_widget());
++    layout->addWidget(scroll);
++
++    VehicleClient &client = VehicleClient::instance();
++    connect(&client, &VehicleClient::status_changed, this, &VehicleSettingsTab::show_status);
++    connect(&client, &VehicleClient::illumination_changed, this, &VehicleSettingsTab::show_status);
++    connect(&client, &VehicleClient::config_changed, this, &VehicleSettingsTab::show_config);
++    this->sensor_timer.setInterval(3000);
++    connect(&this->sensor_timer, &QTimer::timeout, this, &VehicleSettingsTab::refresh_sensors);
++}
++
++QWidget *VehicleSettingsTab::row(const QString &label, QWidget *control, bool stretch)
++{
++    auto widget = new QWidget(this);
++    auto layout = new QHBoxLayout(widget);
++    auto text = new QLabel(label, widget);
++    text->setWordWrap(true);
++    layout->addWidget(text, 1);
++    if (stretch)
++        layout->addWidget(control, 1);
++    else
++        layout->addWidget(control, 1, Qt::AlignHCenter);
++    return widget;
++}
++
++QLabel *VehicleSettingsTab::heading(const QString &text)
++{
++    auto label = new QLabel(text, this);
++    QFont font(label->font());
++    font.setBold(true);
++    label->setFont(font);
++    return label;
++}
++
++QLabel *VehicleSettingsTab::note(const QString &text)
++{
++    auto label = new QLabel(text, this);
++    label->setWordWrap(true);
++    return label;
++}
++
++QWidget *VehicleSettingsTab::settings_widget()
++{
++    const QFont font14 = this->arbiter.forge().font(14);
++    const double scale = this->arbiter.layout().scale;
++    auto widget = new QWidget(this);
++    auto layout = new QVBoxLayout(widget);
++    auto make_switch = [scale, widget]() {
++        auto s = new Switch(widget);
++        s->scale(scale);
++        return s;
++    };
++
++    // ---- OBD
++    layout->addWidget(this->heading("OBD adapter"));
++    this->obd_state = this->note("Vehicle service not running");
++    layout->addWidget(this->row("Status", this->obd_state));
++
++    this->link = new Selector(labels(kLinks), kLinks.first().second, font14, this->arbiter, widget);
++    connect(this->link, &Selector::item_changed, [this](QString item) {
++        if (this->loading)
++            return;
++        this->set({{"obd_link", key_for(kLinks, item)}});
++        this->show_mode();
++    });
++    layout->addWidget(this->row("Connection", this->link));
++
++    this->port = new Selector({}, QString(), font14, this->arbiter, widget, "no USB serial ports");
++    connect(this->port, &Selector::item_changed, [this](QString item) {
++        if (this->loading || item.isEmpty())
++            return;
++        for (const QString &p : this->port->property("paths").toStringList())
++            if (port_label(p) == item)
++                this->set({{"obd_serial", p}});
++    });
++    this->port_row = this->row("Port", this->port, true);
++    layout->addWidget(this->port_row);
++
++    this->bt = new Selector({}, QString(), font14, this->arbiter, widget, "pair it on the Phone tab first");
++    connect(this->bt, &Selector::item_changed, [this](QString item) {
++        if (this->loading || item.isEmpty())
++            return;
++        this->set({{"obd_bt_address", item.section(' ', 0, 0)}});
++    });
++    this->bt_row = this->row("Adapter", this->bt, true);
++    layout->addWidget(this->bt_row);
++
++    this->can = new Selector({}, QString(), font14, this->arbiter, widget, "no CAN interface");
++    connect(this->can, &Selector::item_changed, [this](QString item) {
++        if (!this->loading && !item.isEmpty())
++            this->set({{"can_interface", item}});
++    });
++    this->can_row = this->row("Interface", this->can);
++    layout->addWidget(this->can_row);
++
++    this->bitrate = new Selector(labels(kBitrates), kBitrates.first().second, font14, this->arbiter, widget);
++    connect(this->bitrate, &Selector::item_changed, [this](QString item) {
++        if (!this->loading)
++            this->set({{"can_bitrate", key_for(kBitrates, item).toInt()}});
++    });
++    this->bitrate_row = this->row("Bit rate", this->bitrate);
++    layout->addWidget(this->bitrate_row);
++    layout->addWidget(Session::Forge::br());
++
++    // ---- Illumination
++    layout->addWidget(this->heading("Illumination input"));
++    layout->addWidget(this->note("The dash-light or headlight wire, through an optocoupler or a divider to a GPIO pin."));
++    this->illum_state = this->note("Not set up");
++    layout->addWidget(this->row("Headlights", this->illum_state));
++
++    this->line = new Selector({kNone}, kNone, font14, this->arbiter, widget);
++    connect(this->line, &Selector::item_changed, [this](QString item) {
++        if (this->loading)
++            return;
++        const int i = this->line->property("labels").toStringList().indexOf(item);
++        this->set({{"illum_line", i >= 0 ? this->line_ids.value(i) : QString()}});
++        this->show_mode();
++    });
++    layout->addWidget(this->row("GPIO pin", this->line, true));
++
++    this->active_low = make_switch();
++    connect(this->active_low, &Switch::stateChanged, [this](bool on) {
++        if (!this->loading)
++            this->set({{"illum_active_low", on}});
++    });
++    this->active_low_row = this->row("On when the pin is low (optocoupler)", this->active_low);
++    layout->addWidget(this->active_low_row);
++
++    this->bias = new Selector(labels(kBias), kBias.first().second, font14, this->arbiter, widget);
++    connect(this->bias, &Selector::item_changed, [this](QString item) {
++        if (!this->loading)
++            this->set({{"illum_bias", key_for(kBias, item)}});
++    });
++    this->bias_row = this->row("Pull resistor", this->bias);
++    layout->addWidget(this->bias_row);
++
++    // What Dash does with it (Dash's own settings)
++    QSettings &s = this->arbiter.settings();
++    this->dark = make_switch();
++    this->dark->setChecked(s.value("Vehicle/headlights_dark", true).toBool());
++    connect(this->dark, &Switch::stateChanged, [this](bool on) { this->arbiter.settings().setValue("Vehicle/headlights_dark", on); });
++    layout->addWidget(this->row("Dark mode with the headlights on", this->dark));
++
++    this->dim = make_switch();
++    this->dim->setChecked(s.value("Vehicle/headlights_dim", false).toBool());
++    connect(this->dim, &Switch::stateChanged, [this](bool on) {
++        this->arbiter.settings().setValue("Vehicle/headlights_dim", on);
++        this->night_row->setVisible(on);
++    });
++    layout->addWidget(this->row("Dim the screen with the headlights on", this->dim));
++
++    this->night = new QSlider(Qt::Horizontal, widget);
++    this->night->setRange(10, 255);
++    this->night->setValue(s.value("Vehicle/night_brightness", 76).toInt());
++    connect(this->night, &QSlider::valueChanged, [this](int v) {
++        this->arbiter.settings().setValue("Vehicle/night_brightness", v);
++        if (VehicleClient::instance().illumination && this->dim->isChecked())
++            this->arbiter.set_brightness(uint8_t(v));
++    });
++    this->night_row = this->row("Night brightness", this->night, true);
++    this->night_row->setVisible(this->dim->isChecked());
++    layout->addWidget(this->night_row);
++    layout->addWidget(Session::Forge::br());
++
++    // ---- Tires
++    layout->addWidget(this->heading("Tire sensors"));
++    this->tpms_state = this->note(QString());
++    layout->addWidget(this->row("Status", this->tpms_state));
++    this->ble = make_switch();
++    connect(this->ble, &Switch::stateChanged, [this](bool on) {
++        if (!this->loading)
++            this->set({{"tpms_ble", on}});
++    });
++    layout->addWidget(this->row("Bluetooth (BLE) sensors", this->ble));
++    this->hub_tires = make_switch();
++    connect(this->hub_tires, &Switch::stateChanged, [this](bool on) {
++        if (!this->loading)
++            this->set({{"tpms_hub", on}});
++    });
++    layout->addWidget(this->row("TrailCommand hub's sensors (TireCommander)", this->hub_tires));
++
++    this->low = new QSpinBox(widget);
++    this->low->setRange(5, 900);
++    connect(this->low, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v) {
++        if (!this->loading)
++            this->set({{"tpms_low_kpa", si() ? double(v) : v * 6.89476}});
++    });
++    layout->addWidget(this->row("Low pressure warning", this->low));
++    this->hot = new QSpinBox(widget);
++    this->hot->setRange(30, 250);
++    connect(this->hot, QOverload<int>::of(&QSpinBox::valueChanged), [this](int v) {
++        if (!this->loading)
++            this->set({{"tpms_high_c", si() ? double(v) : (v - 32) * 5.0 / 9.0}});
++    });
++    layout->addWidget(this->row("High temperature warning", this->hot));
++
++    layout->addWidget(this->note("Sensors heard nearby. Put each on its wheel; letting some air out of a tire "
++                                 "shows which one it is."));
++    this->sensors = new QWidget(widget);
++    this->sensors_layout = new QVBoxLayout(this->sensors);
++    this->sensors_layout->setContentsMargins(0, 0, 0, 0);
++    this->no_sensors = this->note("None heard yet.");
++    this->sensors_layout->addWidget(this->no_sensors);
++    layout->addWidget(this->sensors);
++    layout->addWidget(Session::Forge::br());
++
++    // ---- Hub
++    layout->addWidget(this->heading("TrailCommand hub"));
++    this->hub_state = this->note(QString());
++    layout->addWidget(this->row("Status", this->hub_state));
++    this->forward = make_switch();
++    connect(this->forward, &Switch::stateChanged, [this](bool on) {
++        if (!this->loading)
++            this->set({{"hub_forward", on}});
++    });
++    layout->addWidget(this->row("Send vehicle data to the hub", this->forward));
++    this->hub_url = new TextEntry(this->arbiter, "Hub address (e.g. 10.42.0.5:8080)", TextEntry::Text, widget);
++    this->hub_url->set_placeholder("same as the TrailCommand tab");
++    connect(this->hub_url, &TextEntry::edited, [this](const QString &v) { this->set({{"hub_url", v.trimmed()}}); });
++    layout->addWidget(this->row("Address", this->hub_url, true));
++    this->hub_pin = new TextEntry(this->arbiter, "Hub PIN", TextEntry::Password, widget);
++    this->hub_pin->set_placeholder("same as the TrailCommand tab");
++    connect(this->hub_pin, &TextEntry::edited, [this](const QString &v) { this->set({{"hub_pin", v.trimmed()}}); });
++    layout->addWidget(this->row("PIN", this->hub_pin, true));
++
++    layout->addStretch();
++    this->show_mode();
++    return widget;
++}
++
++void VehicleSettingsTab::set(const QVariantMap &changes)
++{
++    VehicleClient::instance().call("SetConfig", {changes});
++}
++
++void VehicleSettingsTab::showEvent(QShowEvent *event)
++{
++    QWidget::showEvent(event);
++    this->refresh();
++    this->sensor_timer.start();
++}
++
++void VehicleSettingsTab::hideEvent(QHideEvent *event)
++{
++    QWidget::hideEvent(event);
++    this->sensor_timer.stop();
++}
++
++// Fresh choices each time the tab is shown: adapters come and go
++void VehicleSettingsTab::refresh()
++{
++    VehicleClient &client = VehicleClient::instance();
++    client.call("GetSerialPorts", {}, [this](const QVariantList &r) {
++        QStringList paths = r.value(0).toStringList();
++        // The chosen port, even while it's unplugged
++        const QString chosen = this->config.value("obd_serial").toString();
++        if (!chosen.isEmpty() && !paths.contains(chosen))
++            paths.prepend(chosen);
++        QStringList names;
++        for (const QString &p : paths)
++            names << port_label(p);
++        this->loading = true;
++        this->port->setProperty("paths", paths);
++        this->port->set_options(names);
++        this->port->set_current(port_label(this->config.value("obd_serial").toString()));
++        this->loading = false;
++    });
++    client.call("GetBluetoothDevices", {}, [this](const QVariantList &r) {
++        const QStringList devices = r.value(0).toStringList();
++        this->loading = true;
++        this->bt->set_options(devices);
++        const QString address = this->config.value("obd_bt_address").toString();
++        for (const QString &d : devices)
++            if (d.startsWith(address) && !address.isEmpty())
++                this->bt->set_current(d);
++        this->loading = false;
++    });
++    client.call("GetCanInterfaces", {}, [this](const QVariantList &r) {
++        this->loading = true;
++        this->can->set_options(r.value(0).toStringList());
++        this->can->set_current(this->config.value("can_interface").toString());
++        this->loading = false;
++    });
++    client.call("GetGpioLines", {}, [this](const QVariantList &r) {
++        QStringList options = {kNone};
++        this->line_ids = QStringList(QString());
++        for (const QVariant &v : r.value(0).toList()) {
++            const QVariantMap l = v.toMap();
++            if (l.value("used").toBool())
++                continue;  // the kernel or another program has it
++            options << l.value("label").toString();
++            this->line_ids << l.value("id").toString();
++        }
++        this->loading = true;
++        this->line->setProperty("labels", options);
++        this->line->set_options(options);
++        const int i = this->line_ids.indexOf(this->config.value("illum_line").toString());
++        this->line->set_current(options.value(i > 0 ? i : 0));
++        this->loading = false;
++    });
++    client.call("GetConfig", {}, [this](const QVariantList &r) { this->show_config(r.value(0).toMap()); });
++    client.refresh();
++    this->refresh_sensors();
++}
++
++void VehicleSettingsTab::show_config(const QVariantMap &c)
++{
++    this->config = c;
++    this->loading = true;
++    this->link->set_current(label_for(kLinks, c.value("obd_link").toString()));
++    this->port->set_current(port_label(c.value("obd_serial").toString()));
++    this->can->set_current(c.value("can_interface").toString());
++    this->bitrate->set_current(label_for(kBitrates, QString::number(c.value("can_bitrate").toInt())));
++    const int i = this->line_ids.indexOf(c.value("illum_line").toString());
++    if (i > 0)
++        this->line->set_current(this->line->property("labels").toStringList().value(i));
++    this->active_low->setChecked(c.value("illum_active_low").toBool());
++    this->bias->set_current(label_for(kBias, c.value("illum_bias").toString()));
++    this->ble->setChecked(c.value("tpms_ble").toBool());
++    this->hub_tires->setChecked(c.value("tpms_hub").toBool());
++    const double low_kpa = c.value("tpms_low_kpa").toDouble(), high_c = c.value("tpms_high_c").toDouble();
++    this->low->setSuffix(si() ? " kPa" : " psi");
++    this->low->setValue(qRound(si() ? low_kpa : low_kpa / 6.89476));
++    this->hot->setSuffix(si() ? " °C" : " °F");
++    this->hot->setValue(qRound(si() ? high_c : high_c * 9 / 5 + 32));
++    this->forward->setChecked(c.value("hub_forward").toBool());
++    this->hub_url->set_value(c.value("hub_url").toString());
++    this->hub_pin->set_placeholder(c.value("hub_pin_set").toBool() ? "set" : "same as the TrailCommand tab");
++    this->loading = false;
++    this->show_mode();
++}
++
++// Only the rows that matter for the choices made
++void VehicleSettingsTab::show_mode()
++{
++    const QString link = key_for(kLinks, this->link->get_current());
++    this->port_row->setVisible(link == "elm327-usb");
++    this->bt_row->setVisible(link == "elm327-bt");
++    this->can_row->setVisible(link == "can");
++    this->bitrate_row->setVisible(link == "can");
++    const bool has_line = this->line->get_current() != kNone;
++    this->active_low_row->setVisible(has_line);
++    this->bias_row->setVisible(has_line);
++}
++
++void VehicleSettingsTab::show_status()
++{
++    const QVariantMap status = VehicleClient::instance().status;
++    if (status.isEmpty()) {
++        this->obd_state->setText("Vehicle service not running");
++        return;
++    }
++    const QVariantMap obd = status.value("obd").toMap();
++    this->obd_state->setText(obd.value("state").toString() == "off" ? QString("Off") : obd.value("message").toString());
++
++    const QVariantMap illum = status.value("illumination").toMap();
++    if (illum.value("line").toString().isEmpty())
++        this->illum_state->setText("Not set up");
++    else if (!illum.value("ok").toBool())
++        this->illum_state->setText(illum.value("message").toString());
++    else
++        this->illum_state->setText(illum.value("on").toBool() ? "On" : "Off");
++
++    this->tpms_state->setText(status.value("tpms").toMap().value("message").toString());
++    this->hub_state->setText(status.value("hub").toMap().value("message").toString());
++}
++
++void VehicleSettingsTab::refresh_sensors()
++{
++    VehicleClient::instance().call("GetTpmsSensors", {}, [this](const QVariantList &r) {
++        const QVariantList list = r.value(0).toList();
++        const bool metric = si();
++        QSet<QString> seen;
++        for (const QVariant &v : list) {
++            const QVariantMap s = v.toMap();
++            const QString id = s.value("id").toString();
++            seen.insert(id);
++            if (!this->sensor_rows.contains(id)) {
++                SensorRow row;
++                row.widget = new QWidget(this->sensors);
++                auto l = new QHBoxLayout(row.widget);
++                l->setContentsMargins(0, 0, 0, 0);
++                row.label = new QLabel(row.widget);
++                row.label->setWordWrap(true);
++                l->addWidget(row.label, 1);
++                row.position = new Selector(labels(kPositions), kPositions.first().second,
++                                            this->arbiter.forge().font(14), this->arbiter, row.widget);
++                connect(row.position, &Selector::item_changed, [this, id](QString item) {
++                    if (!this->loading)
++                        VehicleClient::instance().call("AssignTpmsSensor", {key_for(kPositions, item), id});
++                });
++                l->addWidget(row.position, 1);
++                this->sensors_layout->addWidget(row.widget);
++                this->sensor_rows[id] = row;
++            }
++            SensorRow &row = this->sensor_rows[id];
++            const double kpa = s.value("pressure_kpa").toDouble();
++            const int age = s.value("age_s").toInt();
++            row.label->setText(QString("%1%2\n%3 %4, %5, %6 dBm, %7")
++                                   .arg(id)
++                                   .arg(s.value("name").toString().isEmpty() ? QString() : "  " + s.value("name").toString())
++                                   .arg(metric ? QString::number(qRound(kpa)) : QString::number(kpa / 6.89476, 'f', 1))
++                                   .arg(metric ? "kPa" : "psi")
++                                   .arg(metric ? QString("%1 °C").arg(qRound(s.value("temp_c").toDouble()))
++                                               : QString("%1 °F").arg(qRound(s.value("temp_c").toDouble() * 9 / 5 + 32)))
++                                   .arg(s.value("rssi").toInt())
++                                   .arg(age < 60 ? QString("%1 s ago").arg(age) : QString("%1 min ago").arg(age / 60)));
++            this->loading = true;
++            row.position->set_current(label_for(kPositions, s.value("position").toString()));
++            this->loading = false;
++        }
++        for (auto it = this->sensor_rows.begin(); it != this->sensor_rows.end();) {
++            if (seen.contains(it.key())) {
++                ++it;
++                continue;
++            }
++            it->widget->deleteLater();
++            it = this->sensor_rows.erase(it);
++        }
++        this->no_sensors->setVisible(this->sensor_rows.isEmpty());
++    });
++}
+diff --git a/src/app/services/vehicle_client.cpp b/src/app/services/vehicle_client.cpp
+new file mode 100644
+index 0000000..0c7249a
+--- /dev/null
++++ b/src/app/services/vehicle_client.cpp
+@@ -0,0 +1,199 @@
++#include "app/services/vehicle_client.hpp"
++
++namespace {
++const char *kService = "org.ozark.Vehicle1";
++const char *kPath = "/org/ozark/Vehicle1";
++const char *kInterface = "org.ozark.Vehicle1";
++
++QVariantMap first_map(const QDBusMessage &message)
++{
++    return VehicleClient::unwrap(message.arguments().value(0)).toMap();
++}
++}  // namespace
++
++VehicleClient &VehicleClient::instance()
++{
++    static VehicleClient client;
++    return client;
++}
++
++VehicleClient::VehicleClient()
++{
++    QDBusConnection bus = QDBusConnection::systemBus();
++    bus.connect(kService, kPath, kInterface, "StatusChanged", this, SLOT(on_status(QDBusMessage)));
++    bus.connect(kService, kPath, kInterface, "ValuesChanged", this, SLOT(on_values(QDBusMessage)));
++    bus.connect(kService, kPath, kInterface, "TiresChanged", this, SLOT(on_tires(QDBusMessage)));
++    bus.connect(kService, kPath, kInterface, "DtcsRead", this, SLOT(on_dtcs(QDBusMessage)));
++    bus.connect(kService, kPath, kInterface, "DtcsCleared", this, SLOT(on_cleared(bool, QString)));
++    bus.connect(kService, kPath, kInterface, "IlluminationChanged", this, SLOT(on_illumination(bool)));
++    bus.connect(kService, kPath, kInterface, "ConfigChanged", this, SLOT(on_config(QDBusMessage)));
++
++    // Started after Dash, or restarted: fetch everything again
++    this->watcher = new QDBusServiceWatcher(kService, bus, QDBusServiceWatcher::WatchForOwnerChange, this);
++    connect(this->watcher, &QDBusServiceWatcher::serviceOwnerChanged, this,
++            [this](const QString &, const QString &, const QString &owner) {
++                this->running = !owner.isEmpty();
++                if (this->running) {
++                    this->refresh();
++                } else {
++                    this->status.clear();
++                    this->values.clear();
++                    emit status_changed();
++                    emit values_changed();
++                }
++            });
++    this->refresh();
++}
++
++QVariant VehicleClient::unwrap(const QVariant &value)
++{
++    if (value.userType() == qMetaTypeId<QDBusVariant>())
++        return unwrap(value.value<QDBusVariant>().variant());
++    if (value.userType() == qMetaTypeId<QDBusArgument>()) {
++        const QDBusArgument arg = value.value<QDBusArgument>();
++        if (arg.currentType() == QDBusArgument::MapType) {
++            QVariantMap map;
++            arg >> map;
++            return unwrap(map);
++        }
++        if (arg.currentType() == QDBusArgument::ArrayType) {
++            const QString sig = arg.currentSignature();
++            if (sig == "as") {
++                QStringList strings;
++                arg >> strings;
++                return strings;
++            }
++            QVariantList list;
++            if (sig == "aa{sv}") {
++                arg.beginArray();
++                while (!arg.atEnd()) {
++                    QVariantMap map;
++                    arg >> map;
++                    list << unwrap(map);
++                }
++                arg.endArray();
++                return list;
++            }
++            if (sig == "ai") {
++                QList<int> ints;
++                arg >> ints;
++                for (int i : ints)
++                    list << i;
++                return list;
++            }
++            arg.beginArray();
++            while (!arg.atEnd()) {
++                QDBusVariant item;
++                arg >> item;
++                list << unwrap(item.variant());
++            }
++            arg.endArray();
++            return list;
++        }
++        return QVariant();
++    }
++    if (value.type() == QVariant::Map) {
++        QVariantMap map = value.toMap();
++        for (auto it = map.begin(); it != map.end(); ++it)
++            it.value() = unwrap(it.value());
++        return map;
++    }
++    if (value.type() == QVariant::List) {
++        QVariantList list = value.toList();
++        for (auto &item : list)
++            item = unwrap(item);
++        return list;
++    }
++    return value;
++}
++
++void VehicleClient::call(const QString &method, const QVariantList &args, std::function<void(const QVariantList &)> done)
++{
++    QDBusMessage message = QDBusMessage::createMethodCall(kService, kPath, kInterface, method);
++    message.setArguments(args);
++    auto pending = new QDBusPendingCallWatcher(QDBusConnection::systemBus().asyncCall(message), this);
++    connect(pending, &QDBusPendingCallWatcher::finished, this, [this, done](QDBusPendingCallWatcher *w) {
++        w->deleteLater();
++        const QDBusMessage reply = w->reply();
++        if (reply.type() != QDBusMessage::ReplyMessage)
++            return;
++        this->running = true;
++        if (done) {
++            QVariantList out;
++            for (const QVariant &a : reply.arguments())
++                out << unwrap(a);
++            done(out);
++        }
++    });
++}
++
++void VehicleClient::refresh()
++{
++    this->call("GetStatus", {}, [this](const QVariantList &r) {
++        this->status = r.value(0).toMap();
++        const bool on = this->status.value("illumination").toMap().value("on").toBool();
++        emit status_changed();
++        if (on != this->illumination) {
++            this->illumination = on;
++            emit illumination_changed(on);
++        }
++    });
++    this->call("GetValues", {}, [this](const QVariantList &r) {
++        this->values = r.value(0).toMap();
++        emit values_changed();
++    });
++    this->call("GetTires", {}, [this](const QVariantList &r) {
++        this->tires = r.value(0).toMap();
++        emit tires_changed();
++    });
++    this->call("GetDtcs", {}, [this](const QVariantList &r) {
++        const QVariantMap d = r.value(0).toMap();
++        if (!d.isEmpty()) {
++            this->dtcs = d;
++            emit dtcs_read(d);
++        }
++    });
++}
++
++void VehicleClient::on_status(const QDBusMessage &message)
++{
++    this->running = true;
++    this->status = first_map(message);
++    emit status_changed();
++}
++
++void VehicleClient::on_values(const QDBusMessage &message)
++{
++    this->values = first_map(message);
++    emit values_changed();
++}
++
++void VehicleClient::on_tires(const QDBusMessage &message)
++{
++    this->tires = first_map(message);
++    emit tires_changed();
++}
++
++void VehicleClient::on_dtcs(const QDBusMessage &message)
++{
++    const QVariantMap d = first_map(message);
++    if (d.value("ok").toBool())
++        this->dtcs = d;
++    emit dtcs_read(d);
++}
++
++void VehicleClient::on_cleared(bool ok, const QString &message)
++{
++    emit dtcs_cleared(ok, message);
++}
++
++void VehicleClient::on_illumination(bool on)
++{
++    this->illumination = on;
++    emit illumination_changed(on);
++}
++
++void VehicleClient::on_config(const QDBusMessage &message)
++{
++    emit config_changed(first_map(message));
++}
+-- 
+2.43.0
+

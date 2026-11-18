@@ -13,8 +13,11 @@ SRC_URI = " \
     file://0003-Ozark-defaults-1080p-300-DPI-reconnect-the-last-phon.patch \
     file://0004-Crop-the-projection-on-the-GPU-not-with-videocrop.patch \
     file://0005-Ozark-default-right-hand-drive.patch \
-    file://0006-Microphone-open-only-a-microphone-that-exists.patch \
+    file://0006-Microphone-open-only-a-sound-card-s-microphone.patch \
     file://0007-Wireless-AA-phones-no-longer-get-stuck-on-Connecting.patch \
+    file://0009-Wireless-AA-start-the-Bluetooth-service-once-the-ada.patch \
+    file://0010-Wireless-AA-leave-reconnecting-the-last-phone-to-Das.patch \
+    file://0011-Wireless-AA-when-the-phone-stops-answering-pings-hav.patch \
 "
 SRCREV = "e7caeb4d49186af867c1d4693c9f3bf9e9ef99e0"
 PV = "2.1.0+git"

@@ -1,0 +1,81 @@
+From 6c1ba0dd4d62178920f3892b363f868f42f2e5d8 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sun, 15 Nov 2026 19:42:20 -0600
+Subject: [PATCH] Settings > Update: "scan usb", newest file selected
+
+The USB button reads "scan usb". Update files found are listed as
+"name.swu (vX.Y.Z_mmddyy)", newest build first, and the newest is
+selected, ready for "install from USB". ozark-update usb now also
+reports each file's build stamp (swu=PATH|VERSION|BUILD).
+
+Upstream-Status: Inappropriate [Ozark OS behaviour]
+---
+ src/app/pages/update_settings.cpp | 31 ++++++++++++++++++++++---------
+ 1 file changed, 22 insertions(+), 9 deletions(-)
+
+diff --git a/src/app/pages/update_settings.cpp b/src/app/pages/update_settings.cpp
+index 9b8faac..4e9ecf6 100644
+--- a/src/app/pages/update_settings.cpp
++++ b/src/app/pages/update_settings.cpp
+@@ -8,6 +8,7 @@
+ #include "app/pages/update_settings.hpp"
+ 
+ #include <QDate>
++#include <algorithm>
+ #include <unistd.h>
+ 
+ namespace {
+@@ -191,7 +192,7 @@ QWidget *UpdateSettingsTab::settings_widget()
+     layout->addWidget(this->usb_row);
+     auto usb_buttons = new QHBoxLayout();
+     usb_buttons->addStretch();
+-    usb_buttons->addWidget(this->button("look on USB", [this] { this->find_usb(); }));
++    usb_buttons->addWidget(this->button("scan usb", [this] { this->find_usb(); }));
+     this->install_usb = this->button("install from USB", [this] {
+         const QString file = this->usb_paths.value(this->usb_files->get_current());
+         if (!file.isEmpty())
+@@ -397,21 +398,33 @@ void UpdateSettingsTab::find_usb()
+ {
+     this->set_busy(true);
+     this->report(true, "Looking on USB drives...");
+-    auto found = std::make_shared<QStringList>();
++    // Every update file found, with its build stamp (to pick the newest)
++    auto found = std::make_shared<QList<QPair<QString, QString>>>();
+     this->usb_paths.clear();
+     this->run({"usb"}, [this, found](const QString &line) {
+-        // swu=PATH|VERSION
++        // swu=PATH|VERSION|BUILD (BUILD empty for a file without a stamp)
+         if (!line.startsWith("swu="))
+             return;
+-        const QString entry = line.mid(4);
+-        const int bar = entry.lastIndexOf('|');
+-        const QString path = entry.left(bar);
+-        const QString text = QString("%1 (%2)").arg(QFileInfo(path).fileName(), entry.mid(bar + 1));
++        // Taken from the right: a path may itself contain '|'
++        QStringList fields = line.mid(4).split('|');
++        if (fields.size() < 3)
++            return;
++        const QString build = fields.takeLast();
++        const QString version = fields.takeLast();
++        const QString path = fields.join('|');
++        const QString text = QString("%1 (%2)").arg(QFileInfo(path).fileName(), ozark_version(version, build));
+         this->usb_paths[text] = path;
+-        found->append(text);
++        found->append({build, text});
+     }, [this, found](bool ok, const QString &message) {
+         this->set_busy(false);
+-        this->usb_files->set_options(*found);
++        // Newest build first: it's the one selected
++        std::stable_sort(found->begin(), found->end(), [](const QPair<QString, QString> &a, const QPair<QString, QString> &b) {
++            return a.first > b.first;
++        });
++        QStringList options;
++        for (const auto &entry : *found)
++            options.append(entry.second);
++        this->usb_files->set_options(options);
+         this->usb_row->setVisible(true);
+         const bool any = !found->isEmpty();
+         this->install_usb->setVisible(any && this->status.value("supported") == "yes");
+-- 
+2.43.0
+

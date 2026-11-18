@@ -1,0 +1,618 @@
+From ccb8f1067c55495d1813693ab1a750ac52e42ef9 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Tue, 17 Nov 2026 21:19:18 -0600
+Subject: [PATCH] Settings: Phone tab becomes Bluetooth, with "add device" for
+ OBD adapters and tire sensors
+
+The tab is now "Bluetooth". Besides "pair new phone" (the unit becomes
+visible and the phone pairs), "add device" makes the unit look for devices
+itself for 60 s, classic and LE, and lists them under "Nearby devices" as
+OBD-II adapters (by name: OBD, ELM327, V-LINK, Vgate, Veepeak, ...), tire
+sensors (company 0x0100 adverts, what ozark-vehicled decodes), phones and
+other devices.
+
+- OBD adapters and other devices pair from here. Legacy devices asking
+  for a PIN get 1234 then 0000 (OBD adapters) or 0000 then 1234, retried
+  on an authentication failure. A paired OBD adapter becomes the vehicle
+  service's adapter (obd_link elm327-bt, obd_bt_address); in the paired
+  list it shows "used for the vehicle" or a "use for OBD" button
+  instead of connect/disconnect, since the vehicle service opens it.
+- Tire sensors only broadcast, so they aren't paired: "set wheel" puts
+  one on a wheel (AssignTpmsSensor) and turns Bluetooth tire sensors on.
+
+Paired devices get an icon by kind. Settings > Vehicle points at the
+Bluetooth tab for pairing an OBD adapter.
+---
+ include/app/pages/phone.hpp        |  30 ++-
+ src/app/pages/phone.cpp            | 379 ++++++++++++++++++++++++++++-
+ src/app/pages/settings.cpp         |   2 +-
+ src/app/pages/vehicle_settings.cpp |   2 +-
+ 4 files changed, 398 insertions(+), 15 deletions(-)
+
+diff --git a/include/app/pages/phone.hpp b/include/app/pages/phone.hpp
+index f4a4999..1981781 100644
+--- a/include/app/pages/phone.hpp
++++ b/include/app/pages/phone.hpp
+@@ -17,7 +17,7 @@ class Manager;
+ 
+ // Answers BlueZ's pairing questions (registered as the default agent): shows
+ // the code to compare on a "Pair with ...?" dialog, and only lets new devices
+-// pair while Settings > Phone has pairing mode on.
++// pair while Settings > Bluetooth has pairing mode on or is pairing one itself.
+ class PairingAgent : public BluezQt::Agent {
+     Q_OBJECT
+ 
+@@ -38,6 +38,9 @@ class PairingAgent : public BluezQt::Agent {
+     void release() override;
+ 
+     bool pairing_mode = false;
++    // PIN to give a legacy device (OBD adapters: 1234 or 0000) that the unit
++    // itself is pairing; empty: the usual 0000
++    QString pin;
+ 
+    private:
+     // Shows the code; answer(true) if confirmed, answer(false) if cancelled.
+@@ -49,8 +52,11 @@ class PairingAgent : public BluezQt::Agent {
+     QPointer<Dialog> prompt;
+ };
+ 
+-// Settings > Phone: paired phones (connect, disconnect, forget) and pairing a
+-// new one. (Reconnecting the last phone at start is the Bluetooth service's.)
++// Settings > Bluetooth: paired devices (connect, disconnect, forget), pairing a
++// new phone (the unit becomes visible), and adding a device from a scan: OBD-II
++// adapters (paired from here, then used for OBD) and tire sensors (they only
++// broadcast, so they're put on a wheel instead). (Reconnecting the last phone
++// at start is the Bluetooth service's.)
+ class PhoneSettingsTab : public QWidget {
+     Q_OBJECT
+ 
+@@ -65,6 +71,16 @@ class PhoneSettingsTab : public QWidget {
+     void update_device(BluezQt::DevicePtr device);
+     void remove_device(const QString &address);
+ 
++    enum class Kind { Phone, Obd, Tire, Other };
++    static Kind kind_of(BluezQt::DevicePtr device);
++    static QString icon_for(Kind kind);
++    void set_scanning(bool enabled);
++    void update_nearby(BluezQt::DevicePtr device);
++    void remove_nearby(const QString &address);
++    void pair_device(BluezQt::DevicePtr device, QStringList pins);
++    void choose_wheel(BluezQt::DevicePtr device);
++    void use_for_obd(const QString &address);
++
+     Arbiter &arbiter;
+     BluezQt::Manager *manager = nullptr;
+     BluezQt::AdapterPtr adapter;
+@@ -73,6 +89,14 @@ class PhoneSettingsTab : public QWidget {
+     QLabel *status = nullptr;
+     QLabel *hint = nullptr;
+     QPushButton *pair_button = nullptr;
++    QPushButton *scan_button = nullptr;
++    QWidget *nearby = nullptr;
++    QVBoxLayout *nearby_list = nullptr;
++    QLabel *nearby_hint = nullptr;
++    QTimer *scan_timer = nullptr;
++    QMap<QString, QWidget *> nearby_rows;
++    QMap<QString, QString> wheels;  // tire sensor address -> wheel, from the vehicle service
++    QString obd_address;            // the vehicle service's OBD adapter
+     QVBoxLayout *device_list = nullptr;
+     QLabel *no_devices = nullptr;
+     QTimer *countdown = nullptr;
+diff --git a/src/app/pages/phone.cpp b/src/app/pages/phone.cpp
+index f03cce3..20d7a87 100644
+--- a/src/app/pages/phone.cpp
++++ b/src/app/pages/phone.cpp
+@@ -8,6 +8,7 @@
+ #include "DashLog.hpp"
+ 
+ #include "app/arbiter.hpp"
++#include "app/services/vehicle_client.hpp"
+ #include "app/widgets/dialog.hpp"
+ 
+ #include "app/pages/phone.hpp"
+@@ -15,8 +16,26 @@
+ namespace {
+ // How long the unit stays visible for a phone to find it
+ constexpr int kPairSeconds = 180;
++// How long "add device" scans
++constexpr int kScanSeconds = 60;
+ const char *kLastDevice = "Phone/last_device";
+ 
++// Wheels a tire sensor can be put on (the vehicle service's names)
++const QList<QPair<QString, QString>> kWheels = {
++    {"front_left", "Front left"},     {"front_right", "Front right"},
++    {"rear_left", "Rear left"},       {"rear_right", "Rear right"},
++    {"spare", "Spare"},               {"trailer_left", "Trailer left"},
++    {"trailer_right", "Trailer right"},
++};
++
++QString wheel_label(const QString &key)
++{
++    for (const auto &w : kWheels)
++        if (w.first == key)
++            return w.second;
++    return key;
++}
++
+ QString spaced_code(const QString &code)
+ {
+     // 123456 -> "123 456", easier to compare at a glance
+@@ -83,8 +102,9 @@ void PairingAgent::requestPinCode(BluezQt::DevicePtr device, const BluezQt::Requ
+ {
+     // Old devices without Secure Simple Pairing: the usual default PIN
+     if (this->pairing_mode) {
+-        DASH_LOG(info) << "[Phone] PIN request from " << device->name().toStdString() << ", answering 0000";
+-        request.accept("0000");
++        const QString pin = this->pin.isEmpty() ? QString("0000") : this->pin;
++        DASH_LOG(info) << "[Phone] PIN request from " << device->name().toStdString() << ", answering " << pin.toStdString();
++        request.accept(pin);
+     }
+     else {
+         request.reject();
+@@ -220,6 +240,14 @@ QWidget *PhoneSettingsTab::phones_tab()
+     this->pair_button->setCheckable(true);
+     connect(this->pair_button, &QPushButton::clicked, [this](bool checked){ this->set_pairing(checked); });
+     header->addWidget(this->pair_button, 0, Qt::AlignTop);
++
++    // The unit looks for devices itself: OBD adapters and tire sensors can't
++    // find it the way a phone does
++    this->scan_button = new QPushButton("add device", widget);
++    this->scan_button->setFont(this->arbiter.forge().font(14));
++    this->scan_button->setCheckable(true);
++    connect(this->scan_button, &QPushButton::clicked, [this](bool checked){ this->set_scanning(checked); });
++    header->addWidget(this->scan_button, 0, Qt::AlignTop);
+     layout->addLayout(header);
+     layout->addWidget(Session::Forge::br());
+ 
+@@ -230,12 +258,54 @@ QWidget *PhoneSettingsTab::phones_tab()
+     auto list = new QWidget(scroll);
+     this->device_list = new QVBoxLayout(list);
+     this->device_list->setContentsMargins(0, 0, 0, 0);
+-    this->no_devices = new QLabel("No paired phones yet.", list);
++    this->no_devices = new QLabel("No paired devices yet.", list);
+     this->no_devices->setFont(this->arbiter.forge().font(12));
+     this->no_devices->setAlignment(Qt::AlignCenter);
+     this->device_list->addWidget(this->no_devices);
++
++    // Found by "add device"
++    this->nearby = new QWidget(list);
++    auto nearby_layout = new QVBoxLayout(this->nearby);
++    nearby_layout->setContentsMargins(0, 12, 0, 0);
++    auto nearby_title = new QLabel("Nearby devices", this->nearby);
++    QFont title_font(this->arbiter.forge().font(14));
++    title_font.setBold(true);
++    nearby_title->setFont(title_font);
++    nearby_layout->addWidget(nearby_title);
++    this->nearby_hint = new QLabel(this->nearby);
++    this->nearby_hint->setFont(this->arbiter.forge().font(11));
++    this->nearby_hint->setProperty("muted", true);
++    this->nearby_hint->setWordWrap(true);
++    nearby_layout->addWidget(this->nearby_hint);
++    this->nearby_list = new QVBoxLayout();
++    this->nearby_list->setContentsMargins(0, 0, 0, 0);
++    nearby_layout->addLayout(this->nearby_list);
++    this->nearby->hide();
++    this->device_list->addWidget(this->nearby);
++
+     this->device_list->addStretch();
+     scroll->setWidget(list);
++
++    this->scan_timer = new QTimer(this);
++    this->scan_timer->setSingleShot(true);
++    this->scan_timer->setInterval(kScanSeconds * 1000);
++    connect(this->scan_timer, &QTimer::timeout, [this]{ this->set_scanning(false); });
++
++    // Which tire sensor is on which wheel, and the OBD adapter, from the vehicle service
++    VehicleClient &client = VehicleClient::instance();
++    auto read_config = [this](const QVariantMap &c){
++        this->obd_address = c.value("obd_link").toString() == "elm327-bt" ? c.value("obd_bt_address").toString() : QString();
++        this->wheels.clear();
++        const QVariantMap sensors = c.value("tpms_sensors").toMap();
++        for (auto it = sensors.begin(); it != sensors.end(); ++it)
++            if (!it.value().toString().isEmpty())
++                this->wheels[it.value().toString().toUpper()] = it.key();
++        if (this->adapter)
++            for (auto device : this->adapter->devices())
++                this->update_device(device);
++    };
++    connect(&client, &VehicleClient::config_changed, this, read_config);
++    client.call("GetConfig", {}, [read_config](const QVariantList &r){ read_config(r.value(0).toMap()); });
+     layout->addWidget(scroll, 1);
+ 
+     this->update_header();
+@@ -254,7 +324,14 @@ void PhoneSettingsTab::set_adapter(BluezQt::AdapterPtr adapter)
+         DASH_LOG(info) << "[Phone] Adapter " << this->adapter->address().toStdString() << " as \"" << this->adapter->name().toStdString() << "\"";
+         connect(this->adapter.data(), &BluezQt::Adapter::deviceAdded, this, [this](BluezQt::DevicePtr device){ this->update_device(device); });
+         connect(this->adapter.data(), &BluezQt::Adapter::deviceChanged, this, [this](BluezQt::DevicePtr device){ this->update_device(device); });
+-        connect(this->adapter.data(), &BluezQt::Adapter::deviceRemoved, this, [this](BluezQt::DevicePtr device){ this->remove_device(device->address()); });
++        connect(this->adapter.data(), &BluezQt::Adapter::deviceRemoved, this, [this](BluezQt::DevicePtr device){
++            this->remove_device(device->address());
++            this->remove_nearby(device->address());
++        });
++        connect(this->adapter.data(), &BluezQt::Adapter::discoveringChanged, this, [this](bool discovering){
++            if (!discovering && this->scan_button->isChecked() && this->adapter)
++                this->adapter->startDiscovery();  // something else stopped it
++        });
+         connect(this->adapter.data(), &BluezQt::Adapter::discoverableChanged, this, [this](bool discoverable){
+             if (!discoverable && this->agent->pairing_mode)
+                 this->set_pairing(false);
+@@ -305,10 +382,12 @@ void PhoneSettingsTab::update_header()
+         this->status->setText("Bluetooth is not available");
+         this->hint->setText("No Bluetooth adapter was found.");
+         this->pair_button->setEnabled(false);
++        this->scan_button->setEnabled(false);
+         return;
+     }
+ 
+     this->pair_button->setEnabled(true);
++    this->scan_button->setEnabled(true);
+     const QString name = this->adapter->name();
+     if (this->agent->pairing_mode) {
+         this->status->setText(QString("Visible as “%1” · %2:%3")
+@@ -323,7 +402,7 @@ void PhoneSettingsTab::update_header()
+             if (device->isPaired() && device->isConnected())
+                 connected.append(device->name());
+         }
+-        this->status->setText(connected.isEmpty() ? QString("No phone connected") : QString("Connected to %1").arg(connected.join(", ")));
++        this->status->setText(connected.isEmpty() ? QString("Nothing connected") : QString("Connected to %1").arg(connected.join(", ")));
+         this->hint->setText(QString("This unit appears as “%1”.").arg(name));
+     }
+ }
+@@ -333,8 +412,11 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+     const QString address = device->address();
+     if (!device->isPaired()) {
+         this->remove_device(address);
++        this->update_nearby(device);
+         return;
+     }
++    this->remove_nearby(address);
++    const Kind kind = kind_of(device);
+ 
+     // Newly paired: trust it (allows reconnecting without asking) and end pairing mode
+     if (!this->rows.contains(address)) {
+@@ -356,7 +438,7 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+         icon->setFlat(true);
+         icon->setFocusPolicy(Qt::NoFocus);
+         icon->setAttribute(Qt::WA_TransparentForMouseEvents);
+-        this->arbiter.forge().iconize("smartphone", icon, 28);
++        icon->setObjectName("icon");
+         layout->addWidget(icon);
+ 
+         auto text = new QVBoxLayout();
+@@ -375,7 +457,12 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+         toggle->setObjectName("toggle");
+         toggle->setFont(this->arbiter.forge().font(14));
+         toggle->setFlat(true);
+-        connect(toggle, &QPushButton::clicked, [device]{
++        connect(toggle, &QPushButton::clicked, [this, device]{
++            // An OBD adapter is opened by the vehicle service, not connected here
++            if (kind_of(device) == Kind::Obd) {
++                this->use_for_obd(device->address());
++                return;
++            }
+             if (device->isConnected())
+                 device->disconnectFromDevice();
+             else
+@@ -392,14 +479,26 @@ void PhoneSettingsTab::update_device(BluezQt::DevicePtr device)
+         });
+         layout->addWidget(forget);
+ 
+-        this->device_list->insertWidget(this->device_list->count() - 1, row);
++        // Paired devices above the "Nearby devices" section
++        this->device_list->insertWidget(this->device_list->indexOf(this->nearby), row);
+         this->rows.insert(address, row);
+         this->no_devices->hide();
+     }
+ 
++    this->arbiter.forge().iconize(icon_for(kind), row->findChild<QPushButton *>("icon"), 28);
+     row->findChild<QLabel *>("name")->setText(device->name());
+-    row->findChild<QLabel *>("state")->setText(device->isConnected() ? "Connected" : "Not connected");
+-    row->findChild<QPushButton *>("toggle")->setText(device->isConnected() ? "disconnect" : "connect");
++    auto toggle = row->findChild<QPushButton *>("toggle");
++    if (kind == Kind::Obd) {
++        const bool in_use = address.compare(this->obd_address, Qt::CaseInsensitive) == 0;
++        row->findChild<QLabel *>("state")->setText(in_use ? "OBD-II adapter · used for the vehicle" : "OBD-II adapter");
++        toggle->setText("use for OBD");
++        toggle->setVisible(!in_use);
++    }
++    else {
++        row->findChild<QLabel *>("state")->setText(device->isConnected() ? "Connected" : "Not connected");
++        toggle->setText(device->isConnected() ? "disconnect" : "connect");
++        toggle->setVisible(true);
++    }
+     this->update_header();
+ }
+ 
+@@ -412,3 +511,263 @@ void PhoneSettingsTab::remove_device(const QString &address)
+     this->update_header();
+ }
+ 
++
++// ---------------------------------------------------------------- add device
++
++PhoneSettingsTab::Kind PhoneSettingsTab::kind_of(BluezQt::DevicePtr device)
++{
++    // BLE tire sensors: company 0x0100, 16 bytes (what the vehicle service decodes)
++    const auto data = device->manufacturerData();
++    if (data.contains(0x0100) && data.value(0x0100).size() == 16)
++        return Kind::Tire;
++    static const QRegularExpression obd("OBD|ELM ?327|V-?LINK|VGATE|VEEPEAK|KONNWEI|ICAR|BAFX|CARISTA|KIWI|SCAN ?TOOL",
++                                        QRegularExpression::CaseInsensitiveOption);
++    if (obd.match(device->name()).hasMatch())
++        return Kind::Obd;
++    if (device->type() == BluezQt::Device::Phone)
++        return Kind::Phone;
++    return Kind::Other;
++}
++
++QString PhoneSettingsTab::icon_for(Kind kind)
++{
++    switch (kind) {
++        case Kind::Phone: return "smartphone";
++        case Kind::Obd: return "directions_car";
++        case Kind::Tire: return "speed";
++        default: return "bluetooth";
++    }
++}
++
++void PhoneSettingsTab::set_scanning(bool enabled)
++{
++    if (enabled && !this->adapter) {
++        this->scan_button->setChecked(false);
++        return;
++    }
++    if (this->adapter) {
++        if (enabled) {
++            if (!this->adapter->isPowered())
++                this->adapter->setPowered(true);
++            // Classic (OBD adapters, phones) and LE (tire sensors), duplicates
++            // included so sensors' readings keep arriving
++            this->adapter->setDiscoveryFilter({{"Transport", "auto"}, {"DuplicateData", true}});
++            this->adapter->startDiscovery();
++            this->scan_timer->start();
++        }
++        else {
++            this->scan_timer->stop();
++            if (this->adapter->isDiscovering())
++                this->adapter->stopDiscovery();
++        }
++    }
++    this->scan_button->setChecked(enabled);
++    this->scan_button->setText(enabled ? "stop" : "add device");
++    this->nearby->setVisible(enabled || !this->nearby_rows.isEmpty());
++    this->nearby_hint->setText(enabled
++        ? "Looking for devices… Turn on the OBD adapter (plug it in, ignition on). Tire sensors show up "
++          "once they send a reading: pump or let some air out, or drive a short way."
++        : "Not looking any more. Tap “add device” to look again.");
++    if (enabled && this->adapter)
++        for (auto device : this->adapter->devices())
++            this->update_nearby(device);
++}
++
++void PhoneSettingsTab::update_nearby(BluezQt::DevicePtr device)
++{
++    const QString address = device->address();
++    const Kind kind = kind_of(device);
++    // Only while scanning, only unpaired, and not the many nameless LE adverts
++    if (device->isPaired() || (!this->scan_button->isChecked() && !this->nearby_rows.contains(address)))
++        return;
++    if (kind != Kind::Tire && (device->name().isEmpty() || device->name() == device->address().replace(':', '-')))
++        return;
++
++    QWidget *row = this->nearby_rows.value(address);
++    if (!row) {
++        row = new QFrame();
++        row->setProperty("md", "card");
++        auto layout = new QHBoxLayout(row);
++        layout->setContentsMargins(12, 6, 12, 6);
++        auto icon = new QPushButton(row);
++        icon->setFlat(true);
++        icon->setFocusPolicy(Qt::NoFocus);
++        icon->setAttribute(Qt::WA_TransparentForMouseEvents);
++        this->arbiter.forge().iconize(icon_for(kind), icon, 28);
++        layout->addWidget(icon);
++
++        auto text = new QVBoxLayout();
++        auto name = new QLabel(row);
++        name->setObjectName("name");
++        name->setFont(this->arbiter.forge().font(14));
++        text->addWidget(name);
++        auto state = new QLabel(row);
++        state->setObjectName("state");
++        state->setProperty("muted", true);
++        state->setFont(this->arbiter.forge().font(11));
++        state->setWordWrap(true);
++        text->addWidget(state);
++        layout->addLayout(text, 1);
++
++        auto action = new QPushButton(row);
++        action->setObjectName("action");
++        action->setFont(this->arbiter.forge().font(14));
++        action->setFlat(true);
++        connect(action, &QPushButton::clicked, [this, device]{
++            if (kind_of(device) == Kind::Tire)
++                this->choose_wheel(device);
++            else if (kind_of(device) == Kind::Obd)
++                this->pair_device(device, {"1234", "0000"});
++            else
++                this->pair_device(device, {"0000", "1234"});
++        });
++        layout->addWidget(action);
++
++        this->nearby_list->addWidget(row);
++        this->nearby_rows.insert(address, row);
++        this->nearby->show();
++    }
++
++    auto name = row->findChild<QLabel *>("name");
++    auto state = row->findChild<QLabel *>("state");
++    auto action = row->findChild<QPushButton *>("action");
++    if (row->property("busy").toBool())
++        return;  // pairing: leave its message alone
++    const QString signal = device->rssi() != -32768 && device->rssi() != 0 ? QString(" · %1 dBm").arg(device->rssi()) : QString();
++    switch (kind) {
++        case Kind::Tire: {
++            name->setText(device->name().isEmpty() || device->name() == QString(address).replace(':', '-') ? "Tire sensor" : device->name());
++            const QString wheel = this->wheels.value(address.toUpper());
++            state->setText(QString("%1%2%3").arg(address)
++                               .arg(wheel.isEmpty() ? QString() : " · " + wheel_label(wheel)).arg(signal));
++            action->setText(wheel.isEmpty() ? "set wheel" : "change wheel");
++            break;
++        }
++        case Kind::Obd:
++            name->setText(device->name());
++            state->setText("OBD-II adapter" + signal);
++            action->setText("pair");
++            break;
++        case Kind::Phone:
++            name->setText(device->name());
++            state->setText("Phone" + signal);
++            action->setText("pair");
++            break;
++        default:
++            name->setText(device->name());
++            state->setText("Bluetooth device" + signal);
++            action->setText("pair");
++            break;
++    }
++}
++
++void PhoneSettingsTab::remove_nearby(const QString &address)
++{
++    QWidget *row = this->nearby_rows.take(address);
++    if (row)
++        row->deleteLater();
++    if (this->nearby_rows.isEmpty() && !this->scan_button->isChecked())
++        this->nearby->hide();
++}
++
++// Pairs a device from the unit's side. Legacy devices (most OBD adapters) ask
++// for a PIN: try each of `pins` until one works.
++void PhoneSettingsTab::pair_device(BluezQt::DevicePtr device, QStringList pins)
++{
++    QWidget *row = this->nearby_rows.value(device->address());
++    auto state = row ? row->findChild<QLabel *>("state") : nullptr;
++    auto action = row ? row->findChild<QPushButton *>("action") : nullptr;
++    if (row) {
++        row->setProperty("busy", true);
++        action->setEnabled(false);
++        state->setText(pins.size() > 1 ? "Pairing…" : QString("Pairing (PIN %1)…").arg(pins.first()));
++    }
++
++    const bool was_pairing = this->agent->pairing_mode;
++    this->agent->pairing_mode = true;
++    this->agent->pin = pins.first();
++    // Discovery slows pairing down and some adapters time out
++    if (this->adapter && this->adapter->isDiscovering())
++        this->adapter->stopDiscovery();
++
++    BluezQt::PendingCall *call = device->pair();
++    connect(call, &BluezQt::PendingCall::finished, this, [this, device, pins, was_pairing](BluezQt::PendingCall *call){
++        this->agent->pin.clear();
++        this->agent->pairing_mode = was_pairing || this->pair_button->isChecked();
++        if (this->scan_button->isChecked() && this->adapter)
++            this->adapter->startDiscovery();
++
++        const QString address = device->address();
++        QWidget *row = this->nearby_rows.value(address);
++        if (!call->error()) {
++            DASH_LOG(info) << "[Phone] Paired " << device->name().toStdString();
++            device->setTrusted(true);
++            if (kind_of(device) == Kind::Obd)
++                this->use_for_obd(address);
++            this->update_device(device);
++            return;
++        }
++
++        DASH_LOG(info) << "[Phone] Pairing " << device->name().toStdString() << " failed: " << call->errorText().toStdString();
++        const bool wrong_pin = call->error() == BluezQt::PendingCall::AuthenticationFailed ||
++                               call->error() == BluezQt::PendingCall::AuthenticationRejected;
++        if (wrong_pin && pins.size() > 1) {
++            this->pair_device(device, pins.mid(1));
++            return;
++        }
++        if (row) {
++            row->setProperty("busy", false);
++            row->findChild<QPushButton *>("action")->setEnabled(true);
++            row->findChild<QLabel *>("state")->setText(
++                wrong_pin ? "Couldn't pair: the device didn't accept the PIN (1234 or 0000)"
++                          : QString("Couldn't pair: %1. Make sure it's on and close by.").arg(call->errorText()));
++        }
++    });
++}
++
++// Tire sensors don't pair; the vehicle service reads their broadcasts. Put
++// this one on a wheel (which also turns Bluetooth tire sensors on).
++void PhoneSettingsTab::choose_wheel(BluezQt::DevicePtr device)
++{
++    auto dialog = new Dialog(this->arbiter, true, this->arbiter.window());
++    dialog->setAttribute(Qt::WA_DeleteOnClose);
++    dialog->set_title("Which wheel is this sensor on?");
++    auto body = new QWidget();
++    auto grid = new QGridLayout(body);
++    const QString address = device->address().toUpper();
++    const QString current = this->wheels.value(address);
++    for (int i = 0; i < kWheels.size(); i++) {
++        auto button = new QPushButton(kWheels[i].second, body);
++        button->setFont(this->arbiter.forge().font(14));
++        button->setCheckable(true);
++        button->setChecked(kWheels[i].first == current);
++        const QString wheel = kWheels[i].first;
++        connect(button, &QPushButton::clicked, [this, dialog, wheel, address]{
++            VehicleClient &client = VehicleClient::instance();
++            client.call("SetConfig", {QVariantMap{{"tpms_ble", true}}});
++            client.call("AssignTpmsSensor", {wheel, address});
++            this->wheels[address] = wheel;
++            if (this->adapter)
++                if (auto device = this->adapter->deviceForAddress(address))
++                    this->update_nearby(device);
++            dialog->close();
++        });
++        grid->addWidget(button, i / 2, i % 2);
++    }
++    if (!VehicleClient::instance().running) {
++        auto note = new QLabel("The vehicle service isn't running, so this can't be saved.", body);
++        note->setWordWrap(true);
++        grid->addWidget(note, (kWheels.size() + 1) / 2, 0, 1, 2);
++    }
++    dialog->set_body(body);
++    dialog->open();
++}
++
++void PhoneSettingsTab::use_for_obd(const QString &address)
++{
++    VehicleClient::instance().call("SetConfig", {QVariantMap{{"obd_link", "elm327-bt"}, {"obd_bt_address", address}}});
++    this->obd_address = address;
++    if (this->adapter)
++        if (auto device = this->adapter->deviceForAddress(address))
++            this->update_device(device);
++}
+diff --git a/src/app/pages/settings.cpp b/src/app/pages/settings.cpp
+index f24097d..2767189 100644
+--- a/src/app/pages/settings.cpp
++++ b/src/app/pages/settings.cpp
+@@ -42,7 +42,7 @@ void SettingsPage::init()
+ {
+     this->addTab(new MainSettingsTab(this->arbiter), "Main");
+     this->addTab(new LayoutSettingsTab(this->arbiter), "Layout");
+-    this->addTab(new PhoneSettingsTab(this->arbiter, this), "Phone");
++    this->addTab(new PhoneSettingsTab(this->arbiter, this), "Bluetooth");
+     this->addTab(new NetworkSettingsTab(this->arbiter, this), "Network");
+     this->addTab(new LightingSettingsTab(this->arbiter, this), "Lighting");
+     this->addTab(new VehicleSettingsTab(this->arbiter, this), "Vehicle");
+diff --git a/src/app/pages/vehicle_settings.cpp b/src/app/pages/vehicle_settings.cpp
+index f715715..0554838 100644
+--- a/src/app/pages/vehicle_settings.cpp
++++ b/src/app/pages/vehicle_settings.cpp
+@@ -145,7 +145,7 @@ QWidget *VehicleSettingsTab::settings_widget()
+     this->port_row = this->row("Port", this->port, true);
+     layout->addWidget(this->port_row);
+ 
+-    this->bt = new Selector({}, QString(), font14, this->arbiter, widget, "pair it on the Phone tab first");
++    this->bt = new Selector({}, QString(), font14, this->arbiter, widget, "pair it on the Bluetooth tab first");
+     connect(this->bt, &Selector::item_changed, [this](QString item) {
+         if (this->loading || item.isEmpty())
+             return;
+-- 
+2.43.0
+

@@ -1,0 +1,4 @@
+tags:
+  screens:
+    # Screenshots: only when asked (flutter test --tags screens --update-goldens)
+    skip: "screenshots: run with --tags screens --update-goldens"

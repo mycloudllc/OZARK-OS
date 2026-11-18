@@ -60,6 +60,8 @@ Release images have no SSH or serial login. To debug, build a dev image yourself
 
 ## Screenshots
 
+Taken on a PC build of 0.2.0 with a simulated car, phone and TrailCommand hub.
+
 ### Media
 
 | Radio | Radio (dark) |
@@ -70,6 +72,14 @@ Release images have no SSH or serial login. To debug, build a dev image yourself
 | **Local player (dark)** | **Android Auto** |
 | ![Local player, dark](docs/screenshots/local-player-dark.png) | ![Android Auto](docs/screenshots/android-auto.png) |
 
+### Vehicle
+
+| Gauges | Trouble codes |
+|---|---|
+| ![Gauges](docs/screenshots/vehicle-gauges.png) | ![Trouble codes](docs/screenshots/vehicle-diagnostics.png) |
+| **Tires** | **Lighting** |
+| ![Tires](docs/screenshots/vehicle-tires.png) | ![Lighting](docs/screenshots/lighting.png) |
+
 ### TrailCommand
 
 | Overview | Overview (dark) |
@@ -79,20 +89,22 @@ Release images have no SSH or serial login. To debug, build a dev image yourself
 | ![Controls](docs/screenshots/trailcommand-controls.png) | ![Controls, dark](docs/screenshots/trailcommand-controls-dark.png) |
 | **Tyres** | **Service** |
 | ![Tyres](docs/screenshots/trailcommand-tires.png) | ![Service](docs/screenshots/trailcommand-service.png) |
-| **Power** | **Lighting** |
-| ![Power](docs/screenshots/trailcommand-power.png) | ![Lighting](docs/screenshots/lighting.png) |
+| **Power** | |
+| ![Power](docs/screenshots/trailcommand-power.png) | |
 
 ### Settings
 
-| Settings | Phone |
+| Settings | Bluetooth |
 |---|---|
-| ![Settings](docs/screenshots/settings-main.png) | ![Phone](docs/screenshots/settings-phone.png) |
+| ![Settings](docs/screenshots/settings-main.png) | ![Bluetooth](docs/screenshots/settings-bluetooth.png) |
+| **Adding a device** | **Pairing the phone app** |
+| ![Add device](docs/screenshots/settings-bluetooth-add.png) | ![Pairing code](docs/screenshots/remote-pairing.png) |
 | **Network** | **On-screen keyboard** |
 | ![Network](docs/screenshots/settings-network.png) | ![Keyboard](docs/screenshots/keyboard.png) |
-| **Theme colour** | **About** |
-| ![Theme colour](docs/screenshots/theme-color.png) | ![About](docs/screenshots/about.png) |
-| **Update** | **Installing an update** |
-| ![Update](docs/screenshots/settings-update.png) | ![Installing](docs/screenshots/settings-update-installing.png) |
+| **Theme colour** | **Update** |
+| ![Theme colour](docs/screenshots/theme-color.png) | ![Update](docs/screenshots/settings-update.png) |
+| **About** | **About (dark)** |
+| ![About](docs/screenshots/about.png) | ![About, dark](docs/screenshots/about-dark.png) |
 
 ## Hardware
 

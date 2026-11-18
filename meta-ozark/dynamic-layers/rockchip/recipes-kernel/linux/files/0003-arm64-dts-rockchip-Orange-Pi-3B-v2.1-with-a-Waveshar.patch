@@ -1,0 +1,113 @@
+From 91db3a25b526df9579226bead274a9008ab6afb2 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Wed, 4 Nov 2026 18:50:26 -0600
+Subject: [PATCH 3/3] arm64: dts: rockchip: Orange Pi 3B v2.1 with a Waveshare
+ 8" DSI panel
+
+The board's Raspberry Pi style 15-pin DSI connector is DSI1, with the
+panel's I2C on i2c1, as in Xunlong's own kernel. Wire the Waveshare 8"
+DSI LCD (C) there: panel controller at 0x45, Goodix touch at 0x14 (no
+interrupt line: polled), VP1 to DSI1. HDMI on VP0 is unchanged.
+---
+ arch/arm64/boot/dts/rockchip/Makefile         |  1 +
+ ...3566-orangepi-3b-v2.1-ozark-waveshare8.dts | 76 +++++++++++++++++++
+ 2 files changed, 77 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+
+diff --git a/arch/arm64/boot/dts/rockchip/Makefile b/arch/arm64/boot/dts/rockchip/Makefile
+index 09423070c..c180e1690 100644
+--- a/arch/arm64/boot/dts/rockchip/Makefile
++++ b/arch/arm64/boot/dts/rockchip/Makefile
+@@ -86,6 +86,7 @@ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-anbernic-rg503.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-odroid-m1s.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b-v1.1.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b-v2.1.dtb
++dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b-v2.1-ozark-waveshare8.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-pinenote-v1.1.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-pinenote-v1.2.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-pinetab2-v0.1.dtb
+diff --git a/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts b/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+new file mode 100644
+index 000000000..7c4b99cff
+--- /dev/null
++++ b/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+@@ -0,0 +1,76 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Orange Pi 3B v2.1 with a Waveshare 8" DSI LCD (C) (1280x800, Goodix touch)
++ * on the board's Raspberry Pi style 15-pin DSI connector, for Ozark OS.
++ *
++ * That connector is DSI1 (2 lanes), with the panel's I2C on i2c1, wired like
++ * a Raspberry Pi's: the panel's controller at 0x45 (power, backlight), the
++ * touch controller at 0x14, no interrupt line (goodix polls). Display
++ * controller port VP1 drives it; HDMI stays on VP0.
++ */
++
++#include "rk3566-orangepi-3b-v2.1.dts"
++
++/ {
++	model = "Xunlong Orange Pi 3B (Waveshare 8\" DSI)";
++};
++
++&dsi_dphy1 {
++	status = "okay";
++};
++
++&dsi1 {
++	status = "okay";
++	#address-cells = <1>;
++	#size-cells = <0>;
++
++	ports {
++		dsi1_in: port@0 {
++			reg = <0>;
++
++			dsi1_in_vp1: endpoint {
++				remote-endpoint = <&vp1_out_dsi1>;
++			};
++		};
++
++		dsi1_out: port@1 {
++			reg = <1>;
++
++			dsi1_out_panel: endpoint {
++				remote-endpoint = <&panel_in_dsi1>;
++			};
++		};
++	};
++};
++
++&i2c1 {
++	clock-frequency = <100000>;
++	status = "okay";
++
++	panel@45 {
++		compatible = "waveshare,8.0inch-panel";
++		reg = <0x45>;
++
++		port {
++			panel_in_dsi1: endpoint {
++				remote-endpoint = <&dsi1_out_panel>;
++			};
++		};
++	};
++
++	touchscreen@14 {
++		compatible = "goodix,gt911";
++		reg = <0x14>;
++		touchscreen-size-x = <800>;
++		touchscreen-size-y = <1280>;
++		touchscreen-inverted-x;
++		touchscreen-swapped-x-y;
++	};
++};
++
++&vp1 {
++	vp1_out_dsi1: endpoint@ROCKCHIP_VOP2_EP_MIPI1 {
++		reg = <ROCKCHIP_VOP2_EP_MIPI1>;
++		remote-endpoint = <&dsi1_in_vp1>;
++	};
++};
+-- 
+2.43.0
+

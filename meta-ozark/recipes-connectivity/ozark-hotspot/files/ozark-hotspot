@@ -6,7 +6,8 @@
 # the phone joins it and connects back to Dash. Unless SHARE is on, there is
 # no internet behind it, and the phone keeps using mobile data.
 #
-# The Pi's own Wi-Fi runs one access point, on one band. A USB Wi-Fi adapter
+# The main radio (the Pi's own Wi-Fi, or on the Orange Pi 3B the RTL8822CE
+# card in the M.2 slot) runs one access point, on one band. A USB Wi-Fi adapter
 # adds the other band at the same time: same name and key, same network
 # (both radios are ports of the bridge ozarkap, which has the address and the
 # DHCP server). The built-in radio stays on 5 GHz for Android Auto; the
@@ -20,7 +21,8 @@
 #
 # Settings live in /etc/ozark/hotspot.conf, created on first boot with a name
 # from the Pi's serial number and a random key unique to this unit:
-#   IFACE     main radio: auto (the Pi's built-in Wi-Fi) or an interface name
+#   IFACE     main radio: auto (the built-in Wi-Fi, see main_drivers) or an
+#             interface name
 #   IFACE2    second radio: auto (any other Wi-Fi adapter that can be an
 #             access point), an interface name, or none
 #   SSID, PASSWORD
@@ -150,20 +152,32 @@ load() {
     . "$conf"
 }
 
+# Drivers of the built-in radios, the preferred first: the Orange Pi 3B's
+# RTL8822CE card (M.2, PCIe), then the Pi's own Wi-Fi (brcmfmac)
+main_drivers="rtw_8822ce brcmfmac"
+
+driver() {
+    d=$(readlink "/sys/class/net/$1/device/driver")
+    echo "${d##*/}"
+}
+
 builtin() {
-    case "$(readlink "/sys/class/net/$1/device/driver")" in */brcmfmac) return 0 ;; esac
+    case " $main_drivers " in *" $(driver "$1") "*) return 0 ;; esac
     return 1
 }
 
-# The main radio, once it's there: IFACE, or for auto the Pi's built-in
-# Wi-Fi (brcmfmac). Fails if it isn't there (yet).
+# The main radio, once it's there: IFACE, or for auto the first built-in
+# radio found (main_drivers order). Fails if it isn't there (yet).
 main_radio() {
     if [ "$IFACE" != auto ]; then
         [ -d "/sys/class/net/$IFACE" ] && echo "$IFACE"
         return
     fi
-    for i in /sys/class/net/*; do
-        [ -d "$i/wireless" ] && builtin "${i##*/}" && { echo "${i##*/}"; return 0; }
+    for drv in $main_drivers; do
+        for i in /sys/class/net/*; do
+            [ -d "$i/wireless" ] && [ "$(driver "${i##*/}")" = "$drv" ] &&
+                { echo "${i##*/}"; return 0; }
+        done
     done
     return 1
 }
@@ -235,6 +249,11 @@ unblock() {
     for r in /sys/class/rfkill/rfkill*; do
         [ "$(cat "$r/type" 2>/dev/null)" = wlan ] && echo 0 > "$r/soft"
     done
+    # A kernel with cfg80211 built in (Orange Pi 3B) looks for regulatory.db
+    # before the root file system is mounted, fails, and never looks again:
+    # every country is then unknown and 5 GHz is closed to access points.
+    # Drivers whose firmware has its own rules (brcmfmac) don't notice.
+    iw reg reload 2>/dev/null
     iw reg set "$COUNTRY" 2>/dev/null
 }
 

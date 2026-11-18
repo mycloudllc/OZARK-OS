@@ -1,0 +1,678 @@
+From: Ozark <ozark@localhost>
+Date: Sat, 7 Nov 2026 11:40:00 -0600
+Subject: [PATCH] Ozark: Orange Pi 3B v2.1 with a Waveshare 8" DSI panel
+
+Waveshare's 8" DSI LCD (C) on the 3B's Pi-style DSI connector (DSI1,
+i2c1), as verified on the hardware with this kernel:
+
+- panel-waveshare-dsi: the panel MCU's power/backlight driver (from the
+  Raspberry Pi kernel), with the Pi's DSI settings
+- gt911-polled: the GT911 touch, polled (the cable has no interrupt line)
+- rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts: DSI1 on VP0, HDMI off,
+  the panel in place of the board file's Raspberry Pi panel node
+---
+diff -urN a/arch/arm64/boot/dts/rockchip/Makefile b/arch/arm64/boot/dts/rockchip/Makefile
+--- a/arch/arm64/boot/dts/rockchip/Makefile
++++ b/arch/arm64/boot/dts/rockchip/Makefile
+@@ -495,6 +495,7 @@
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-nanopi-r3-rev01.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b-v1.1.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b-v2.1.dtb
++dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b-v2.1-ozark-waveshare8.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-orangepi-3b.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-radxa-zero3-ap6212.dtb
+ dtb-$(CONFIG_ARCH_ROCKCHIP) += rk3566-radxa-zero3.dtb
+diff -urN a/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts b/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+--- a/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+@@ -0,0 +1,61 @@
++// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
++/*
++ * Orange Pi 3B v2.1 with a Waveshare 8" DSI LCD (C) (1280x800) on the
++ * board's Raspberry Pi style 15-pin DSI connector, for Ozark OS.
++ *
++ * The connector is DSI1, the panel's I2C is i2c1: the panel MCU (power,
++ * backlight) at 0x45 replaces the board file's Raspberry Pi panel node, and
++ * the GT911 touch at 0x14 has no interrupt line (polled). As in Orange Pi's
++ * own Pi-screen overlay, DSI1 takes VP0 and HDMI is off; verified on the
++ * hardware with this kernel (mainline's DSI1 shows only a black picture).
++ */
++
++#include "rk3566-orangepi-3b-v2.1.dts"
++
++/ {
++	model = "Xunlong Orange Pi 3B (Waveshare 8\" DSI)";
++};
++
++&video_phy1 {
++	status = "okay";
++};
++
++&dsi1 {
++	status = "okay";
++};
++
++&dsi1_in_vp0 {
++	status = "okay";
++};
++
++&dsi1_in_vp1 {
++	status = "disabled";
++};
++
++&route_dsi1 {
++	status = "disabled";
++};
++
++&hdmi {
++	status = "disabled";
++};
++
++&hdmi_sound {
++	status = "disabled";
++};
++
++&raspits_panel {
++	compatible = "waveshare,8.0inch-panel";
++	status = "okay";
++};
++
++&i2c1 {
++	touchscreen@14 {
++		compatible = "waveshare,gt911-polled";
++		reg = <0x14>;
++		touchscreen-size-x = <800>;
++		touchscreen-size-y = <1280>;
++		touchscreen-inverted-x;
++		touchscreen-swapped-x-y;
++	};
++};
+diff -urN a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -777,4 +777,14 @@
+ 	  TFT-LCD modules. The panel has a 800x1280 resolution and uses
+ 	  24 bit RGB per pixel. It provides a MIPI DSI interface to
+ 	  the host and has a built-in LED backlight.
++config DRM_PANEL_WAVESHARE_TOUCHSCREEN
++	tristate "Waveshare DSI touchscreen panels"
++	depends on DRM_MIPI_DSI
++	depends on I2C
++	depends on BACKLIGHT_CLASS_DEVICE
++	help
++	  Waveshare's Raspberry Pi DSI panels (e.g. the 8" and 10.1" LCD (C),
++	  1280x800), whose power and backlight are run by an MCU on I2C at
++	  0x45, from the Raspberry Pi kernel.
++
+ endmenu
+diff -urN a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -44,6 +44,7 @@
+ obj-$(CONFIG_DRM_PANEL_PANASONIC_VVX10F034N00) += panel-panasonic-vvx10f034n00.o
+ obj-$(CONFIG_DRM_PANEL_RADXA_DISPLAY_8HD) += panel-radxa-display-8hd.o
+ obj-$(CONFIG_DRM_PANEL_RASPBERRYPI_TOUCHSCREEN) += panel-raspberrypi-touchscreen.o
++obj-$(CONFIG_DRM_PANEL_WAVESHARE_TOUCHSCREEN) += panel-waveshare-dsi.o
+ obj-$(CONFIG_DRM_PANEL_RASPITS_TC358762) += panel-raspits-tc358762.o
+ obj-$(CONFIG_DRM_PANEL_RAYDIUM_RM67191) += panel-raydium-rm67191.o
+ obj-$(CONFIG_DRM_PANEL_RAYDIUM_RM68200) += panel-raydium-rm68200.o
+diff -urN a/drivers/gpu/drm/panel/panel-waveshare-dsi.c b/drivers/gpu/drm/panel/panel-waveshare-dsi.c
+--- a/drivers/gpu/drm/panel/panel-waveshare-dsi.c
++++ b/drivers/gpu/drm/panel/panel-waveshare-dsi.c
+@@ -0,0 +1,349 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Waveshare 8.0" and 10.1" 1280x800 DSI panels, for Rockchip vendor kernels.
++ *
++ * Trimmed from Raspberry Pi's panel-waveshare-dsi.c:
++ * Copyright (C) 2023 Raspberry Pi Ltd, based on panel-raspberrypi-touchscreen
++ * by Broadcom.
++ *
++ * Changes from that driver: builds on 5.10 and 6.6, fails probe when the MCU
++ * does not answer on I2C, and fails probe when DSI attach fails.
++ *
++ * The panel is an I2C device. It registers its own DSI device on the host
++ * found through the OF graph, and the MCU handles power and backlight.
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/fb.h>
++#include <linux/i2c.h>
++#include <linux/media-bus-format.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_device.h>
++#include <linux/of_graph.h>
++#include <linux/version.h>
++
++#include <drm/drm_connector.h>
++#include <drm/drm_crtc.h>
++#include <drm/drm_device.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++
++#define WS_DSI_DRIVER_NAME "ws-ts-dsi"
++
++#define WS_REG_INIT_0		0xc0
++#define WS_REG_INIT_1		0xc2
++#define WS_REG_INIT_2		0xac
++#define WS_REG_BL_APPLY		0xaa
++#define WS_REG_BL_LEVEL		0xab	/* inverted: 0xff is darkest */
++#define WS_REG_DISPLAY_ON	0xad
++
++struct ws_panel {
++	struct drm_panel base;
++	struct mipi_dsi_device *dsi;
++	struct i2c_client *i2c;
++	const struct drm_display_mode *mode;
++	enum drm_panel_orientation orientation;
++};
++
++/* The Raspberry Pi driver uses this mode for both the 8.0" and the 10.1". */
++static const struct drm_display_mode ws_panel_1280x800_mode = {
++	.clock = 83333,
++	.hdisplay = 1280,
++	.hsync_start = 1280 + 156,
++	.hsync_end = 1280 + 156 + 20,
++	.htotal = 1280 + 156 + 20 + 40,
++	.vdisplay = 800,
++	.vsync_start = 800 + 40,
++	.vsync_end = 800 + 40 + 48,
++	.vtotal = 800 + 40 + 48 + 40,
++};
++
++static struct ws_panel *panel_to_ts(struct drm_panel *panel)
++{
++	return container_of(panel, struct ws_panel, base);
++}
++
++static int ws_panel_i2c_write(struct ws_panel *ts, u8 reg, u8 val)
++{
++	int ret = i2c_smbus_write_byte_data(ts->i2c, reg, val);
++
++	if (ret)
++		dev_err(&ts->i2c->dev, "I2C write to 0x%02x failed: %d\n",
++			reg, ret);
++	return ret;
++}
++
++static int ws_panel_disable(struct drm_panel *panel)
++{
++	ws_panel_i2c_write(panel_to_ts(panel), WS_REG_DISPLAY_ON, 0x00);
++	return 0;
++}
++
++static int ws_panel_enable(struct drm_panel *panel)
++{
++	ws_panel_i2c_write(panel_to_ts(panel), WS_REG_DISPLAY_ON, 0x01);
++	return 0;
++}
++
++static int ws_panel_get_modes(struct drm_panel *panel,
++			      struct drm_connector *connector)
++{
++	static const u32 bus_format = MEDIA_BUS_FMT_RGB888_1X24;
++	struct ws_panel *ts = panel_to_ts(panel);
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, ts->mode);
++	if (!mode)
++		return -ENOMEM;
++
++	mode->type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	drm_mode_set_name(mode);
++	drm_mode_probed_add(connector, mode);
++
++	connector->display_info.bpc = 8;
++	drm_display_info_set_bus_formats(&connector->display_info,
++					 &bus_format, 1);
++	drm_connector_set_panel_orientation(connector, ts->orientation);
++
++	return 1;
++}
++
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++static enum drm_panel_orientation ws_panel_get_orientation(struct drm_panel *panel)
++{
++	return panel_to_ts(panel)->orientation;
++}
++#endif
++
++static const struct drm_panel_funcs ws_panel_funcs = {
++	.disable = ws_panel_disable,
++	.enable = ws_panel_enable,
++	.get_modes = ws_panel_get_modes,
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
++	.get_orientation = ws_panel_get_orientation,
++#endif
++};
++
++static int ws_panel_bl_update_status(struct backlight_device *bl)
++{
++	struct ws_panel *ts = bl_get_data(bl);
++	int ret;
++
++	ret = ws_panel_i2c_write(ts, WS_REG_BL_LEVEL,
++				 0xff - backlight_get_brightness(bl));
++	if (ret)
++		return ret;
++
++	return ws_panel_i2c_write(ts, WS_REG_BL_APPLY, 0x01);
++}
++
++static const struct backlight_ops ws_panel_bl_ops = {
++	.update_status = ws_panel_bl_update_status,
++};
++
++static struct backlight_device *ws_panel_create_backlight(struct ws_panel *ts)
++{
++	struct device *dev = ts->base.dev;
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = 255,
++		.max_brightness = 255,
++	};
++
++	return devm_backlight_device_register(dev, dev_name(dev), dev, ts,
++					      &ws_panel_bl_ops, &props);
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
++static void ws_dsi_unregister(void *data)
++{
++	mipi_dsi_device_unregister(data);
++}
++
++static void ws_dsi_detach(void *data)
++{
++	mipi_dsi_detach(data);
++}
++
++static struct mipi_dsi_device *
++ws_dsi_register(struct device *dev, struct mipi_dsi_host *host,
++		const struct mipi_dsi_device_info *info)
++{
++	struct mipi_dsi_device *dsi;
++	int ret;
++
++	dsi = mipi_dsi_device_register_full(host, info);
++	if (IS_ERR(dsi))
++		return dsi;
++
++	ret = devm_add_action_or_reset(dev, ws_dsi_unregister, dsi);
++	return ret ? ERR_PTR(ret) : dsi;
++}
++
++static int ws_dsi_attach(struct device *dev, struct mipi_dsi_device *dsi)
++{
++	int ret = mipi_dsi_attach(dsi);
++
++	if (ret)
++		return ret;
++
++	return devm_add_action_or_reset(dev, ws_dsi_detach, dsi);
++}
++#else
++#define ws_dsi_register devm_mipi_dsi_device_register_full
++#define ws_dsi_attach devm_mipi_dsi_attach
++#endif
++
++static void ws_panel_remove_action(void *data)
++{
++	drm_panel_remove(data);
++}
++
++static struct mipi_dsi_host *ws_panel_find_host(struct device *dev,
++						struct device_node **port)
++{
++	struct device_node *endpoint, *host_node;
++	struct mipi_dsi_host *host;
++
++	endpoint = of_graph_get_next_endpoint(dev->of_node, NULL);
++	if (!endpoint)
++		return ERR_PTR(-ENODEV);
++
++	host_node = of_graph_get_remote_port_parent(endpoint);
++	if (!host_node) {
++		of_node_put(endpoint);
++		return ERR_PTR(-ENODEV);
++	}
++
++	host = of_find_mipi_dsi_host_by_node(host_node);
++	of_node_put(host_node);
++	if (!host) {
++		of_node_put(endpoint);
++		return ERR_PTR(-EPROBE_DEFER);
++	}
++
++	*port = of_graph_get_remote_port(endpoint);
++	of_node_put(endpoint);
++
++	return *port ? host : ERR_PTR(-ENODEV);
++}
++
++static int ws_panel_probe(struct i2c_client *i2c)
++{
++	struct device *dev = &i2c->dev;
++	struct mipi_dsi_device_info info = {
++		.type = WS_DSI_DRIVER_NAME,
++		.channel = 0,
++	};
++	struct mipi_dsi_host *host;
++	struct ws_panel *ts;
++	int ret;
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++
++	ts->mode = &ws_panel_1280x800_mode;
++	ts->i2c = i2c;
++	i2c_set_clientdata(i2c, ts);
++
++	ret = of_drm_get_panel_orientation(dev->of_node, &ts->orientation);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get orientation\n");
++
++	/* Find the host first so a deferred probe does not repeat the init. */
++	host = ws_panel_find_host(dev, &info.node);
++	if (IS_ERR(host))
++		return dev_err_probe(dev, PTR_ERR(host),
++				     "failed to find DSI host\n");
++
++	ret = ws_panel_i2c_write(ts, WS_REG_INIT_0, 0x01);
++	if (!ret)
++		ret = ws_panel_i2c_write(ts, WS_REG_INIT_1, 0x01);
++	if (!ret)
++		ret = ws_panel_i2c_write(ts, WS_REG_INIT_2, 0x01);
++	if (ret) {
++		of_node_put(info.node);
++		return ret;
++	}
++
++	/* The DSI device takes over the info.node reference and drops it on
++	 * release, so it is not put here.
++	 */
++	ts->dsi = ws_dsi_register(dev, host, &info);
++	if (IS_ERR(ts->dsi))
++		return dev_err_probe(dev, PTR_ERR(ts->dsi),
++				     "DSI device registration failed\n");
++
++	drm_panel_init(&ts->base, dev, &ws_panel_funcs,
++		       DRM_MODE_CONNECTOR_DSI);
++
++	ts->base.backlight = ws_panel_create_backlight(ts);
++	if (IS_ERR(ts->base.backlight))
++		return dev_err_probe(dev, PTR_ERR(ts->base.backlight),
++				     "failed to create backlight\n");
++
++	/* Must come before attach: the host looks the panel up during it. */
++	drm_panel_add(&ts->base);
++	ret = devm_add_action_or_reset(dev, ws_panel_remove_action, &ts->base);
++	if (ret)
++		return ret;
++
++	ts->dsi->mode_flags = MIPI_DSI_MODE_VIDEO_HSE | MIPI_DSI_MODE_VIDEO |
++			      MIPI_DSI_CLOCK_NON_CONTINUOUS;
++	ts->dsi->format = MIPI_DSI_FMT_RGB888;
++	ts->dsi->lanes = 2;
++
++	ret = ws_dsi_attach(dev, ts->dsi);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to attach to DSI host\n");
++
++	return 0;
++}
++
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 1, 0)
++static int ws_panel_remove(struct i2c_client *i2c)
++{
++	ws_panel_disable(&((struct ws_panel *)i2c_get_clientdata(i2c))->base);
++	return 0;
++}
++#else
++static void ws_panel_remove(struct i2c_client *i2c)
++{
++	ws_panel_disable(&((struct ws_panel *)i2c_get_clientdata(i2c))->base);
++}
++#endif
++
++static void ws_panel_shutdown(struct i2c_client *i2c)
++{
++	ws_panel_disable(&((struct ws_panel *)i2c_get_clientdata(i2c))->base);
++}
++
++static const struct of_device_id ws_panel_of_ids[] = {
++	{ .compatible = "waveshare,8.0inch-panel" },
++	{ .compatible = "waveshare,10.1inch-panel" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, ws_panel_of_ids);
++
++static struct i2c_driver ws_panel_driver = {
++	.driver = {
++		.name = "ws_touchscreen",
++		.of_match_table = ws_panel_of_ids,
++	},
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
++	.probe_new = ws_panel_probe,
++#else
++	.probe = ws_panel_probe,
++#endif
++	.remove = ws_panel_remove,
++	.shutdown = ws_panel_shutdown,
++};
++module_i2c_driver(ws_panel_driver);
++
++MODULE_DESCRIPTION("Waveshare 8.0/10.1 inch DSI panel driver");
++MODULE_LICENSE("GPL");
+diff -urN a/drivers/input/touchscreen/gt911-polled.c b/drivers/input/touchscreen/gt911-polled.c
+--- a/drivers/input/touchscreen/gt911-polled.c
++++ b/drivers/input/touchscreen/gt911-polled.c
+@@ -0,0 +1,178 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Polled driver for a Goodix GT911-family touch controller.
++ *
++ * The 15-pin DSI cable carries I2C but no touch interrupt or reset line, and
++ * the Goodix driver in the Orange Pi kernels needs an interrupt. Raspberry
++ * Pi's kernel solves this with polling, which this driver does separately.
++ */
++
++#include <linux/version.h>
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
++#include <linux/unaligned.h>
++#else
++#include <asm/unaligned.h>
++#endif
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/version.h>
++
++#define GT911_REG_PRODUCT_ID	0x8140
++#define GT911_REG_STATUS	0x814e
++#define GT911_STATUS_READY	BIT(7)
++#define GT911_STATUS_COUNT	GENMASK(3, 0)
++#define GT911_POINT_SIZE	8
++#define GT911_MAX_POINTS	10
++#define GT911_POLL_MS		17
++
++struct gt911 {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct touchscreen_properties prop;
++};
++
++static int gt911_read(struct gt911 *ts, u16 reg, u8 *buf, int len)
++{
++	u8 addr[2] = { reg >> 8, reg & 0xff };
++	struct i2c_msg msgs[] = {
++		{
++			.addr = ts->client->addr,
++			.len = sizeof(addr),
++			.buf = addr,
++		}, {
++			.addr = ts->client->addr,
++			.flags = I2C_M_RD,
++			.len = len,
++			.buf = buf,
++		},
++	};
++	int ret = i2c_transfer(ts->client->adapter, msgs, ARRAY_SIZE(msgs));
++
++	if (ret == ARRAY_SIZE(msgs))
++		return 0;
++	return ret < 0 ? ret : -EIO;
++}
++
++static void gt911_clear_status(struct gt911 *ts)
++{
++	u8 buf[3] = { GT911_REG_STATUS >> 8, GT911_REG_STATUS & 0xff, 0 };
++
++	i2c_master_send(ts->client, buf, sizeof(buf));
++}
++
++static void gt911_poll(struct input_dev *input)
++{
++	struct gt911 *ts = input_get_drvdata(input);
++	u8 status, data[GT911_MAX_POINTS * GT911_POINT_SIZE];
++	int count, i;
++
++	if (gt911_read(ts, GT911_REG_STATUS, &status, 1))
++		return;
++
++	if (!(status & GT911_STATUS_READY))
++		return;
++
++	count = min_t(int, status & GT911_STATUS_COUNT, GT911_MAX_POINTS);
++
++	if (count && gt911_read(ts, GT911_REG_STATUS + 1, data,
++				count * GT911_POINT_SIZE))
++		goto out;
++
++	for (i = 0; i < count; i++) {
++		u8 *point = data + i * GT911_POINT_SIZE;
++		int id = point[0] & 0x0f;
++
++		if (id >= GT911_MAX_POINTS)
++			continue;
++
++		input_mt_slot(input, id);
++		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
++		touchscreen_report_pos(input, &ts->prop,
++				       get_unaligned_le16(point + 1),
++				       get_unaligned_le16(point + 3), true);
++		input_report_abs(input, ABS_MT_TOUCH_MAJOR,
++				 get_unaligned_le16(point + 5));
++	}
++
++	input_mt_sync_frame(input);
++	input_sync(input);
++out:
++	gt911_clear_status(ts);
++}
++
++static int gt911_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct input_dev *input;
++	struct gt911 *ts;
++	char id[5] = {};
++	int ret;
++
++	ts = devm_kzalloc(dev, sizeof(*ts), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++
++	ts->client = client;
++
++	ret = gt911_read(ts, GT911_REG_PRODUCT_ID, id, 4);
++	if (ret)
++		return dev_err_probe(dev, ret, "no response from controller\n");
++	dev_info(dev, "Goodix controller, product ID \"%s\", polling\n", id);
++
++	input = devm_input_allocate_device(dev);
++	if (!input)
++		return -ENOMEM;
++
++	ts->input = input;
++	input->name = "Goodix Capacitive TouchScreen";
++	input->phys = "input/ts";
++	input->id.bustype = BUS_I2C;
++	input_set_drvdata(input, ts);
++
++	input_set_capability(input, EV_ABS, ABS_MT_POSITION_X);
++	input_set_capability(input, EV_ABS, ABS_MT_POSITION_Y);
++	input_set_abs_params(input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++
++	touchscreen_parse_properties(input, true, &ts->prop);
++	if (!ts->prop.max_x || !ts->prop.max_y)
++		return dev_err_probe(dev, -EINVAL,
++				     "touchscreen-size-x/y are required\n");
++
++	ret = input_mt_init_slots(input, GT911_MAX_POINTS,
++				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (ret)
++		return ret;
++
++	ret = input_setup_polling(input, gt911_poll);
++	if (ret)
++		return ret;
++	input_set_poll_interval(input, GT911_POLL_MS);
++
++	return input_register_device(input);
++}
++
++static const struct of_device_id gt911_of_ids[] = {
++	{ .compatible = "waveshare,gt911-polled" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, gt911_of_ids);
++
++static struct i2c_driver gt911_driver = {
++	.driver = {
++		.name = "gt911-polled",
++		.of_match_table = gt911_of_ids,
++	},
++#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
++	.probe_new = gt911_probe,
++#else
++	.probe = gt911_probe,
++#endif
++};
++module_i2c_driver(gt911_driver);
++
++MODULE_DESCRIPTION("Polled Goodix GT911 touchscreen driver");
++MODULE_LICENSE("GPL");
+diff -urN a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -1457,4 +1457,11 @@
+ 
+ source "drivers/input/touchscreen/hxchipset/Kconfig"
+ 
++config TOUCHSCREEN_GT911_POLLED
++	tristate "Goodix GT911 without an interrupt line (polled)"
++	depends on I2C
++	help
++	  The touch controller on Waveshare's Raspberry Pi DSI panels: the
++	  15-pin DSI cable has no interrupt line, so it is polled.
++
+ endif
+diff -urN a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -135,3 +135,4 @@
+ obj-$(CONFIG_TOUCHSCREEN_IQS5XX)	+= iqs5xx.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_CHIPSET)	+= hxchipset/
++obj-$(CONFIG_TOUCHSCREEN_GT911_POLLED)	+= gt911-polled.o
+-- 
+2.43.0

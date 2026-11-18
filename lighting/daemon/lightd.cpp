@@ -13,8 +13,12 @@ const char *kService = "org.ozark.Lighting1";
 const char *kPath = "/org/ozark/Lighting1";
 const char *kSettings = "/var/lib/ozark-lightd/lighting.conf";
 
-constexpr int kPatterns = 11;
-constexpr int kFirstMusicPattern = 8;  // VU Meter, Spectrum, Beat Pulse
+constexpr int kPatterns = 20;
+// VU Meter, Spectrum, Beat Pulse: what's playing is captured only for these
+bool music_pattern(int pattern)
+{
+    return pattern >= 8 && pattern <= 10;
+}
 constexpr int kSaveDelayMs = 2000;     // debounce flash writes on the board
 
 // Nested maps arrive from D-Bus as QDBusArgument, not QVariantMap
@@ -37,6 +41,7 @@ Zone::Zone(Lighting &lighting, char name)
     s.beginGroup(QString("look_%1").arg(name));
     color = QColor(s.value("color", "#ff0050").toString());
     color2 = QColor(s.value("color2", "#0078ff").toString());
+    background = QColor(s.value("background", "#000000").toString());
     pattern_ = qBound(0, s.value("pattern", 1).toInt(), kPatterns - 1);
     speed = qBound(0, s.value("speed", 128).toInt(), 255);
     brightness = qBound(0, s.value("brightness", 255).toInt(), 255);
@@ -47,6 +52,7 @@ QVariantMap Zone::GetLook() const
 {
     return {{"color", color.name()},
             {"color2", color2.name()},
+            {"background", background.name()},
             {"pattern", pattern_},
             {"speed", speed},
             {"brightness", brightness}};
@@ -62,6 +68,10 @@ void Zone::SetLook(const QVariantMap &changes)
     if (changes.contains("color2")) {
         color2 = QColor(changes.value("color2").toString());
         c.setColor2(name_, color2);
+    }
+    if (changes.contains("background")) {
+        background = QColor(changes.value("background").toString());
+        c.setBackground(name_, background);
     }
     if (changes.contains("pattern")) {
         pattern_ = qBound(0, changes.value("pattern").toInt(), kPatterns - 1);
@@ -85,6 +95,7 @@ void Zone::push() const
     Controller &c = *lighting.controller;
     c.setColor(name_, color);
     c.setColor2(name_, color2);
+    c.setBackground(name_, background);
     c.setPattern(name_, pattern_);
     c.setSpeed(name_, speed);
     c.setBrightness(name_, brightness);
@@ -96,6 +107,7 @@ void Zone::store() const
     s.beginGroup(QString("look_%1").arg(name_));
     s.setValue("color", color.name());
     s.setValue("color2", color2.name());
+    s.setValue("background", background.name());
     s.setValue("pattern", pattern_);
     s.setValue("speed", speed);
     s.setValue("brightness", brightness);
@@ -269,6 +281,9 @@ void Lighting::SetConfig(const QVariantMap &changes)
         return;
     }
 
+    // Start from the applied config: nothing left staged by an earlier edit.
+    // The firmware applies all of it or none (a refused value fails CFGAPPLY).
+    controller->revertConfig();
     static const QStringList kKeys = {"pin", "count", "order", "rgbw", "khz", "reverse"};
     for (const QString &zone : QStringList{"F", "R", "E"}) {
         const QVariantMap strip = to_map(changes.value(zone));
@@ -368,7 +383,7 @@ void Lighting::refresh_audio()
 {
     bool music = false;
     for (Zone *zone : zones)
-        music |= zone->pattern() >= kFirstMusicPattern;
+        music |= music_pattern(zone->pattern());
     if (music && controller->isConnected())
         audio.start();
     else

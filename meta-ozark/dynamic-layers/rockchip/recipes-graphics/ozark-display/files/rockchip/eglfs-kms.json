@@ -1,0 +1,6 @@
+{
+    "device": "/dev/dri/ozark-display",
+    "hwcursor": false,
+    "pbuffers": true,
+    "outputs": []
+}

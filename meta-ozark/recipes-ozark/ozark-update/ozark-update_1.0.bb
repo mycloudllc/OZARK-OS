@@ -15,6 +15,9 @@ SRC_URI = " \
     file://update.conf \
     file://10-ozark-watchdog.conf \
 "
+# The machine's: how it starts a slot, and the disk with the slots
+# (OZARK_BOOTLOADER, OZARK_SLOT_DISK: distro conf, machine conf)
+PACKAGE_ARCH = "${MACHINE_ARCH}"
 S = "${WORKDIR}"
 
 DEPENDS = "swupdate json-c"
@@ -52,6 +55,9 @@ do_install() {
 
     # Which updates fit (sw-description's hardware-compatibility)
     echo "${MACHINE} 1.0" > ${D}${sysconfdir}/hwrevision
+
+    # How this board starts a slot (ozark-update, the update's ozark-install.sh)
+    printf "LOADER='%s'\nDISK='%s'\n" "${OZARK_BOOTLOADER}" "${OZARK_SLOT_DISK}" > ${D}${sysconfdir}/ozark/slots.conf
 }
 
 # /boot: the boot partition, mounted only while it's used (installing,

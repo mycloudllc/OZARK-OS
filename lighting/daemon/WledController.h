@@ -13,6 +13,7 @@
 #include <functional>
 
 #include "Controller.h"
+#include "LedController.h"
 #include "PixelRenderer.h"
 
 // Drives a WLED controller (https://kno.wled.ge) through its JSON API, over
@@ -22,8 +23,13 @@
 //
 // Adalight (USB): we draw every LED ourselves (PixelRenderer: the Ozark
 // firmware's patterns, music included) and stream them to WLED as Adalight
-// frames. JSON on the same line still reads WLED's LED count and segment
-// ranges. The frame rate follows the baud rate and the LED count.
+// frames. JSON on the same line reads WLED's LED count and segment ranges,
+// but only with the frames paused: WLED answers JSON inside its serial loop
+// (several KB of state and info), and frames arriving meanwhile overflow its
+// 256-byte receive buffer, so pixels land in the wrong place until the next
+// frame header. While streaming, the keep-alive is WLED's one-byte "v"
+// (answer: "WLED <version>"). The frame rate follows the baud rate and the
+// LED count, with a gap after each frame for WLED to write the LEDs.
 //
 // Patterns map to WLED effects by name (the effect list WLED reports; fixed
 // ids over serial, which can't fetch it). Music patterns map to WLED's
@@ -51,6 +57,7 @@ public:
 
     void setColor(char zone, const QColor& c) override;
     void setColor2(char zone, const QColor& c) override;
+    void setBackground(char zone, const QColor& c) override;
     void setPattern(char zone, int id) override;
     void setSpeed(char zone, int value) override;
     void setBrightness(char zone, int value) override;
@@ -85,6 +92,7 @@ private:
     void checkAudioSync();
     void renderFrame();  // Adalight
     void updateFrameRate();
+    void refreshState();  // Adalight: read state and info with the frames paused
 
     // network
     void get(const QString& path, std::function<void(const QJsonDocument&)> done);
@@ -127,6 +135,9 @@ private:
     Music m_music;
     QElapsedTimer m_clock;
     QTimer m_frameTimer;
+    QTimer m_refreshTimer;    // frames paused for a JSON read: drain, then ask
+    QTimer m_refreshTimeout;  // ...and resume if WLED doesn't answer
+    bool m_refreshing = false;
     QByteArray m_frame;
     std::vector<quint8> m_zonePixels;
 
@@ -134,4 +145,8 @@ private:
     QUdpSocket m_udp;
     QSerialPort m_port;
     QByteArray m_buf;
+    LedController::PortScan m_scan;  // auto-detect, several boards plugged in
+    QString m_openPort;
+    QElapsedTimer m_openedAt;
+    bool m_answered = false;  // WLED has answered on m_openPort since it was opened
 };

@@ -1,0 +1,101 @@
+From 703fdd007d16db332e04bd41850cff6177f8be08 Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 7 Nov 2026 18:52:11 -0600
+Subject: [PATCH] Lighting pages fit the screen width
+
+A selector could not get narrower than its longest option: Settings >
+Lighting lists serial ports by their /dev/serial/by-id names (80+
+characters), and the page ran off the right edge. Option text up to 16
+characters is still always shown whole; longer text can shrink to about
+that and is shortened in the middle. Row labels wrap when a row is short
+of room, and the page no longer scrolls sideways.
+---
+ src/app/pages/lighting_settings.cpp |  8 ++++++-
+ src/app/widgets/selector.cpp        | 35 ++++++++++++++++++++++++++++-
+ 2 files changed, 41 insertions(+), 2 deletions(-)
+
+diff --git a/src/app/pages/lighting_settings.cpp b/src/app/pages/lighting_settings.cpp
+index aad27b5..55203f0 100644
+--- a/src/app/pages/lighting_settings.cpp
++++ b/src/app/pages/lighting_settings.cpp
+@@ -59,6 +59,9 @@ LightingSettingsTab::LightingSettingsTab(Arbiter &arbiter, QWidget *parent)
+     auto scroll = new QScrollArea(this);
+     Session::Forge::to_touch_scroller(scroll);
+     scroll->setWidgetResizable(true);
++    // Fit the width: rows shrink (long selector options are shortened)
++    // instead of running off the right edge
++    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+     scroll->setWidget(this->settings_widget());
+     layout->addWidget(scroll);
+ 
+@@ -73,7 +76,10 @@ QWidget *LightingSettingsTab::row(const QString &label, QWidget *control, bool s
+ {
+     auto widget = new QWidget(this);
+     auto layout = new QHBoxLayout(widget);
+-    layout->addWidget(new QLabel(label, widget), 1);
++    // Wraps when the row is short of room, before the control has to shrink
++    auto text = new QLabel(label, widget);
++    text->setWordWrap(true);
++    layout->addWidget(text, 1);
+     if (stretch)
+         layout->addWidget(control, 1);
+     else
+diff --git a/src/app/widgets/selector.cpp b/src/app/widgets/selector.cpp
+index e2aadba..c30fcac 100644
+--- a/src/app/widgets/selector.cpp
++++ b/src/app/widgets/selector.cpp
+@@ -5,17 +5,50 @@
+ #include <QHBoxLayout>
+ #include <QLabel>
+ #include <QList>
++#include <QPainter>
++#include <QStyle>
+ #include "DashLog.hpp"
+ #include "app/arbiter.hpp"
+ #include "app/widgets/selector.hpp"
+ 
++namespace {
++// The option's label: as wide as its text when there's room. Text up to
++// kKeepChars characters is always shown whole; only longer text (a
++// /dev/serial/by-id name) can shrink, down to about that many characters,
++// shortened in the middle ("/dev/ser…port0"). A plain QLabel can't get
++// narrower than its text, so one long option pushed the whole page past the
++// right edge; letting every option shrink left some showing two letters.
++class ElidingLabel : public QLabel {
++   public:
++    using QLabel::QLabel;
++
++    QSize minimumSizeHint() const override
++    {
++        constexpr int kKeepChars = 16;
++        QSize size = QLabel::minimumSizeHint();
++        size.setWidth(std::min(size.width(), this->fontMetrics().averageCharWidth() * kKeepChars));
++        return size;
++    }
++
++   protected:
++    void paintEvent(QPaintEvent *) override
++    {
++        QPainter painter(this);
++        const QRect rect = this->contentsRect();
++        const QString text = this->fontMetrics().elidedText(this->text(), Qt::ElideMiddle, rect.width());
++        this->style()->drawItemText(&painter, rect, int(this->alignment()), this->palette(), this->isEnabled(), text,
++                                    this->foregroundRole());
++    }
++};
++}  // namespace
++
+ Selector::Selector(QList<QString> options, QString current, QFont font, Arbiter &arbiter, QWidget *parent, QString placeholder)
+     : QWidget(parent)
+     , options(options)
+     , placeholder(placeholder)
+     , arbiter(arbiter)
+ {
+-    this->label = new QLabel(this);
++    this->label = new ElidingLabel(this);
+     this->label->setAlignment(Qt::AlignCenter);
+     this->label->setFont(font);
+ 
+-- 
+2.43.0
+

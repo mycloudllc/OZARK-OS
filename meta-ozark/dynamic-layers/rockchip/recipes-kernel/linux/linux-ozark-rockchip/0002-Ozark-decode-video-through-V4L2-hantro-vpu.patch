@@ -1,0 +1,44 @@
+From: Ozark <ozark@localhost>
+Subject: [PATCH] arm64: dts: Ozark: decode video through V4L2 (hantro-vpu)
+
+Android Auto's video goes through GStreamer's v4l2slh264dec. Rockchip's
+device tree gives the VDPU to MPP, which has no V4L2 device, so GStreamer
+registers no decoder and OpenAuto has none to use. Hand the VDPU to the
+kernel's Hantro driver with mainline's node. Only one driver can own it.
+
+RKVDEC2 stays with MPP. Hantro's limit of 1920x1088 covers Android Auto's
+1080p.
+
+Upstream-Status: Inappropriate [board configuration for Ozark OS]
+---
+diff --git a/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts b/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+index 0232059..dc3664d 100644
+--- a/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
++++ b/arch/arm64/boot/dts/rockchip/rk3566-orangepi-3b-v2.1-ozark-waveshare8.dts
+@@ -14,6 +14,26 @@
+ 
+ / {
+ 	model = "Xunlong Orange Pi 3B (Waveshare 8\" DSI)";
++
++	/*
++	 * The VDPU through V4L2 (hantro-vpu) for GStreamer's v4l2slh264dec,
++	 * instead of MPP's &vdpu. Mainline's node: the register window starts
++	 * 0x400 below vdpu@fdea0400 because the driver adds that offset.
++	 */
++	video-codec@fdea0000 {
++		compatible = "rockchip,rk3568-vpu";
++		reg = <0x0 0xfdea0000 0x0 0x800>;
++		interrupts = <GIC_SPI 139 IRQ_TYPE_LEVEL_HIGH>;
++		interrupt-names = "vdpu";
++		clocks = <&cru ACLK_VPU>, <&cru HCLK_VPU>;
++		clock-names = "aclk", "hclk";
++		iommus = <&vdpu_mmu>;
++		power-domains = <&power RK3568_PD_VPU>;
++	};
++};
++
++&vdpu {
++	status = "disabled";
+ };
+ 
+ &video_phy1 {

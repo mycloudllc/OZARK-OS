@@ -1,0 +1,84 @@
+# Ozark OS — Orange Pi 3B (v2.1, RK3566), Yocto Scarthgap (5.0 LTS).
+#
+# Build:   ./scripts/build.sh --opi3b
+#
+# Same distro and apps as kas/ozark-rpi4.yml; the board comes from
+# meta-rockchip (with meta-arm), plus meta-ozark's conf/machine/orangepi-3b.conf
+# and dynamic-layers/rockchip/ (Rockchip 6.1 kernel, U-Boot 2026.01, boot.scr
+# for the A/B slots, Wi-Fi/Bluetooth firmware).
+
+header:
+  version: 14
+
+machine: orangepi-3b
+distro: ozark
+# The SD card image, and the same system as a signed update (.swu)
+target:
+  - ozark-image
+  - ozark-swu
+
+# Layers pinned to the commits the Raspberry Pi build uses (its build/), so
+# the two builds share their caches: only what differs on this board is
+# built. Move both forward together.
+repos:
+  # This repository. No url: kas uses the checkout this file lives in.
+  ozark-os:
+    layers:
+      meta-ozark:
+
+  poky:
+    url: https://git.yoctoproject.org/poky
+    branch: scarthgap
+    commit: b6ae714a1d1bfae8384654a13da15996cac64712
+    layers:
+      meta:
+      meta-poky:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    branch: scarthgap
+    commit: 2db6aece32c7f8ebf6015b468e1b4e21de072e3b
+    layers:
+      meta-oe:
+      meta-python:
+
+  meta-arm:
+    url: https://git.yoctoproject.org/meta-arm
+    branch: scarthgap
+    commit: 0a4b911d9fd63ab29c4532a907fae3282dbdcfe4
+    layers:
+      meta-arm:
+      meta-arm-toolchain:
+
+  meta-rockchip:
+    url: https://git.yoctoproject.org/meta-rockchip
+    branch: scarthgap
+    commit: 9690180b7e9953361958c962b80d891eda8c1028
+
+  meta-qt5:
+    url: https://github.com/meta-qt5/meta-qt5
+    branch: scarthgap
+    commit: 916d37e38077850ff5a0ac4fce6f2a55ba5b2a86
+
+  # Software updates (Settings > Update): SWUpdate and the .swu image class
+  meta-swupdate:
+    url: https://github.com/sbabic/meta-swupdate
+    branch: scarthgap
+    commit: d4208016c450295f3c8289267738905eef2f0b1a
+
+local_conf_header:
+  ozark-base: |
+    # Images flashed with bmaptool (scripts/flash.sh)
+    IMAGE_FSTYPES = "wic.bz2 wic.bmap"
+
+    # Delete each recipe's work dir after it builds; saves tens of GB
+    INHERIT += "rm_work"
+
+    # Stop the build cleanly before the disk fills up
+    BB_DISKMON_DIRS = "\
+        STOPTASKS,${TMPDIR},1G,100K \
+        STOPTASKS,${DL_DIR},1G,100K \
+        STOPTASKS,${SSTATE_DIR},1G,100K \
+        HALT,${TMPDIR},100M,1K \
+        HALT,${DL_DIR},100M,1K \
+        HALT,${SSTATE_DIR},100M,1K"

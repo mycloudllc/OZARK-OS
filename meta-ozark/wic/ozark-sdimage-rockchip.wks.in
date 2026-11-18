@@ -1,0 +1,23 @@
+# short-description: Ozark OS SD card for Rockchip boards (U-Boot), with A/B system slots
+# long-description: The Raspberry Pi layout (ozark-sdimage.wks.in), after the
+# bootloader where the Rockchip boot ROM looks for it, outside any partition:
+#   sector 64 (32 KiB)    idbloader.img: DDR init (TPL) and SPL
+#   sector 16384 (8 MiB)  u-boot.itb: U-Boot, TF-A
+# then GPT partitions from 16 MiB:
+#   1 boot       boot.scr, slot.txt; each slot's Image, ozark.dtb and cmdline.txt in a/ and b/
+#   2 root       system slot A
+#   3 rootb      system slot B: empty until the first update writes it
+#   4 OZARKLOGS  plain-text boot logs (ozark-logs)
+#   5 ozarkdata  settings, pairings and Dash's files (ozark-data); grows to fill the card
+# Slot sizes: OZARK_SLOT_SIZE (classes/ozark-slots.bbclass). No mountpoints
+# here (wic would add fstab lines): ozark-update (/boot), ozark-logs and
+# ozark-data add them.
+
+bootloader --ptable gpt
+part --source rawcopy --sourceparams="file=${SPL_BINARY}" --ondisk mmcblk1 --no-table --offset 32K --fixed-size 4064K
+part --source rawcopy --sourceparams="file=u-boot.${UBOOT_SUFFIX}" --ondisk mmcblk1 --no-table --offset 8M --fixed-size 8M
+part --source bootimg-partition --ondisk mmcblk1 --fstype=vfat --label boot --active --offset 16M --size 256
+part / --source rootfs --ondisk mmcblk1 --fstype=ext4 --label root --align 4096 --fixed-size ${OZARK_SLOT_SIZE}M
+part --ondisk mmcblk1 --fstype=ext4 --label rootb --align 4096 --fixed-size ${OZARK_SLOT_SIZE}M
+part --ondisk mmcblk1 --fstype=vfat --label OZARKLOGS --align 4096 --size 256
+part --ondisk mmcblk1 --fstype=ext4 --label ozarkdata --align 4096 --size 256

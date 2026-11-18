@@ -1,0 +1,117 @@
+#!/bin/sh
+# One line of system health every few seconds into the journal, and so into
+# the boot log on the SD card (ozark-logs). For problems that only the log
+# can show afterwards: heat, clocks, Wi-Fi link quality, power.
+#
+#   health: soc=61.2C gpu=58.0C cpu0=1800/1800MHz gpu=800MHz load=1.23
+#           mem=1234M tcp_retrans=+3   (Pi: also volt=0x0, the throttle flags)
+#   wifi: wlan0 rx=+1234pk/+1500KB tx=+2345pk/+3000KB err=+0 drop=+0
+#   sta: 56:15:b0:82:56:eb sig=-48 inactive=120ms txretry=+12 txfail=+0
+#        txrate=433.3 rxrate=390.0
+#
+# Counters marked + are changes since the previous line. Nothing here is
+# needed for normal running: it only reads /sys, /proc and iw.
+
+interval=${OZARK_HEALTH_INTERVAL:-5}
+
+prev=/run/ozark-health
+mkdir -p "$prev"
+
+# Value since the last call for counter $1 (a name) at value $2
+delta() {
+    f="$prev/$1"
+    old=$(cat "$f" 2>/dev/null)
+    echo "$2" > "$f"
+    [ -n "$old" ] || { echo 0; return; }
+    echo $(( $2 - old ))
+}
+
+temps() {
+    for z in /sys/class/thermal/thermal_zone*; do
+        [ -r "$z/temp" ] || continue
+        t=$(cat "$z/temp" 2>/dev/null) || continue
+        n=$(cat "$z/type" 2>/dev/null)
+        n=${n%-thermal}; n=${n%_thermal}
+        printf ' %s=%d.%dC' "$n" $((t / 1000)) $(( (t % 1000) / 100 ))
+    done
+}
+
+clocks() {
+    for p in /sys/devices/system/cpu/cpufreq/policy*; do
+        [ -r "$p/scaling_cur_freq" ] || continue
+        printf ' cpu%s=%d/%dMHz' "${p##*policy}" \
+            $(( $(cat "$p/scaling_cur_freq") / 1000 )) \
+            $(( $(cat "$p/scaling_max_freq") / 1000 ))
+    done
+    for d in /sys/class/devfreq/*; do
+        [ -r "$d/cur_freq" ] || continue
+        case "${d##*/}" in *gpu*) n=gpu ;; *dmc*) n=ddr ;; *npu*) n=npu ;; *) n=${d##*/} ;; esac
+        printf ' %s=%dMHz' "$n" $(( $(cat "$d/cur_freq") / 1000000 ))
+    done
+}
+
+# Power: the Pi's firmware throttle flags; on other boards nothing reliable
+# to read (the Orange Pi has no input voltage sensor), so leave it out
+power() {
+    command -v vcgencmd >/dev/null 2>&1 || return
+    v=$(vcgencmd get_throttled 2>/dev/null) && printf ' volt=%s' "${v#throttled=}"
+}
+
+tcp() {
+    # /proc/net/snmp: the second "Tcp:" line holds the values; RetransSegs
+    # is the 13th field after the label
+    r=$(awk '/^Tcp:/ { n++ } /^Tcp:/ && n == 2 { print $13 }' /proc/net/snmp)
+    [ -n "$r" ] && printf ' tcp_retrans=+%d' "$(delta tcp_retrans "$r")"
+}
+
+wifi() {
+    for i in /sys/class/net/*; do
+        [ -d "$i/wireless" ] || continue
+        n=${i##*/}
+        [ "$(cat "$i/operstate" 2>/dev/null)" = up ] || continue
+        s=$i/statistics
+        rxp=$(delta "$n.rxp" "$(cat $s/rx_packets)")
+        txp=$(delta "$n.txp" "$(cat $s/tx_packets)")
+        rxb=$(delta "$n.rxb" "$(cat $s/rx_bytes)")
+        txb=$(delta "$n.txb" "$(cat $s/tx_bytes)")
+        err=$(delta "$n.err" $(( $(cat $s/rx_errors) + $(cat $s/tx_errors) )))
+        drop=$(delta "$n.drop" $(( $(cat $s/rx_dropped) + $(cat $s/tx_dropped) )))
+        echo "wifi: $n rx=+${rxp}pk/+$((rxb / 1024))KB tx=+${txp}pk/+$((txb / 1024))KB err=+$err drop=+$drop"
+        command -v iw >/dev/null 2>&1 || continue
+        iw dev "$n" station dump 2>/dev/null | awk -v n="$n" '
+            function out() {
+                if (mac == "") return
+                printf "%s %s %s sig=%s inactive=%sms txretry=%s txfail=%s txrate=%s rxrate=%s\n",
+                    "sta:", n, mac, sig, ina, retry, fail, txr, rxr
+            }
+            /^Station/ { out(); mac = $2; sig = ina = retry = fail = txr = rxr = "?" }
+            /inactive time:/ { ina = $3 }
+            /tx retries:/ { retry = $3 }
+            /tx failed:/ { fail = $3 }
+            /^\tsignal:/ { sig = $2 }
+            /tx bitrate:/ { txr = $3 }
+            /rx bitrate:/ { rxr = $3 }
+            END { out() }' |
+        while read -r tag dev mac rest; do
+            # retries and failures as changes since last time
+            set -- $rest
+            line="$tag $mac"
+            for kv in "$@"; do
+                k=${kv%%=*} v=${kv#*=}
+                case "$k:$v" in
+                    txretry:[0-9]*|txfail:[0-9]*) kv="$k=+$(delta "$dev.$mac.$k" "$v")" ;;
+                esac
+                line="$line $kv"
+            done
+            echo "$line"
+        done
+    done
+}
+
+while :; do
+    load=$(cut -d' ' -f1 /proc/loadavg)
+    mem=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
+    echo "health:$(temps)$(clocks) load=$load mem=${mem}M$(power)$(tcp)"
+    wifi
+    sleep "$interval"
+done

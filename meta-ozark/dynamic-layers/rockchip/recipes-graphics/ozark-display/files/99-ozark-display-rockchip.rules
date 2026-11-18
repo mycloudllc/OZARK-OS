@@ -1,0 +1,4 @@
+# Stable name for the Rockchip display controller (VOP2: HDMI, DSI), which
+# Qt draws on. The Mali GPU (panfrost) is a separate, render-only DRM card,
+# and the two can be numbered either way round.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", DRIVERS=="rockchip-drm", SYMLINK+="dri/ozark-display"

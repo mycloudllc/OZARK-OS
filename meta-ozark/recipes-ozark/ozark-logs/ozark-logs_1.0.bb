@@ -5,7 +5,8 @@ won't come up can be read by putting its SD card in any PC."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-SRC_URI = "file://ozark-logs file://ozark-logs.service file://ozark-btsnoop file://ozark-btsnoop.service"
+SRC_URI = "file://ozark-logs file://ozark-logs.service file://ozark-health file://ozark-health.service \
+           file://ozark-btsnoop file://ozark-btsnoop.service"
 S = "${WORKDIR}"
 
 inherit systemd
@@ -13,6 +14,8 @@ inherit systemd
 do_install() {
     install -D -m 0755 ${S}/ozark-logs ${D}${sbindir}/ozark-logs
     install -D -m 0644 ${S}/ozark-logs.service ${D}${systemd_system_unitdir}/ozark-logs.service
+    install -D -m 0755 ${S}/ozark-health ${D}${sbindir}/ozark-health
+    install -D -m 0644 ${S}/ozark-health.service ${D}${systemd_system_unitdir}/ozark-health.service
     install -D -m 0755 ${S}/ozark-btsnoop ${D}${sbindir}/ozark-btsnoop
     install -D -m 0644 ${S}/ozark-btsnoop.service ${D}${systemd_system_unitdir}/ozark-btsnoop.service
     install -d ${D}/logs
@@ -26,10 +29,10 @@ pkg_postinst:${PN}() {
         echo "LABEL=OZARKLOGS /logs vfat noatime,flush,umask=0022,nofail,x-systemd.device-timeout=10s 0 2" >> $D${sysconfdir}/fstab
 }
 
-SYSTEMD_SERVICE:${PN} = "ozark-logs.service ozark-btsnoop.service"
+SYSTEMD_SERVICE:${PN} = "ozark-logs.service ozark-health.service ozark-btsnoop.service"
 
 FILES:${PN} += "/logs"
 
-# fsck.vfat for the fstab pass
+# fsck.vfat for the fstab pass; iw for ozark-health's Wi-Fi station stats;
 # btmon (bluez5) for ozark-btsnoop
-RDEPENDS:${PN} = "dosfstools bluez5"
+RDEPENDS:${PN} = "dosfstools iw bluez5"

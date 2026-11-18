@@ -13,15 +13,19 @@ IMAGE_INSTALL:append = " \
     ozark-remoted \
 "
 
-# Wi-Fi hotspot for wireless Android Auto (the Pi's Wi-Fi; QEMU has none),
+# Wi-Fi hotspot for wireless Android Auto (the board's Wi-Fi; QEMU has none),
 # and Settings > Network: Ethernet, LTE, sharing the internet over the hotspot
-IMAGE_INSTALL:append:rpi = " ozark-hotspot ozark-network"
+IMAGE_INSTALL:append:ozarkab = " ozark-hotspot ozark-network"
 
 # Software updates (Settings > Update) into the other system slot, and the
 # data partition that keeps settings across them. The update (ozark-swu)
 # carries this image's root filesystem as ext4.
-IMAGE_INSTALL:append:rpi = " ozark-update ozark-data"
-IMAGE_FSTYPES:append:rpi = " ext4.zst"
+IMAGE_INSTALL:append:ozarkab = " ozark-update ozark-data"
+IMAGE_FSTYPES:append:ozarkab = " ext4.zst"
+
+# Rockchip: Android Auto's video through the Hantro VPU (v4l2slh264dec,
+# openauto 0008); meta-rockchip turns on v4l2codecs in gst-plugins-bad
+IMAGE_INSTALL:append:rockchip = " gstreamer1.0-plugins-bad-v4l2codecs"
 
 # The UI owns the display; no login prompt on the screen.
 # (Serial console and SSH still work on dev images.)

@@ -7,7 +7,9 @@ After=systemd-networkd.service
 
 [Service]
 ExecStart=/usr/sbin/ozark-hotspot run
-Restart=on-failure
+# hostapd exits 0 when it cannot start the access point (e.g. the channel
+# is not allowed yet): retry whatever the exit status
+Restart=always
 RestartSec=5
 
 [Install]

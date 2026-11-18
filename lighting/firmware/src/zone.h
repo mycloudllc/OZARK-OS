@@ -7,6 +7,7 @@
 constexpr int kMaxLeds = 600;  // per zone
 constexpr int kBands = 8;      // music frame bands
 
+// Ids are fixed (../PROTOCOL.md): new patterns go at the end
 enum Pattern : uint8_t {
     PAT_OFF,
     PAT_SOLID,
@@ -19,6 +20,15 @@ enum Pattern : uint8_t {
     PAT_VU,
     PAT_SPECTRUM,
     PAT_BEAT,
+    PAT_FIRE,
+    PAT_SPARKLE,
+    PAT_SCANNER,
+    PAT_WIPE,
+    PAT_WAVE,
+    PAT_FADE,
+    PAT_STROBE,
+    PAT_THEATER,
+    PAT_RAINBOW_RUNNER,
     PAT_COUNT
 };
 
@@ -31,12 +41,15 @@ struct StripConfig {
     bool reverse;
 };
 
+// Stored in flash as is: fields are only ever added at the end (main.cpp
+// reads the older, shorter layout too)
 struct Look {
-    uint8_t r, g, b;
-    uint8_t r2, g2, b2;
+    uint8_t r, g, b;     // colour
+    uint8_t r2, g2, b2;  // colour 2
     uint8_t pattern;
     uint8_t speed;
     uint8_t bri;
+    uint8_t r3, g3, b3;  // background: where a pattern leaves LEDs dark
 };
 
 // Latest music frame from the head unit (shared by all zones)
@@ -61,12 +74,27 @@ class Zone {
     Look look;
 
    private:
+    struct Rgb {
+        uint8_t r, g, b;
+    };
+
     void set(int i, uint8_t r, uint8_t g, uint8_t b, uint16_t scale);
+    void set(int i, const Rgb &c, uint16_t scale) { set(i, c.r, c.g, c.b, scale); }
     uint16_t phase(uint32_t now, uint32_t slowest_ms, uint32_t fastest_ms) const;
 
     Adafruit_NeoPixel strip;
-    uint8_t twinkle[kMaxLeds];  // per-LED twinkle level
+    uint8_t level[kMaxLeds];    // per-LED state: twinkle / sparkle / trail level, fire heat
     uint8_t pulse = 0;          // beat pulse level
+    int last_pos = -1;          // scanner: where the dot was last frame
+    uint8_t last_pattern = PAT_COUNT;
     uint32_t test_start = 0;    // 0: not testing
     bool started = false;
+    uint32_t last_render = 0;   // fades count in 16 ms frames at any frame rate
+
+    // What a still pattern (Off, Solid) last showed: sent again only when it
+    // changes, or once a second, which leaves the time for the animated zones
+    bool shown_valid = false;
+    Look shown_look;
+    uint8_t shown_max_bri = 0;
+    uint32_t shown_at = 0;
 };

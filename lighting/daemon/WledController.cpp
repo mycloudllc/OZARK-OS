@@ -17,25 +17,42 @@ constexpr int kMaxMisses = 3;        // polls without an answer: disconnected
 constexpr int kFlushMs = 40;         // at most ~25 state updates a second
 constexpr int kTimeoutMs = 2500;
 constexpr int kMinFrameMs = 25;      // Adalight: at most 40 frames a second
+constexpr int kRefreshTimeoutMs = 1500;  // Adalight: frames resume if a state read gets no answer
+// USB auto-detect: a port that opened but hasn't answered {"v":true} by then
+// isn't WLED (two polls, after a possible reset on opening); try the next one
+constexpr int kSerialAnswerMs = 7000;
 
 // Our patterns (../PROTOCOL.md ids) as WLED effects: the name in WLED's
-// effect list, and its id in WLED 0.14/0.15 when there's no list (serial)
+// effect list, its id in WLED 0.14/0.15 when there's no list (serial), and
+// which of our colours go in WLED's three slots: c colour, 2 colour 2,
+// b background. Many WLED effects take their background from the second
+// slot, some from the first (FX.cpp, 0.15).
 struct Effect {
     const char* name;
     int id;
+    const char* colors;
 };
 const Effect kEffects[] = {
-    {"Solid", 0},         // 0 Off: the segment is switched off instead
-    {"Solid", 0},         // 1 Solid
-    {"Rainbow", 9},       // 2 Rainbow
-    {"Chase", 28},        // 3 Chase
-    {"Breathe", 2},       // 4 Breathe
-    {"Gradient", 46},     // 5 Gradient
-    {"Twinkle", 17},      // 6 Twinkle
-    {"Lighthouse", 41},   // 7 Comet (WLED's comet effect)
-    {"Gravimeter", 132},  // 8 VU Meter (sound reactive)
-    {"Freqmatrix", 138},  // 9 Spectrum (sound reactive)
-    {"Puddlepeak", 144},  // 10 Beat Pulse (sound reactive)
+    {"Solid", 0, "c2b"},            // 0 Off: the segment is switched off instead
+    {"Solid", 0, "c2b"},            // 1 Solid
+    {"Rainbow", 9, "c2b"},          // 2 Rainbow
+    {"Chase", 28, "c2b"},           // 3 Chase
+    {"Breathe", 2, "cb2"},          // 4 Breathe: from the second slot to the first
+    {"Gradient", 46, "c2b"},        // 5 Gradient
+    {"Twinkle", 17, "c2b"},         // 6 Twinkle
+    {"Lighthouse", 41, "cb2"},      // 7 Comet (WLED's comet effect), fades to slot 2
+    {"Gravimeter", 132, "c2b"},     // 8 VU Meter (sound reactive)
+    {"Freqmatrix", 138, "c2b"},     // 9 Spectrum (sound reactive)
+    {"Puddlepeak", 144, "c2b"},     // 10 Beat Pulse (sound reactive)
+    {"Fire 2012", 66, "c2b"},       // 11 Fire (WLED draws it from its own palette)
+    {"Sparkle", 20, "2bc"},         // 12 Sparkle: slot 1 sparkles over slot 2
+    {"Scanner", 40, "cb2"},         // 13 Scanner
+    {"Wipe", 3, "c2b"},             // 14 Wipe: slot 1, then slot 2
+    {"Running", 15, "cb2"},         // 15 Wave (WLED's running lights)
+    {"Fade", 12, "c2b"},            // 16 Fade: slot 1 <-> slot 2
+    {"Strobe", 23, "cb2"},          // 17 Strobe
+    {"Theater", 13, "cb2"},         // 18 Theater
+    {"Rainbow Runner", 33, "bc2"},  // 19 Rainbow Runner: background in slot 1
 };
 constexpr int kPatterns = sizeof(kEffects) / sizeof(kEffects[0]);
 
@@ -68,6 +85,14 @@ WledController::WledController(Link link, const QString& host, int baud, QObject
     }
     m_clock.start();
     connect(&m_frameTimer, &QTimer::timeout, this, &WledController::renderFrame);
+    m_refreshTimer.setSingleShot(true);
+    connect(&m_refreshTimer, &QTimer::timeout, this, [this] {
+        if (m_port.isOpen()) m_port.write("{\"v\":true}\n");
+        m_refreshTimeout.start();
+    });
+    m_refreshTimeout.setSingleShot(true);
+    m_refreshTimeout.setInterval(kRefreshTimeoutMs);
+    connect(&m_refreshTimeout, &QTimer::timeout, this, [this] { m_refreshing = false; });
 
     m_timer.setInterval(kPollMs);
     connect(&m_timer, &QTimer::timeout, this, &WledController::tick);
@@ -104,6 +129,7 @@ WledController::WledController(Link link, const QString& host, int baud, QObject
 void WledController::setSegments(const QMap<char, int>& segments) {
     m_segments = segments;
     for (char zone : m_looks.keys()) changed(zone);
+    refreshState();  // Adalight: the segments' current ranges
 }
 
 void WledController::setPortName(const QString& name) {
@@ -125,6 +151,9 @@ void WledController::stop() {
     m_timer.stop();
     m_flushTimer.stop();
     m_frameTimer.stop();
+    m_refreshTimer.stop();
+    m_refreshTimeout.stop();
+    m_refreshing = false;
     if (m_port.isOpen()) m_port.close();
     setConnected(false);
 }
@@ -143,6 +172,9 @@ void WledController::setConnected(bool connected) {
             m_frameTimer.start();
         } else {
             m_frameTimer.stop();
+            m_refreshTimer.stop();
+            m_refreshTimeout.stop();
+            m_refreshing = false;
         }
     }
     if (connected) {
@@ -189,6 +221,20 @@ void WledController::tick() {
         tryOpen();
         return;
     }
+    // Only a port that has never answered: a WLED that answered and went quiet
+    // (restarting) keeps its port
+    if (!m_answered && m_portName.isEmpty() && m_openedAt.elapsed() > kSerialAnswerMs) {
+        qInfo("lighting: no answer from %s, not WLED; trying the next port", qPrintable(m_openPort));
+        m_scan.reject(m_openPort);
+        m_port.close();
+        return;
+    }
+    if (m_link == Adalight && m_connected) {
+        // Streaming: a JSON answer would overflow WLED's receive buffer (see
+        // the header). "v" is answered with one short line.
+        if (!m_refreshing) m_port.write("v");
+        return;
+    }
     // Ask for state and info: the answer is the keep-alive
     m_port.write("{\"v\":true}\n");
 }
@@ -206,12 +252,18 @@ void WledController::get(const QString& path, std::function<void(const QJsonDocu
 }
 
 void WledController::tryOpen() {
-    const QStringList names = m_portName.isEmpty() ? LedController::autoDetectPorts() : QStringList{m_portName};
+    const QStringList names = m_portName.isEmpty() ? m_scan.candidates() : QStringList{m_portName};
     for (const QString& name : names) {
         m_port.setPortName(name);
-        if (m_port.open(QIODevice::ReadWrite)) break;
+        if (m_port.open(QIODevice::ReadWrite)) {
+            m_openPort = name;
+            break;
+        }
     }
     if (!m_port.isOpen()) return;
+    qInfo("lighting: opened %s, waiting for WLED", qPrintable(m_openPort));
+    m_openedAt.start();
+    m_answered = false;
     m_port.setBaudRate(m_baud);
     m_port.setDataBits(QSerialPort::Data8);
     m_port.setParity(QSerialPort::NoParity);
@@ -232,14 +284,26 @@ void WledController::onReadyRead() {
     while ((idx = m_buf.indexOf('\n')) >= 0) {
         const QByteArray line = m_buf.left(idx).trimmed();
         m_buf.remove(0, idx + 1);
+        // "v" (the keep-alive while streaming Adalight) is answered "WLED <version>"
+        if (line.startsWith("WLED ")) {
+            m_answered = true;
+            if (m_connected) m_misses = 0;
+            continue;
+        }
         // WLED answers {"v":true} with {"state":…,"info":…}; anything else
         // (boot messages, Improv) is skipped
         if (!line.startsWith('{')) continue;
         const QJsonDocument doc = QJsonDocument::fromJson(line);
         if (!doc.isObject() || !doc.object().contains("state")) continue;
         m_misses = 0;
+        m_answered = true;
         handleState(doc.object());
+        if (!m_connected && m_link != Network) qInfo("lighting: WLED on %s", qPrintable(m_openPort));
         setConnected(true);
+        if (m_refreshing) {  // the paused frames can go on
+            m_refreshing = false;
+            m_refreshTimeout.stop();
+        }
     }
 }
 
@@ -303,6 +367,12 @@ void WledController::setColor2(char zone, const QColor& c) {
     changed(zone);
 }
 
+void WledController::setBackground(char zone, const QColor& c) {
+    if (!m_looks.contains(zone)) return;
+    m_looks[zone].background = c;
+    changed(zone);
+}
+
 void WledController::setPattern(char zone, int id) {
     if (!m_looks.contains(zone)) return;
     m_looks[zone].pattern = qBound(0, id, kPatterns - 1);
@@ -354,7 +424,10 @@ QJsonObject WledController::segment(char zone, const Look& look) const {
     seg["sx"] = look.speed;
     seg["bri"] = look.brightness;
     seg["pal"] = 0;  // the effect's default palette: most use the colours
-    seg["col"] = QJsonArray{rgb(look.color), rgb(look.color2), QJsonArray{0, 0, 0}};
+    QJsonArray col;
+    for (const char* slot = kEffects[qBound(0, look.pattern, kPatterns - 1)].colors; *slot; ++slot)
+        col.append(rgb(*slot == 'c' ? look.color : *slot == '2' ? look.color2 : look.background));
+    seg["col"] = col;
     return seg;
 }
 
@@ -480,15 +553,29 @@ void WledController::test(char zone) {
 
 // ---------------------------------------------------------------- Adalight
 
-// As fast as the serial line carries a frame, with some headroom
+// As fast as the serial line carries a frame, plus the time WLED takes to
+// write the LEDs once it has it: it does that inside its serial loop (about
+// 30 us an LED for WS281x), and the next frame must not pile up in its
+// 256-byte receive buffer meanwhile.
 void WledController::updateFrameRate() {
-    const int bytes = 6 + 3 * std::max(m_ledCount, 1);
-    const int lineMs = int(std::ceil(bytes * 10.0 * 1000 / m_baud * 1.15));
-    m_frameTimer.setInterval(std::max(kMinFrameMs, lineMs));
+    const int leds = std::max(m_ledCount, 1);
+    const double lineMs = (6 + 3 * leds) * 10.0 * 1000 / m_baud;
+    const double showMs = leds * 0.03 + 0.5;
+    const int frameMs = int(std::ceil(lineMs * 1.1 + showMs + 2));
+    m_frameTimer.setInterval(std::max(kMinFrameMs, frameMs));
+}
+
+// Pause the frames, let the line drain, then ask for state and info; the
+// answer (or a timeout) resumes them. WLED keeps showing the last frame.
+void WledController::refreshState() {
+    if (m_link != Adalight || !m_connected || !m_port.isOpen() || m_refreshing) return;
+    m_refreshing = true;
+    const double lineMs = m_port.bytesToWrite() * 10.0 * 1000 / m_baud;
+    m_refreshTimer.start(int(std::ceil(lineMs + m_ledCount * 0.03)) + 20);
 }
 
 void WledController::renderFrame() {
-    if (!m_connected || m_ledCount <= 0) return;
+    if (!m_connected || m_ledCount <= 0 || m_refreshing) return;
     const int bytes = 6 + 3 * m_ledCount;
     // The line is backed up (e.g. WLED's baud rate is lower than ours): skip a frame
     if (m_port.bytesToWrite() > bytes) return;

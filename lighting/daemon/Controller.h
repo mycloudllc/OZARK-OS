@@ -35,6 +35,7 @@ public:
     // ---- look ----
     virtual void setColor(char zone, const QColor& c) = 0;
     virtual void setColor2(char zone, const QColor& c) = 0;
+    virtual void setBackground(char zone, const QColor& c) = 0;  // where a pattern leaves LEDs dark
     virtual void setPattern(char zone, int id) = 0;
     virtual void setSpeed(char zone, int value) = 0;       // 0-255
     virtual void setBrightness(char zone, int value) = 0;  // 0-255
@@ -44,6 +45,8 @@ public:
     // ---- hardware config (staged, then applied) ----
     virtual void requestInfo() = 0;
     virtual void requestConfig() = 0;
+    // Drop changes staged earlier and not applied (start of a new edit)
+    virtual void revertConfig() {}
     // keys: PIN COUNT ORDER RGBW KHZ REVERSE (zones F/R/E), MAXBRI (zone 'G')
     virtual void stageConfig(char zone, const QString& key, const QString& value) = 0;
     virtual void applyConfig() = 0;  // validates, applies, saves on the controller

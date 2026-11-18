@@ -1,0 +1,60 @@
+From: Ozark <ozark@localhost>
+Date: Fri, 6 Nov 2026 20:50:00 -0600
+Subject: [PATCH 5/5] drm/panel: waveshare-dsi: set the sync polarities
+
+The panel modes leave the hsync/vsync polarity flags unset. On Rockchip,
+VOP2 then drives active-low syncs (it only drives them high for PHSYNC/
+PVSYNC), while the Synopsys DSI host takes them as active-high (it only
+inverts for NHSYNC/NVSYNC). The DSI host misreads the frame timing and
+the Waveshare 8" panel on the Orange Pi 3B stays black, although the DSI
+host's own test pattern reaches it. The Raspberry Pi's DSI host doesn't
+use these flags.
+
+Set them explicitly, active-low by default. panel_waveshare_dsi.sync=2
+selects active-high, 0 leaves them unset as before.
+---
+--- a/drivers/gpu/drm/panel/panel-waveshare-dsi.c
++++ b/drivers/gpu/drm/panel/panel-waveshare-dsi.c
+@@ -47,6 +47,17 @@
+ module_param(mode_flags, uint, 0444);
+ MODULE_PARM_DESC(mode_flags, "Override the DSI mode flags (0: the panel's own)");
+ 
++/*
++ * The modes below leave the sync polarities unset. The Raspberry Pi's DSI
++ * host doesn't mind, but elsewhere the display controller and DSI host can
++ * read "unset" differently: Rockchip's VOP2 drives active-low syncs while
++ * its DSI host expects active-high, and the panel gets a black picture.
++ * Make them explicit: 1 active-low (default), 2 active-high, 0 as before.
++ */
++static uint sync = 1;
++module_param(sync, uint, 0444);
++MODULE_PARM_DESC(sync, "Sync polarity: 1 active-low (default), 2 active-high, 0 unset");
++
+ /* 2.8inch 480x640
+  * https://www.waveshare.com/product/raspberry-pi/displays/2.8inch-dsi-lcd.htm
+  */
+@@ -370,8 +381,22 @@
+ 			ts->mode->hdisplay,
+ 			ts->mode->vdisplay,
+ 			drm_mode_vrefresh(ts->mode));
++		return -ENOMEM;
+ 	}
+ 
++	mode->flags &= ~(DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NHSYNC |
++			 DRM_MODE_FLAG_PVSYNC | DRM_MODE_FLAG_NVSYNC);
++	if (sync == 1)
++		mode->flags |= DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
++	else if (sync == 2)
++		mode->flags |= DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
++	else
++		mode->flags |= ts->mode->flags &
++			(DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_NHSYNC |
++			 DRM_MODE_FLAG_PVSYNC | DRM_MODE_FLAG_NVSYNC);
++	dev_info(panel->dev, "%s hsync/vsync\n", sync == 1 ? "active-low" :
++		 sync == 2 ? "active-high" : "unset");
++
+ 	mode->type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+ 
+ 	drm_mode_set_name(mode);
+-- 
+2.43.0

@@ -6,6 +6,9 @@
 
 namespace {
 constexpr int kBaud = 460800;  // must match SERIAL_BAUD in the firmware
+// Auto-detect: a port that opened but hasn't answered PING (or said READY
+// after the reset opening it causes) by then isn't ours; try the next one
+constexpr int kAnswerMs = 4000;
 
 QVariantMap parseKv(const QStringList& toks, int from) {
     QVariantMap m;
@@ -63,7 +66,8 @@ static int usbVendorId(const QString& tty) {
 // kept Dash's UI thread busy. USB serial adapters are always ttyUSB*/ttyACM*.
 QStringList LedController::autoDetectPorts() {
     QStringList ports;
-    const QStringList ttys = QDir("/dev").entryList({"ttyUSB*", "ttyACM*"}, QDir::System);
+    QStringList ttys = QDir("/dev").entryList({"ttyUSB*"}, QDir::System);
+    ttys += QDir("/dev").entryList({"ttyACM*"}, QDir::System);
     for (const QString& tty : ttys) {
         const QString path = "/dev/" + tty;
         switch (usbVendorId(tty)) {
@@ -77,27 +81,49 @@ QStringList LedController::autoDetectPorts() {
     return ports;
 }
 
+QStringList LedController::PortScan::candidates() {
+    const QStringList present = autoDetectPorts();
+    if (present != m_present) {  // a board came or went: try them all again
+        m_present = present;
+        m_rejected.clear();
+    }
+    QStringList ports = present;
+    for (const QString& port : m_rejected) ports.removeAll(port);
+    return ports;
+}
+
 void LedController::tick() {
     if (!m_started) return;
     if (!m_port.isOpen()) {
         tryOpen();
     } else if (!m_ready) {
+        if (m_portName.isEmpty() && m_openedAt.elapsed() > kAnswerMs) {
+            qInfo("lighting: no answer from %s, not the Ozark controller; trying the next port",
+                  qPrintable(m_openPort));
+            m_scan.reject(m_openPort);
+            closePort();
+            return;
+        }
         m_port.write("PING\n");  // handshake until PONG / READY arrives
     }
 }
 
 void LedController::tryOpen() {
-    // Auto-detect tries each candidate until one opens
-    const QStringList names = m_portName.isEmpty() ? autoDetectPorts() : QStringList{m_portName};
+    // Auto-detect tries each candidate until one opens; one that then doesn't
+    // answer is left out next time (tick)
+    const QStringList names = m_portName.isEmpty() ? m_scan.candidates() : QStringList{m_portName};
     bool opened = false;
     for (const QString& name : names) {
         m_port.setPortName(name);
         if (m_port.open(QIODevice::ReadWrite)) {
             opened = true;
+            m_openPort = name;
             break;
         }
     }
     if (!opened) return;
+    qInfo("lighting: opened %s, waiting for the Ozark controller", qPrintable(m_openPort));
+    m_openedAt.start();
 
     m_port.setBaudRate(kBaud);
     m_port.setDataBits(QSerialPort::Data8);
@@ -147,6 +173,7 @@ void LedController::handleLine(const QString& line) {
 
     // READY is printed at every boot (including after a pin-change reboot)
     if (line == "PONG" || line.startsWith("READY")) {
+        if (!m_ready) qInfo("lighting: Ozark controller on %s (%s)", qPrintable(m_openPort), qPrintable(line));
         setReady(true);
         emit boardReady();
         requestInfo();
@@ -207,6 +234,10 @@ void LedController::setColor(char zone, const QColor& c) {
 
 void LedController::setColor2(char zone, const QColor& c) {
     send(QString("COLOR2 %1 %2 %3 %4").arg(QChar(zone)).arg(c.red()).arg(c.green()).arg(c.blue()));
+}
+
+void LedController::setBackground(char zone, const QColor& c) {
+    send(QString("COLOR3 %1 %2 %3 %4").arg(QChar(zone)).arg(c.red()).arg(c.green()).arg(c.blue()));
 }
 
 void LedController::setPattern(char zone, int id) {

@@ -1,0 +1,89 @@
+From: Ozark <ozark@localhost>
+Date: Fri, 6 Nov 2026 18:40:00 -0600
+Subject: [PATCH 4/4] drm: dsi: command line overrides for the DSI mode and lane
+ rate
+
+The Waveshare panel driver's mode flags (non-burst, HSE, non-continuous
+clock) were chosen for the Raspberry Pi's DSI host, which runs the 8"
+panel's lanes at exactly 1000 Mbps. Rockchip's DSI host ignores HSE, stops
+the clock lane in blanking and runs the lanes 25% faster than the pixel
+bandwidth. On the Orange Pi 3B the panel powers up and lights its backlight
+but shows nothing.
+
+Make both adjustable from the kernel command line, so the right
+combination can be found on the hardware without rebuilding:
+
+  panel_waveshare_dsi.mode_flags=<MIPI_DSI_* bits>  (0: the panel's own)
+  rockchipdrm.dsi_lane_mbps=<Mbps>                  (0: automatic)
+
+Both drivers log what they use.
+---
+--- a/drivers/gpu/drm/panel/panel-waveshare-dsi.c
++++ b/drivers/gpu/drm/panel/panel-waveshare-dsi.c
+@@ -38,6 +38,15 @@
+ 	unsigned long mode_flags;
+ };
+ 
++/*
++ * The mode flags in the table below suit the Raspberry Pi's DSI host. Other
++ * hosts may need different ones: e.g. panel_waveshare_dsi.mode_flags=0x1
++ * on the kernel command line (MIPI_DSI_* bits from drm_mipi_dsi.h).
++ */
++static uint mode_flags;
++module_param(mode_flags, uint, 0444);
++MODULE_PARM_DESC(mode_flags, "Override the DSI mode flags (0: the panel's own)");
++
+ /* 2.8inch 480x640
+  * https://www.waveshare.com/product/raspberry-pi/displays/2.8inch-dsi-lcd.htm
+  */
+@@ -512,7 +521,9 @@
+ 	 */
+ 	drm_panel_add(&ts->base);
+ 
+-	ts->dsi->mode_flags = _ws_panel_data->mode_flags;
++	ts->dsi->mode_flags = mode_flags ? mode_flags : _ws_panel_data->mode_flags;
++	dev_info(dev, "DSI mode flags 0x%lx, %d lanes\n",
++		 ts->dsi->mode_flags, _ws_panel_data->lanes);
+ 	ts->dsi->format = MIPI_DSI_FMT_RGB888;
+ 	ts->dsi->lanes = _ws_panel_data->lanes;
+ 
+--- a/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
++++ b/drivers/gpu/drm/rockchip/dw-mipi-dsi-rockchip.c
+@@ -297,6 +297,15 @@
+ 	bool dsi_bound;
+ };
+ 
++/*
++ * The lane rate is normally the pixel bandwidth plus 25%. Some panels' DSI
++ * bridges (e.g. Waveshare's, made for the Raspberry Pi) want an exact rate
++ * in non-burst mode: rockchipdrm.dsi_lane_mbps=1000 on the command line.
++ */
++static uint dsi_lane_mbps;
++module_param(dsi_lane_mbps, uint, 0444);
++MODULE_PARM_DESC(dsi_lane_mbps, "Force the DSI lane rate in Mbps (0: automatic)");
++
+ static struct dw_mipi_dsi_rockchip *to_dsi(struct drm_encoder *encoder)
+ {
+ 	struct rockchip_encoder *rkencoder = to_rockchip_encoder(encoder);
+@@ -583,9 +592,18 @@
+ 				      "DPHY clock frequency is out of range\n");
+ 	}
+ 
++	if (dsi_lane_mbps) {
++		target_mbps = dsi_lane_mbps;
++		DRM_DEV_INFO(dsi->dev, "lane rate forced to %u Mbps\n",
++			     target_mbps);
++	}
++
+ 	/* for external phy only a the mipi_dphy_config is necessary */
+ 	if (dsi->phy) {
+-		phy_mipi_dphy_get_default_config(mode->clock * 1000 * 10 / 8,
++		/* the pixel rate that gives target_mbps on each lane */
++		phy_mipi_dphy_get_default_config(dsi_lane_mbps ?
++						 div_u64((u64)target_mbps * USEC_PER_SEC * lanes, bpp) :
++						 mode->clock * 1000 * 10 / 8,
+ 						 bpp, lanes,
+ 						 &dsi->phy_opts.mipi_dphy);
+ 		dsi->lane_mbps = target_mbps;
+-- 
+2.43.0

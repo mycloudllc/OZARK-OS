@@ -29,7 +29,8 @@ class Zone : public QObject {
     void push() const;  // send the whole look to the controller
 
    public slots:
-    // {color: "#rrggbb", color2: "#rrggbb", pattern: 0-10, speed: 0-255, brightness: 0-255}
+    // {color: "#rrggbb", color2: "#rrggbb", background: "#rrggbb", pattern: 0-19,
+    //  speed: 0-255, brightness: 0-255}
     QVariantMap GetLook() const;
     // Any subset of GetLook()'s keys
     void SetLook(const QVariantMap &changes);
@@ -42,7 +43,7 @@ class Zone : public QObject {
 
     Lighting &lighting;
     char name_;
-    QColor color, color2;
+    QColor color, color2, background;
     int pattern_, speed, brightness;
 };
 

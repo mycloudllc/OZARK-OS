@@ -1,0 +1,27 @@
+From 8d28cbc4cad123285cfc2f8faa84245042d2042f Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Sat, 7 Nov 2026 18:32:57 -0600
+Subject: [PATCH] Settings > Lighting: GPIO 2 as a data pin
+
+The controller firmware allows GPIO 2 now (lighting/firmware), as WLED does
+by default on the ESP32.
+---
+ src/app/pages/lighting_settings.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/app/pages/lighting_settings.cpp b/src/app/pages/lighting_settings.cpp
+index a2e904e..aad27b5 100644
+--- a/src/app/pages/lighting_settings.cpp
++++ b/src/app/pages/lighting_settings.cpp
+@@ -11,7 +11,7 @@ const char *kPath = "/org/ozark/Lighting1";
+ const char *kInterface = "org.ozark.Lighting1";
+ 
+ // The controller firmware's allowed pins and colour orders (lighting/PROTOCOL.md)
+-const QList<QString> kPins = {"4",  "5",  "13", "14", "16", "17", "18", "19",
++const QList<QString> kPins = {"2",  "4",  "5",  "13", "14", "16", "17", "18", "19",
+                               "21", "22", "23", "25", "26", "27", "32", "33"};
+ const QList<QString> kOrders = {"RGB", "RBG", "GRB", "GBR", "BRG", "BGR"};
+ const QList<QString> kSpeeds = {"800", "400"};
+-- 
+2.43.0
+

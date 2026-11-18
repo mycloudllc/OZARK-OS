@@ -11,6 +11,7 @@ SRC_URI = " \
     git://github.com/GStreamer/qt-gstreamer.git;protocol=https;branch=master \
     file://qt-gstreamer-1.18.patch \
     file://qt-gstreamer_atomic-load.patch \
+    file://0003-qtquick2videosink-NV12-zero-copy-dmabuf-import-uploa.patch \
 "
 SRCREV = "6e4fb2f3fcfb453c5522c66457ac5ed8c3b1b05c"
 PV = "1.2.0+git"

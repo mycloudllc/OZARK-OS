@@ -1,0 +1,697 @@
+From: Ozark <ozark@localhost>
+Subject: [PATCH] qtquick2videosink: NV12 (zero-copy dmabuf import), upload
+ only new frames
+
+Android Auto on Rockchip boards: the Hantro VPU (v4l2slh264dec) outputs
+only NV12, which the sink didn't take, so OpenAuto needed a videoconvert,
+and the sink uploaded every frame again on each render, all on the CPU.
+That was slow.
+
+- NV12. If a frame is a dmabuf and EGL can import it
+  (EGL_EXT_image_dma_buf_import, GL_OES_EGL_image_external), the GPU
+  samples it in place as an external texture. Otherwise its two planes are
+  uploaded at the offsets and strides of its GstVideoMeta.
+  QTGSTREAMER_NO_DMABUF=1 forces the upload.
+- For NV12 only, the sink proposes GstVideoMeta and a minimum of three
+  buffers, so decoders hand over their buffers instead of copying frames.
+  The other formats negotiate as before.
+- All formats: a frame is uploaded once, not on every render, into
+  textures that are allocated once (glTexSubImage2D after that).
+
+Upstream-Status: Inappropriate [upstream is unmaintained]
+---
+diff --git a/elements/gstqtvideosink/CMakeLists.txt b/elements/gstqtvideosink/CMakeLists.txt
+index 65265a0..4311b86 100644
+--- a/elements/gstqtvideosink/CMakeLists.txt
++++ b/elements/gstqtvideosink/CMakeLists.txt
+@@ -67,12 +67,19 @@ if (GstQtVideoSink_LINK_OPENGL)
+     endif()
+ endif()
+ 
++# NV12 dmabuf import (painters/videomaterial.cpp)
++find_library(GSTREAMER_ALLOCATORS_LIBRARY NAMES gstallocators-1.0)
++if (NOT GSTREAMER_ALLOCATORS_LIBRARY)
++    message(FATAL_ERROR "libgstallocators-1.0 (gst-plugins-base) not found")
++endif()
++
+ add_library(gst${QTVIDEOSINK_NAME} MODULE ${GstQtVideoSink_SRCS})
+ target_link_libraries(gst${QTVIDEOSINK_NAME}
+     ${GOBJECT_LIBRARIES}
+     ${GSTREAMER_LIBRARY}
+     ${GSTREAMER_BASE_LIBRARY}
+     ${GSTREAMER_VIDEO_LIBRARY}
++    ${GSTREAMER_ALLOCATORS_LIBRARY}
+     ${GstQtVideoSink_GL_LIBS}
+ )
+ qt4or5_use_modules(gst${QTVIDEOSINK_NAME} Core Gui Widgets)
+diff --git a/elements/gstqtvideosink/gstqtquick2videosink.cpp b/elements/gstqtvideosink/gstqtquick2videosink.cpp
+index bedc074..4211878 100644
+--- a/elements/gstqtvideosink/gstqtquick2videosink.cpp
++++ b/elements/gstqtvideosink/gstqtquick2videosink.cpp
+@@ -21,11 +21,12 @@
+ #include "delegates/qtquick2videosinkdelegate.h"
+ 
+ #include <gst/video/colorbalance.h>
++#include <gst/video/gstvideometa.h>
+ 
+ #include <cstring>
+ #include <QCoreApplication>
+ 
+-#define CAPS_FORMATS "{ BGRA, BGRx, ARGB, xRGB, RGB, RGB16, BGR, v308, AYUV, YV12, I420 }"
++#define CAPS_FORMATS "{ BGRA, BGRx, ARGB, xRGB, RGB, RGB16, BGR, v308, AYUV, YV12, I420, NV12 }"
+ 
+ #define GST_QT_QUICK2_VIDEO_SINK_GET_PRIVATE(obj) \
+     (G_TYPE_INSTANCE_GET_PRIVATE ((obj), GST_TYPE_QT_QUICK2_VIDEO_SINK, GstQtQuick2VideoSinkPrivate))
+@@ -243,6 +244,27 @@ gst_qt_quick2_video_sink_set_caps(GstBaseSink *sink, GstCaps *caps)
+     }
+ }
+ 
++// NV12 only (the other formats keep the default): its material reads the
++// planes where GstVideoMeta says, so decoders such as v4l2slh264dec can hand
++// over their own buffers instead of copying frames to remove padding. It
++// holds up to three of them (queued, being shown, imported).
++static gboolean
++gst_qt_quick2_video_sink_propose_allocation(GstBaseSink *sink, GstQuery *query)
++{
++    Q_UNUSED(sink);
++    GstCaps *caps = NULL;
++    GstVideoInfo info;
++
++    gst_query_parse_allocation(query, &caps, NULL);
++    if (!caps || !gst_video_info_from_caps(&info, caps)
++            || GST_VIDEO_INFO_FORMAT(&info) != GST_VIDEO_FORMAT_NV12)
++        return FALSE;
++
++    gst_query_add_allocation_meta(query, GST_VIDEO_META_API_TYPE, NULL);
++    gst_query_add_allocation_pool(query, NULL, GST_VIDEO_INFO_SIZE(&info), 3, 0);
++    return TRUE;
++}
++
+ static GstFlowReturn
+ gst_qt_quick2_video_sink_show_frame(GstVideoSink *sink, GstBuffer *buffer)
+ {
+@@ -345,6 +367,7 @@ gst_qt_quick2_video_sink_class_init (GstQtQuick2VideoSinkClass *klass)
+ 
+     GstBaseSinkClass *base_sink_class = GST_BASE_SINK_CLASS(klass);
+     base_sink_class->set_caps = gst_qt_quick2_video_sink_set_caps;
++    base_sink_class->propose_allocation = gst_qt_quick2_video_sink_propose_allocation;
+ 
+     GstVideoSinkClass *video_sink_class = GST_VIDEO_SINK_CLASS(klass);
+     video_sink_class->show_frame = gst_qt_quick2_video_sink_show_frame;
+diff --git a/elements/gstqtvideosink/painters/videomaterial.cpp b/elements/gstqtvideosink/painters/videomaterial.cpp
+index 7221aa5..cd34523 100644
+--- a/elements/gstqtvideosink/painters/videomaterial.cpp
++++ b/elements/gstqtvideosink/painters/videomaterial.cpp
+@@ -16,8 +16,18 @@
+     along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
++// EGL for NV12 dmabuf import (Nv12VideoMaterial); no X11 in its headers
++#define EGL_NO_X11
++#define MESA_EGL_NO_X11_HEADERS
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++
+ #include "videomaterial.h"
+ 
++#include <gst/allocators/allocators.h>
++#include <gst/video/gstvideometa.h>
++
++#include <cstring>
+ #include <qmath.h>
+ #include <QOpenGLContext>
+ #include <QOpenGLFunctions>
+@@ -182,6 +192,440 @@ public:
+     }
+ };
+ 
++/*
++ * NV12, the only format of decoders such as Rockchip's Hantro VPU
++ * (v4l2slh264dec). When a frame is a dmabuf that EGL can import, the GPU
++ * samples it where the decoder wrote it (EGLImage on an external texture),
++ * and the CPU never touches the pixels. Otherwise the two planes are
++ * uploaded as textures, at the offsets and strides of the buffer's
++ * GstVideoMeta. QTGSTREAMER_NO_DMABUF=1 forces the upload.
++ */
++
++#ifndef GL_TEXTURE_EXTERNAL_OES
++#  define GL_TEXTURE_EXTERNAL_OES 0x8D65
++#endif
++#ifndef GL_UNPACK_ROW_LENGTH
++#  define GL_UNPACK_ROW_LENGTH 0x0CF2
++#endif
++
++// DRM_FORMAT_NV12, without needing drm_fourcc.h
++#define QTVIDEOSINK_DRM_FORMAT_NV12 0x3231564e
++
++namespace
++{
++
++typedef EGLDisplay (*GetCurrentDisplayFn)(void);
++typedef const char *(*QueryStringFn)(EGLDisplay, EGLint);
++typedef EGLImageKHR (*CreateImageFn)(EGLDisplay, EGLContext, EGLenum,
++                                     EGLClientBuffer, const EGLint *);
++typedef EGLBoolean (*DestroyImageFn)(EGLDisplay, EGLImageKHR);
++typedef void (*ImageTargetTextureFn)(GLenum, void *);
++
++const char * const nv12PlanesFragmentShader =
++    "uniform sampler2D yTexture;\n"
++    "uniform sampler2D uvTexture;\n"
++    "uniform mediump mat4 colorMatrix;\n"
++    "uniform lowp float opacity;\n"
++    "varying highp vec2 qt_TexCoord;\n"
++    "void main(void)\n"
++    "{\n"
++    "    highp vec4 color = vec4(\n"
++    "           texture2D(yTexture, qt_TexCoord.st).r,\n"
++    "           texture2D(uvTexture, qt_TexCoord.st).ra,\n"
++    "           1.0);\n"
++    "    gl_FragColor = colorMatrix * color * opacity;\n"
++    "}\n";
++
++// Planes, or the imported frame, which the GPU already gives as RGB
++const char * const nv12ExternalFragmentShader =
++    "#extension GL_OES_EGL_image_external : require\n"
++    "uniform sampler2D yTexture;\n"
++    "uniform sampler2D uvTexture;\n"
++    "uniform samplerExternalOES frameTexture;\n"
++    "uniform lowp float imported;\n"
++    "uniform mediump mat4 colorMatrix;\n"
++    "uniform lowp float opacity;\n"
++    "varying highp vec2 qt_TexCoord;\n"
++    "void main(void)\n"
++    "{\n"
++    "    highp vec4 color;\n"
++    "    if (imported > 0.5)\n"
++    "        color = vec4(texture2D(frameTexture, qt_TexCoord.st).rgb, 1.0);\n"
++    "    else\n"
++    "        color = vec4(\n"
++    "               texture2D(yTexture, qt_TexCoord.st).r,\n"
++    "               texture2D(uvTexture, qt_TexCoord.st).ra,\n"
++    "               1.0);\n"
++    "    gl_FragColor = colorMatrix * color * opacity;\n"
++    "}\n";
++
++} // namespace
++
++class Nv12VideoMaterial : public VideoMaterial
++{
++public:
++    explicit Nv12VideoMaterial(const BufferFormat & format);
++    virtual ~Nv12VideoMaterial();
++
++    virtual QSGMaterialType *type() const;
++    virtual QSGMaterialShader *createShader() const;
++
++    virtual void updateColors(int brightness, int contrast, int hue, int saturation);
++    virtual void bind();
++
++    bool showingImport() const { return m_showingImport; }
++    const QMatrix4x4 & matrix() const
++        { return m_showingImport ? m_rgbColorMatrix : m_colorMatrix; }
++
++private:
++    void planeLocation(GstBuffer *frame, int plane, gsize *offset, gint *stride) const;
++    bool importFrame(GstBuffer *frame);
++    void uploadFrame(GstBuffer *frame);
++
++    GstVideoInfo m_info;
++    bool m_externalShader;  // fixed: decides type() and the shader
++    bool m_canImport;       // cleared if EGL refuses a frame
++    bool m_showingImport;
++    bool m_hasRowLength;
++    GLuint m_externalTexture;
++    QMatrix4x4 m_rgbColorMatrix;
++
++    EGLDisplay m_display;
++    EGLImageKHR m_image;
++    GstBuffer *m_shownFrame;  // the imported frame: not reused while shown
++    CreateImageFn m_createImage;
++    DestroyImageFn m_destroyImage;
++    ImageTargetTextureFn m_imageTargetTexture;
++};
++
++class Nv12MaterialShader : public QSGMaterialShader
++{
++public:
++    explicit Nv12MaterialShader(bool external) : m_external(external) {}
++
++    virtual void updateState(const RenderState &state,
++        QSGMaterial *newMaterial, QSGMaterial *oldMaterial)
++    {
++        Q_UNUSED(oldMaterial);
++
++        Nv12VideoMaterial *material = static_cast<Nv12VideoMaterial *>(newMaterial);
++        // first: it decides whether the imported frame or the planes are shown
++        material->bind();
++
++        program()->setUniformValue(m_id_yTexture, 0);
++        program()->setUniformValue(m_id_uvTexture, 1);
++        if (m_external) {
++            program()->setUniformValue(m_id_frameTexture, 2);
++            program()->setUniformValue(m_id_imported,
++                GLfloat(material->showingImport() ? 1.0 : 0.0));
++        }
++        program()->setUniformValue(m_id_colorMatrix, material->matrix());
++
++        if (state.isOpacityDirty()) {
++            material->setFlag(QSGMaterial::Blending,
++                qFuzzyCompare(state.opacity(), 1.0f) ? false : true);
++            program()->setUniformValue(m_id_opacity, GLfloat(state.opacity()));
++        }
++
++        if (state.isMatrixDirty())
++            program()->setUniformValue(m_id_matrix, state.combinedMatrix());
++    }
++
++    virtual char const *const *attributeNames() const {
++        static const char *names[] = {
++            "qt_VertexPosition",
++            "qt_VertexTexCoord",
++            0
++        };
++        return names;
++    }
++
++protected:
++    virtual void initialize() {
++        m_id_matrix = program()->uniformLocation("qt_Matrix");
++        m_id_yTexture = program()->uniformLocation("yTexture");
++        m_id_uvTexture = program()->uniformLocation("uvTexture");
++        m_id_frameTexture = program()->uniformLocation("frameTexture");
++        m_id_imported = program()->uniformLocation("imported");
++        m_id_colorMatrix = program()->uniformLocation("colorMatrix");
++        m_id_opacity = program()->uniformLocation("opacity");
++    }
++
++    virtual const char *vertexShader() const {
++        return qtvideosink_glsl_vertexShader;
++    }
++
++    virtual const char *fragmentShader() const {
++        return m_external ? nv12ExternalFragmentShader : nv12PlanesFragmentShader;
++    }
++
++private:
++    bool m_external;
++    int m_id_matrix;
++    int m_id_yTexture;
++    int m_id_uvTexture;
++    int m_id_frameTexture;
++    int m_id_imported;
++    int m_id_colorMatrix;
++    int m_id_opacity;
++};
++
++Nv12VideoMaterial::Nv12VideoMaterial(const BufferFormat & format)
++    : m_externalShader(false)
++    , m_canImport(false)
++    , m_showingImport(false)
++    , m_hasRowLength(false)
++    , m_externalTexture(0)
++    , m_display(EGL_NO_DISPLAY)
++    , m_image(EGL_NO_IMAGE_KHR)
++    , m_shownFrame(NULL)
++    , m_createImage(NULL)
++    , m_destroyImage(NULL)
++    , m_imageTargetTexture(NULL)
++{
++    const QSize size = format.frameSize();
++    gst_video_info_set_format(&m_info, GST_VIDEO_FORMAT_NV12,
++                              size.width(), size.height());
++
++    // Y as luminance, interleaved UV as luminance + alpha
++    m_textureCount = 2;
++    m_textureWidths[0] = size.width();
++    m_textureHeights[0] = size.height();
++    m_textureWidths[1] = (size.width() + 1) / 2;
++    m_textureHeights[1] = (size.height() + 1) / 2;
++    m_textureOffsets[0] = m_textureOffsets[1] = 0;
++
++    QOpenGLContext *context = QOpenGLContext::currentContext();
++    if (!context)
++        return;
++
++    m_hasRowLength = !context->isOpenGLES() || context->format().majorVersion() >= 3;
++
++    if (qgetenv("QTGSTREAMER_NO_DMABUF") == "1"
++            || !context->hasExtension("GL_OES_EGL_image_external"))
++        return;
++
++    GetCurrentDisplayFn getCurrentDisplay =
++        (GetCurrentDisplayFn) context->getProcAddress("eglGetCurrentDisplay");
++    QueryStringFn queryString =
++        (QueryStringFn) context->getProcAddress("eglQueryString");
++    if (!getCurrentDisplay || !queryString)
++        return;
++
++    m_display = getCurrentDisplay();
++    const char *extensions = m_display != EGL_NO_DISPLAY ?
++        queryString(m_display, EGL_EXTENSIONS) : NULL;
++    if (!extensions || !strstr(extensions, "EGL_EXT_image_dma_buf_import"))
++        return;
++
++    m_createImage = (CreateImageFn) context->getProcAddress("eglCreateImageKHR");
++    m_destroyImage = (DestroyImageFn) context->getProcAddress("eglDestroyImageKHR");
++    m_imageTargetTexture =
++        (ImageTargetTextureFn) context->getProcAddress("glEGLImageTargetTexture2DOES");
++    if (!m_createImage || !m_destroyImage || !m_imageTargetTexture)
++        return;
++
++    m_externalShader = true;
++    m_canImport = true;
++}
++
++Nv12VideoMaterial::~Nv12VideoMaterial()
++{
++    if (m_image != EGL_NO_IMAGE_KHR)
++        m_destroyImage(m_display, m_image);
++    if (m_externalTexture)
++        glDeleteTextures(1, &m_externalTexture);
++    gst_buffer_replace(&m_shownFrame, NULL);
++}
++
++QSGMaterialType *Nv12VideoMaterial::type() const
++{
++    static QSGMaterialType planesType;
++    static QSGMaterialType externalType;
++    return m_externalShader ? &externalType : &planesType;
++}
++
++QSGMaterialShader *Nv12VideoMaterial::createShader() const
++{
++    return new Nv12MaterialShader(m_externalShader);
++}
++
++void Nv12VideoMaterial::updateColors(int brightness, int contrast, int hue, int saturation)
++{
++    // An imported frame arrives as RGB: only the colour adjustments apply
++    if (m_colorMatrixType == GST_VIDEO_COLOR_MATRIX_UNKNOWN)
++        m_colorMatrixType = GST_VIDEO_COLOR_MATRIX_BT709;
++    const GstVideoColorMatrix yuvMatrix = m_colorMatrixType;
++    m_colorMatrixType = GST_VIDEO_COLOR_MATRIX_RGB;
++    VideoMaterial::updateColors(brightness, contrast, hue, saturation);
++    m_rgbColorMatrix = m_colorMatrix;
++    m_colorMatrixType = yuvMatrix;
++    VideoMaterial::updateColors(brightness, contrast, hue, saturation);
++}
++
++void Nv12VideoMaterial::planeLocation(GstBuffer *frame, int plane,
++                                      gsize *offset, gint *stride) const
++{
++    GstVideoMeta *meta = gst_buffer_get_video_meta(frame);
++    if (meta) {
++        *offset = meta->offset[plane];
++        *stride = meta->stride[plane];
++    } else {
++        *offset = GST_VIDEO_INFO_PLANE_OFFSET(&m_info, plane);
++        *stride = GST_VIDEO_INFO_PLANE_STRIDE(&m_info, plane);
++    }
++}
++
++bool Nv12VideoMaterial::importFrame(GstBuffer *frame)
++{
++    EGLint fds[2], offsets[2], pitches[2];
++
++    for (int plane = 0; plane < 2; ++plane) {
++        gsize offset;
++        gint stride;
++        guint index, length;
++        gsize skip;
++
++        planeLocation(frame, plane, &offset, &stride);
++        if (!gst_buffer_find_memory(frame, offset, 1, &index, &length, &skip))
++            return false;
++        GstMemory *memory = gst_buffer_peek_memory(frame, index);
++        if (!gst_is_fd_memory(memory))
++            return false;  // not a dmabuf: upload this frame
++        fds[plane] = gst_fd_memory_get_fd(memory);
++        offsets[plane] = memory->offset + skip;
++        pitches[plane] = stride;
++    }
++
++    const EGLint attributes[] = {
++        EGL_WIDTH, GST_VIDEO_INFO_WIDTH(&m_info),
++        EGL_HEIGHT, GST_VIDEO_INFO_HEIGHT(&m_info),
++        EGL_LINUX_DRM_FOURCC_EXT, QTVIDEOSINK_DRM_FORMAT_NV12,
++        EGL_DMA_BUF_PLANE0_FD_EXT, fds[0],
++        EGL_DMA_BUF_PLANE0_OFFSET_EXT, offsets[0],
++        EGL_DMA_BUF_PLANE0_PITCH_EXT, pitches[0],
++        EGL_DMA_BUF_PLANE1_FD_EXT, fds[1],
++        EGL_DMA_BUF_PLANE1_OFFSET_EXT, offsets[1],
++        EGL_DMA_BUF_PLANE1_PITCH_EXT, pitches[1],
++        EGL_YUV_COLOR_SPACE_HINT_EXT,
++            m_colorMatrixType == GST_VIDEO_COLOR_MATRIX_BT601 ?
++                EGL_ITU_REC601_EXT : EGL_ITU_REC709_EXT,
++        EGL_SAMPLE_RANGE_HINT_EXT, EGL_YUV_NARROW_RANGE_EXT,
++        EGL_NONE
++    };
++
++    EGLImageKHR image = m_createImage(m_display, EGL_NO_CONTEXT,
++        EGL_LINUX_DMA_BUF_EXT, (EGLClientBuffer) NULL, attributes);
++    if (image == EGL_NO_IMAGE_KHR) {
++        qWarning("qtquick2videosink: EGL can't import the NV12 frames, "
++                 "uploading them instead");
++        m_canImport = false;
++        return false;
++    }
++
++    QOpenGLFunctions *functions = QOpenGLContext::currentContext()->functions();
++    if (!m_externalTexture)
++        glGenTextures(1, &m_externalTexture);
++    functions->glActiveTexture(GL_TEXTURE2);
++    glBindTexture(GL_TEXTURE_EXTERNAL_OES, m_externalTexture);
++    m_imageTargetTexture(GL_TEXTURE_EXTERNAL_OES, image);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    functions->glActiveTexture(GL_TEXTURE0);
++
++    if (m_image != EGL_NO_IMAGE_KHR)
++        m_destroyImage(m_display, m_image);
++    m_image = image;
++    gst_buffer_replace(&m_shownFrame, frame);
++    m_showingImport = true;
++    return true;
++}
++
++void Nv12VideoMaterial::uploadFrame(GstBuffer *frame)
++{
++    GstMapInfo info;
++    if (!gst_buffer_map(frame, &info, GST_MAP_READ))
++        return;
++
++    QOpenGLFunctions *functions = QOpenGLContext::currentContext()->functions();
++    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
++
++    for (int plane = 0; plane < 2; ++plane) {
++        const int bytesPerPixel = plane ? 2 : 1;
++        const GLenum format = plane ? GL_LUMINANCE_ALPHA : GL_LUMINANCE;
++        const int width = m_textureWidths[plane];
++        const int height = m_textureHeights[plane];
++        gsize offset;
++        gint stride;
++
++        planeLocation(frame, plane, &offset, &stride);
++        if (stride < width * bytesPerPixel
++                || offset + gsize(stride) * (height - 1) + width * bytesPerPixel > info.size)
++            break;  // not the layout the caps say
++        const quint8 *data = info.data + offset;
++
++        functions->glActiveTexture(plane ? GL_TEXTURE1 : GL_TEXTURE0);
++        glBindTexture(GL_TEXTURE_2D, m_textureIds[plane]);
++        if (!m_textureAllocated[plane]) {
++            glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0,
++                         format, GL_UNSIGNED_BYTE, NULL);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++            m_textureAllocated[plane] = true;
++        }
++
++        if (stride == width * bytesPerPixel) {
++            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
++                            format, GL_UNSIGNED_BYTE, data);
++        } else if (m_hasRowLength && stride % bytesPerPixel == 0) {
++            glPixelStorei(GL_UNPACK_ROW_LENGTH, stride / bytesPerPixel);
++            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
++                            format, GL_UNSIGNED_BYTE, data);
++            glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
++        } else {
++            for (int y = 0; y < height; ++y)
++                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, y, width, 1,
++                                format, GL_UNSIGNED_BYTE, data + y * stride);
++        }
++    }
++
++    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
++    functions->glActiveTexture(GL_TEXTURE0);
++    gst_buffer_unmap(frame, &info);
++    m_showingImport = false;
++}
++
++void Nv12VideoMaterial::bind()
++{
++    QOpenGLFunctions *functions = QOpenGLContext::currentContext()->functions();
++    GstBuffer *frame = NULL;
++
++    m_frameMutex.lock();
++    if (m_frame && m_frameDirty)
++        frame = gst_buffer_ref(m_frame);
++    m_frameDirty = false;
++    m_frameMutex.unlock();
++
++    if (frame) {
++        if (!(m_canImport && importFrame(frame)))
++            uploadFrame(frame);
++        gst_buffer_unref(frame);
++    }
++
++    if (m_externalShader) {
++        functions->glActiveTexture(GL_TEXTURE2);
++        glBindTexture(GL_TEXTURE_EXTERNAL_OES, m_externalTexture);
++    }
++    functions->glActiveTexture(GL_TEXTURE1);
++    glBindTexture(GL_TEXTURE_2D, m_textureIds[1]);
++    functions->glActiveTexture(GL_TEXTURE0); // Finish with 0 as default texture unit
++    glBindTexture(GL_TEXTURE_2D, m_textureIds[0]);
++}
++
+ VideoMaterial *VideoMaterial::create(const BufferFormat & format)
+ {
+     VideoMaterial *material = NULL;
+@@ -226,6 +670,11 @@ VideoMaterial *VideoMaterial::create(const BufferFormat & format)
+             format.frameSize());
+         break;
+ 
++    // YUV 420 semi-planar
++    case GST_VIDEO_FORMAT_NV12:
++        material = new Nv12VideoMaterial(format);
++        break;
++
+     default:
+         Q_ASSERT(false);
+         break;
+@@ -244,7 +693,9 @@ VideoMaterial::VideoMaterial() :
+     m_textureType(0),
+     m_colorMatrixType(GST_VIDEO_COLOR_MATRIX_UNKNOWN)
+ {
++    m_frameDirty = false;
+     memset(m_textureIds, 0, sizeof(m_textureIds));
++    memset(m_textureAllocated, 0, sizeof(m_textureAllocated));
+     setFlag(Blending, false);
+ }
+ 
+@@ -326,6 +777,10 @@ void VideoMaterial::init(GstVideoColorMatrix colorMatrixType)
+ void VideoMaterial::setCurrentFrame(GstBuffer *buffer)
+ {
+     QMutexLocker lock(&m_frameMutex);
++    // The material holds a ref on m_frame, so a new frame is always a
++    // different buffer, even from a pool
++    if (buffer != m_frame)
++        m_frameDirty = true;
+     gst_buffer_replace(&m_frame, buffer);
+ }
+ 
+@@ -407,8 +862,9 @@ void VideoMaterial::bind()
+     GstBuffer *frame = NULL;
+ 
+     m_frameMutex.lock();
+-    if (m_frame)
++    if (m_frame && m_frameDirty)
+       frame = gst_buffer_ref(m_frame);
++    m_frameDirty = false;
+     m_frameMutex.unlock();
+ 
+     if (frame) {
+@@ -443,19 +899,33 @@ void VideoMaterial::bind()
+ void VideoMaterial::bindTexture(int i, const quint8 *data)
+ {
+     glBindTexture(GL_TEXTURE_2D, m_textureIds[i]);
+-    glTexImage2D(
+-        GL_TEXTURE_2D,
+-        0,
+-        m_textureInternalFormat,
+-        m_textureWidths[i],
+-        m_textureHeights[i],
+-        0,
+-        m_textureFormat,
+-        m_textureType,
+-        data + m_textureOffsets[i]);
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    // Allocate once (the size is fixed for the material), then only update
++    if (!m_textureAllocated[i]) {
++        glTexImage2D(
++            GL_TEXTURE_2D,
++            0,
++            m_textureInternalFormat,
++            m_textureWidths[i],
++            m_textureHeights[i],
++            0,
++            m_textureFormat,
++            m_textureType,
++            data + m_textureOffsets[i]);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++        m_textureAllocated[i] = true;
++    } else {
++        glTexSubImage2D(
++            GL_TEXTURE_2D,
++            0,
++            0, 0,
++            m_textureWidths[i],
++            m_textureHeights[i],
++            m_textureFormat,
++            m_textureType,
++            data + m_textureOffsets[i]);
++    }
+ }
+ 
+diff --git a/elements/gstqtvideosink/painters/videomaterial.h b/elements/gstqtvideosink/painters/videomaterial.h
+index 90a6379..579ab54 100644
+--- a/elements/gstqtvideosink/painters/videomaterial.h
++++ b/elements/gstqtvideosink/painters/videomaterial.h
+@@ -38,9 +38,9 @@ public:
+     virtual int compare(const QSGMaterial *other) const;
+ 
+     void setCurrentFrame(GstBuffer *buffer);
+-    void updateColors(int brightness, int contrast, int hue, int saturation);
++    virtual void updateColors(int brightness, int contrast, int hue, int saturation);
+ 
+-    void bind();
++    virtual void bind();
+ 
+ protected:
+     VideoMaterial();
+@@ -49,11 +49,14 @@ protected:
+     void initYuv420PTextureInfo(bool uvSwapped, const QSize &size);
+     void init(GstVideoColorMatrix colorMatrixType);
+ 
+-private:
+     void bindTexture(int i, const quint8 *data);
+ 
+-
++    // protected, not private: Nv12VideoMaterial (videomaterial.cpp) uses them
+     GstBuffer *m_frame;
++    // set by setCurrentFrame(), cleared when bind() has uploaded the frame:
++    // the scene graph binds the material on every render, and re-uploading
++    // an unchanged frame each time was most of the CPU time
++    bool m_frameDirty;
+     QMutex m_frameMutex;
+ 
+     static const int Num_Texture_IDs = 3;
+@@ -62,6 +65,7 @@ private:
+     int m_textureWidths[Num_Texture_IDs];
+     int m_textureHeights[Num_Texture_IDs];
+     int m_textureOffsets[Num_Texture_IDs];
++    bool m_textureAllocated[Num_Texture_IDs];
+     QSize m_textureSize;
+ 
+     GstVideoFormat m_format;

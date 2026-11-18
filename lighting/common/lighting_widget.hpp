@@ -10,8 +10,8 @@ class ColorWheel;
 class Selector;
 
 // A lighting page for some of the lighting controller's zones ('F' interior
-// front, 'R' interior rear, 'E' exterior): pattern, colours, speed and
-// brightness. Talks to ozark-lightd (org.ozark.Lighting1 on the system bus),
+// front, 'R' interior rear, 'E' exterior): pattern, colours (colour, colour 2,
+// background), speed and brightness. Talks to ozark-lightd (org.ozark.Lighting1 on the system bus),
 // which finds the controller itself; its port and strip setup are in Dash's
 // Settings > Lighting. Used by the Interior Lighting (F, R) and Exterior
 // Lighting (E) plugins.
@@ -49,7 +49,7 @@ class LightingWidget : public QWidget {
 
     Selector *pattern_selector;
     ColorWheel *wheel;
-    QPushButton *swatches[2];  // "Color", "Color 2": which one the wheel edits
+    QPushButton *swatches[3];  // "Color", "Color 2", "Background": which one the wheel edits
     int editing = 0;
     QTimer *send_timer;        // limits wheel drags to ~20 updates a second
     QSlider *speed_slider;

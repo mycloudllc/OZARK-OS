@@ -11,11 +11,14 @@ const char *kPath = "/org/ozark/Lighting1";
 const char *kZoneInterface = "org.ozark.Lighting1.Zone";
 
 // Must match the firmware's pattern ids (../PROTOCOL.md)
-const QList<QString> kPatterns = {"Off",     "Solid",    "Rainbow",  "Chase",    "Breathe", "Gradient",
-                                  "Twinkle", "Comet",    "VU Meter", "Spectrum", "Beat Pulse"};
+const QList<QString> kPatterns = {"Off",      "Solid",   "Rainbow", "Chase",    "Breathe",    "Gradient",
+                                  "Twinkle",  "Comet",   "VU Meter", "Spectrum", "Beat Pulse", "Fire",
+                                  "Sparkle",  "Scanner", "Wipe",    "Wave",     "Fade",       "Strobe",
+                                  "Theater",  "Rainbow Runner"};
 
-// Look keys of the two colours, in swatch order
-const char *kColorKeys[2] = {"color", "color2"};
+// Look keys of the colours, in swatch order
+constexpr int kColors = 3;
+const char *kColorKeys[kColors] = {"color", "color2", "background"};
 
 QString zone_name(QChar zone)
 {
@@ -87,7 +90,10 @@ void LightingWidget::fetch()
 QLayout *LightingWidget::row(const QString &label, QWidget *control)
 {
     auto layout = new QHBoxLayout();
-    layout->addWidget(new QLabel(label), 1);
+    // Wraps when the row is short of room, before the control has to shrink
+    auto text = new QLabel(label);
+    text->setWordWrap(true);
+    layout->addWidget(text, 1);
     if (qobject_cast<QSlider *>(control) || qobject_cast<QSpinBox *>(control))
         layout->addWidget(control, 1);
     else
@@ -106,6 +112,8 @@ void LightingWidget::build_ui()
     Session::Forge::to_touch_scroller(scroll);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    // Fit the width: rows shrink instead of running off the right edge
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     outer->addWidget(scroll);
 
     auto content = new QWidget(scroll);
@@ -167,12 +175,12 @@ void LightingWidget::build_ui()
     auto swatch_column = new QVBoxLayout();
     swatch_column->addStretch();
     auto swatch_group = new QButtonGroup(this);
-    const char *labels[2] = {"Color", "Color 2"};
-    for (int i = 0; i < 2; ++i) {
+    const char *labels[kColors] = {"Color", "Color 2", "Background"};
+    for (int i = 0; i < kColors; ++i) {
         this->swatches[i] = new QPushButton(labels[i], content);
         this->swatches[i]->setCheckable(true);
         this->swatches[i]->setFont(font14);
-        this->swatches[i]->setMinimumSize(int(150 * scale), int(56 * scale));
+        this->swatches[i]->setMinimumSize(int(120 * scale), int(56 * scale));
         swatch_group->addButton(this->swatches[i], i);
         swatch_column->addWidget(this->swatches[i]);
     }
@@ -217,8 +225,10 @@ void LightingWidget::build_ui()
     });
     levels->addLayout(this->row("Brightness", this->brightness_slider));
 
-    auto music_hint = new QLabel("VU Meter, Spectrum and Beat Pulse react to the music playing on this unit.", content);
+    auto music_hint = new QLabel("VU Meter, Spectrum and Beat Pulse react to the music playing on this unit. "
+                                 "Background fills the LEDs a pattern leaves dark.", content);
     music_hint->setWordWrap(true);
+    music_hint->setProperty("muted", true);
     music_hint->setFont(this->arbiter.forge().font(11));
     layout->addWidget(music_hint);
     layout->addStretch();
@@ -251,10 +261,10 @@ void LightingWidget::load_controls()
 
     this->loading = true;
     this->pattern_selector->set_current(kPatterns.value(look.value("pattern").toInt()));
-    for (int i = 0; i < 2; ++i)
-        this->show_swatch(i, QColor(look.value(kColorKeys[i]).toString()));
+    for (int i = 0; i < kColors; ++i)
+        this->show_swatch(i, QColor(look.value(kColorKeys[i], "#000000").toString()));
     if (!this->wheel->dragging())
-        this->wheel->setColor(QColor(look.value(kColorKeys[this->editing]).toString()));
+        this->wheel->setColor(QColor(look.value(kColorKeys[this->editing], "#000000").toString()));
     // Don't fight a finger still on a slider with echoes of its own earlier values
     if (!this->speed_slider->isSliderDown())
         this->speed_slider->setValue(look.value("speed").toInt());
@@ -268,7 +278,7 @@ void LightingWidget::select_color(int which)
 {
     this->editing = which;
     const QVariantMap look = this->looks.value(this->targets().value(0));
-    this->wheel->setColor(QColor(look.value(kColorKeys[which]).toString()));
+    this->wheel->setColor(QColor(look.value(kColorKeys[which], "#000000").toString()));
 }
 
 // A swatch button filled with its colour; the one the wheel edits is outlined

@@ -45,6 +45,8 @@ SRC_URI = " \
     file://0025-Settings-Lighting-WLED-controllers.patch \
     file://0026-Settings-Update-install-software-updates-online-or-f.patch \
     file://0027-Bluetooth-player-follow-the-phone-s-track-and-play-p.patch \
+    file://0028-Settings-Lighting-GPIO-2-as-a-data-pin.patch \
+    file://0029-Lighting-pages-fit-the-screen-width.patch \
     file://0030-Bluetooth-reconnect-the-last-phone-until-it-s-in-ran.patch \
     file://0031-Settings-Update-warn-not-to-cut-power-while-installi.patch \
     file://0032-Settings-Update-drop-the-note-on-how-updates-work.patch \

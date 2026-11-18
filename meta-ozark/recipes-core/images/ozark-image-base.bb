@@ -13,24 +13,26 @@ IMAGE_INSTALL:append = " \
     usbutils \
 "
 
-# Plain-text boot logs on the SD card's OZARKLOGS partition (Pi only: the
-# partition comes from ozark-sdimage.wks.in)
-IMAGE_INSTALL:append:rpi = " ozark-logs"
+# Plain-text boot logs on the SD card's OZARKLOGS partition (boards with the
+# A/B layout: the partition comes from wic/ozark-sdimage*.wks.in)
+IMAGE_INSTALL:append:ozarkab = " ozark-logs"
 
 # Room for logs and experiments on the dev image
 IMAGE_ROOTFS_EXTRA_SPACE = "524288"
 
-# A/B system slots on the Pi (classes/ozark-slots.bbclass): this system is
-# slot A on a new SD card, its kernel, dtbs and overlays in the boot
-# partition's a/ folder. It must fit a slot.
+# A/B system slots (classes/ozark-slots.bbclass): this system is slot A on a
+# new SD card, its kernel and device tree(s) in the boot partition's a/
+# folder. It must fit a slot.
 inherit ozark-slots
-IMAGE_ROOTFS_MAXSIZE:rpi = "${@int(d.getVar('OZARK_SLOT_SIZE')) * 1024}"
+IMAGE_ROOTFS_MAXSIZE:ozarkab = "${@int(d.getVar('OZARK_SLOT_SIZE')) * 1024}"
 python () {
-    if 'rpi' in (d.getVar('MACHINEOVERRIDES') or '').split(':'):
-        bootfiles = d.getVar('BOOTFILES_DIR_NAME')
-        files = ['%s/*' % bootfiles] + ['%s;%s' % f for f in ozark_slot_boot_files(d, 'a')]
-        d.setVar('IMAGE_BOOT_FILES', ' '.join(files))
+    if 'ozarkab' in (d.getVar('MACHINEOVERRIDES') or '').split(':'):
+        d.setVar('IMAGE_BOOT_FILES', ozark_image_boot_files(d))
 }
+
+# U-Boot boards: the boot partition's files and the raw bootloader come from
+# these recipes' deploy dirs
+do_image_wic[depends] += "${@'ozark-boot:do_deploy virtual/bootloader:do_deploy virtual/kernel:do_deploy' if d.getVar('OZARK_BOOTLOADER') == 'uboot' else ''}"
 
 # Build stamp, so two builds of one version can be told apart (Settings >
 # Update, and whether an online update is newer). Deployed next to the image

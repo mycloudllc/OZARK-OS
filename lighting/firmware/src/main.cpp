@@ -17,9 +17,11 @@ constexpr uint32_t kFrameMs = 16;  // ~60 fps
 constexpr size_t kMaxLine = 256;
 constexpr uint32_t kStoreVersion = 3;  // bump when StripConfig/Look change
 
-// GPIOs a zone may use: outputs that don't affect boot or flash (ESP32-WROOM;
-// on WROVER modules 16 and 17 belong to the PSRAM)
-constexpr uint8_t kPins[] = {4, 5, 13, 14, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
+// GPIOs a zone may use: outputs that don't affect flash (ESP32-WROOM; on
+// WROVER modules 16 and 17 belong to the PSRAM). GPIO 2 is a strapping pin
+// (only matters when flashing over USB, and an LED strip's input doesn't pull
+// it high) and drives the blue LED on most dev boards; WLED uses it by default.
+constexpr uint8_t kPins[] = {2, 4, 5, 13, 14, 16, 17, 18, 19, 21, 22, 23, 25, 26, 27, 32, 33};
 
 const StripConfig kDefaults[3] = {
     {16, 60, 2, false, false, false},  // F: interior front, GRB
@@ -32,14 +34,52 @@ uint8_t max_bri = 200;
 
 StripConfig staged[3];
 uint8_t staged_max_bri = 200;
+// The first CFG change refused since the last apply or revert: CFGAPPLY then
+// applies nothing, so a rejected value can't leave the others half applied
+char staged_error[32] = "";
 
 Music music = {};
 Preferences prefs;
 char line[kMaxLine];
 size_t line_len = 0;
+bool discarding = false;  // the line was too long: skip to its end
 uint32_t last_frame = 0;
 
+bool valid_pin(long pin);
+
 // ---------------------------------------------------------------- storage
+
+// What flash gave back is usable: the same checks as CFG and CFGAPPLY
+bool valid_configs(const StripConfig configs[3])
+{
+    for (int z = 0; z < 3; z++) {
+        const StripConfig &c = configs[z];
+        if (!valid_pin(c.pin) || c.count < 1 || c.count > kMaxLeds || c.order >= 6)
+            return false;
+        for (int other = z + 1; other < 3; other++) {
+            if (configs[other].pin == c.pin)
+                return false;
+        }
+    }
+    return true;
+}
+
+// The looks: "look2" (with the background colour), or the shorter "look" an
+// older firmware stored, which gets a black background
+bool load_looks(Look looks[3])
+{
+    if (prefs.getBytes("look2", looks, sizeof(Look) * 3) == sizeof(Look) * 3)
+        return true;
+    struct LookV1 {
+        uint8_t r, g, b, r2, g2, b2, pattern, speed, bri;
+    } old[3];
+    if (prefs.getBytes("look", old, sizeof(old)) != sizeof(old))
+        return false;
+    for (int z = 0; z < 3; z++)
+        looks[z] = Look{old[z].r, old[z].g, old[z].b, old[z].r2, old[z].g2, old[z].b2,
+                        old[z].pattern, old[z].speed, old[z].bri, 0, 0, 0};
+    return true;
+}
 
 void load()
 {
@@ -47,13 +87,19 @@ void load()
     if (prefs.getUInt("version", 0) == kStoreVersion) {
         StripConfig configs[3];
         Look looks[3];
-        if (prefs.getBytes("config", configs, sizeof(configs)) == sizeof(configs) &&
-            prefs.getBytes("look", looks, sizeof(looks)) == sizeof(looks)) {
-            for (int z = 0; z < 3; z++) {
-                zones[z].config = configs[z];
-                zones[z].look = looks[z];
+        if (prefs.getBytes("config", configs, sizeof(configs)) == sizeof(configs) && load_looks(looks)) {
+            // Anything out of range (a damaged store) keeps the defaults
+            if (valid_configs(configs)) {
+                for (int z = 0; z < 3; z++)
+                    zones[z].config = configs[z];
             }
-            max_bri = prefs.getUChar("maxbri", max_bri);
+            for (int z = 0; z < 3; z++) {
+                if (looks[z].pattern < PAT_COUNT)
+                    zones[z].look = looks[z];
+            }
+            const uint8_t stored_max_bri = prefs.getUChar("maxbri", max_bri);
+            if (stored_max_bri >= 1)
+                max_bri = stored_max_bri;
         }
     }
     prefs.end();
@@ -70,7 +116,8 @@ void save()
     prefs.begin("ozark-light", false);
     prefs.putUInt("version", kStoreVersion);
     prefs.putBytes("config", configs, sizeof(configs));
-    prefs.putBytes("look", looks, sizeof(looks));
+    prefs.putBytes("look2", looks, sizeof(looks));
+    prefs.remove("look");  // the older layout, superseded by look2
     prefs.putUChar("maxbri", max_bri);
     prefs.end();
 }
@@ -147,7 +194,7 @@ void cmd_look(const char *cmd, char **args, int argc)
     if (argc < 2 || !look_targets(args[1], targets))
         return reply("ERR zone");
 
-    const bool color = !strcmp(cmd, "COLOR") || !strcmp(cmd, "COLOR2");
+    const bool color = !strcmp(cmd, "COLOR") || !strcmp(cmd, "COLOR2") || !strcmp(cmd, "COLOR3");
     if (color) {
         uint8_t r, g, b;
         if (argc != 5 || !to_byte(args[2], r) || !to_byte(args[3], g) || !to_byte(args[4], b))
@@ -158,6 +205,9 @@ void cmd_look(const char *cmd, char **args, int argc)
             Look &l = zones[z].look;
             if (cmd[5] == '2') {
                 l.r2 = r; l.g2 = g; l.b2 = b;
+            }
+            else if (cmd[5] == '3') {  // background
+                l.r3 = r; l.g3 = g; l.b3 = b;
             }
             else {
                 l.r = r; l.g = g; l.b = b;
@@ -201,10 +251,18 @@ void cmd_aud(char **args, int argc)
     music.last_ms = millis();
 }
 
+// Refuse a CFG change, and remember it for CFGAPPLY
+void cfg_error(const char *text)
+{
+    if (!staged_error[0])
+        strlcpy(staged_error, text, sizeof(staged_error));
+    reply(text);
+}
+
 void cmd_cfg(char **args, int argc)
 {
     if (argc != 4)
-        return reply("ERR args");
+        return cfg_error("ERR args");
     const char zone = args[1][0];
     const char *key = args[2];
     const char *value = args[3];
@@ -212,26 +270,26 @@ void cmd_cfg(char **args, int argc)
     const long v = strtol(value, &end, 10);
     const bool number = *end == '\0';
 
-    if (zone == 'G') {
+    if (zone == 'G' && !args[1][1]) {
         if (strcmp(key, "MAXBRI") || !number || v < 1 || v > 255)
-            return reply("ERR value");
+            return cfg_error("ERR value");
         staged_max_bri = v;
         return reply("OK");
     }
 
     const int z = zone_index(zone);
     if (z < 0 || args[1][1])
-        return reply("ERR zone");
+        return cfg_error("ERR zone");
     StripConfig &c = staged[z];
 
     if (!strcmp(key, "PIN")) {
         if (!number || !valid_pin(v))
-            return reply("ERR pin");
+            return cfg_error("ERR pin");
         c.pin = v;
     }
     else if (!strcmp(key, "COUNT")) {
         if (!number || v < 1 || v > kMaxLeds)
-            return reply("ERR count");
+            return cfg_error("ERR count");
         c.count = v;
     }
     else if (!strcmp(key, "ORDER")) {
@@ -241,45 +299,56 @@ void cmd_cfg(char **args, int argc)
                 found = i;
         }
         if (found < 0)
-            return reply("ERR order");
+            return cfg_error("ERR order");
         c.order = found;
     }
     else if (!strcmp(key, "RGBW") || !strcmp(key, "REVERSE")) {
         if (!number || (v != 0 && v != 1))
-            return reply("ERR value");
+            return cfg_error("ERR value");
         (key[0] == 'R' && key[1] == 'G' ? c.rgbw : c.reverse) = v;
     }
     else if (!strcmp(key, "KHZ")) {
         if (!number || (v != 800 && v != 400))
-            return reply("ERR khz");
+            return cfg_error("ERR khz");
         c.khz400 = v == 400;
     }
     else {
-        return reply("ERR key");
+        return cfg_error("ERR key");
     }
     reply("OK");
 }
 
+// Staged = applied config, nothing refused
+void stage_current()
+{
+    for (int z = 0; z < 3; z++)
+        staged[z] = zones[z].config;
+    staged_max_bri = max_bri;
+    staged_error[0] = '\0';
+}
+
+// All or nothing. Either way the staged changes are gone afterwards, so a
+// refused or abandoned edit can't be applied later with an unrelated one.
 void cmd_cfgapply()
 {
+    if (staged_error[0]) {
+        Serial.printf("ERR not applied, a change was refused (%s)\n", staged_error);
+        return stage_current();
+    }
     for (int a = 0; a < 3; a++) {
         for (int b = a + 1; b < 3; b++) {
-            if (staged[a].pin == staged[b].pin)
-                return reply("ERR pins must differ");
+            if (staged[a].pin == staged[b].pin) {
+                reply("ERR pins must differ");
+                return stage_current();
+            }
         }
     }
     for (int z = 0; z < 3; z++)
         zones[z].apply(staged[z]);
     max_bri = staged_max_bri;
     save();
+    stage_current();
     reply("OK APPLIED");
-}
-
-void stage_current()
-{
-    for (int z = 0; z < 3; z++)
-        staged[z] = zones[z].config;
-    staged_max_bri = max_bri;
 }
 
 void handle(char *text)
@@ -297,8 +366,8 @@ void handle(char *text)
         return cmd_aud(args, argc);
     if (!strcmp(cmd, "PING"))
         return reply("PONG");
-    if (!strcmp(cmd, "COLOR") || !strcmp(cmd, "COLOR2") || !strcmp(cmd, "PAT") || !strcmp(cmd, "SPEED") ||
-        !strcmp(cmd, "BRI"))
+    if (!strcmp(cmd, "COLOR") || !strcmp(cmd, "COLOR2") || !strcmp(cmd, "COLOR3") || !strcmp(cmd, "PAT") ||
+        !strcmp(cmd, "SPEED") || !strcmp(cmd, "BRI"))
         return cmd_look(cmd, args, argc);
     if (!strcmp(cmd, "SAVE")) {
         save();
@@ -349,17 +418,29 @@ void read_serial()
     while (Serial.available()) {
         const char c = Serial.read();
         if (c == '\n') {
-            line[line_len] = '\0';
-            if (line_len && line[line_len - 1] == '\r')
-                line[line_len - 1] = '\0';
-            handle(line);
+            if (discarding) {
+                discarding = false;  // end of the runaway line
+                reply("ERR line too long");
+            }
+            else {
+                line[line_len] = '\0';
+                if (line_len && line[line_len - 1] == '\r')
+                    line[line_len - 1] = '\0';
+                handle(line);
+            }
             line_len = 0;
+        }
+        else if (discarding) {
+            continue;
         }
         else if (line_len < kMaxLine - 1) {
             line[line_len++] = c;
         }
         else {
-            line_len = 0;  // runaway line: drop it and resync on the next newline
+            // Runaway line: drop all of it, not just its start (the rest would
+            // otherwise run as a command of its own)
+            line_len = 0;
+            discarding = true;
         }
     }
 }

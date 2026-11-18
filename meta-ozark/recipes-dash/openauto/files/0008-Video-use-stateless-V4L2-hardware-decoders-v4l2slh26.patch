@@ -1,0 +1,61 @@
+From b9a3bde9f461a4a6db4132e6f12e6b3baf1f012e Mon Sep 17 00:00:00 2001
+From: Ozark <ozark@localhost>
+Date: Wed, 4 Nov 2026 18:56:00 -0600
+Subject: [PATCH] Video: use stateless V4L2 hardware decoders (v4l2slh264dec)
+
+Rockchip SoCs decode H.264 with the Hantro VPU, a stateless V4L2 decoder:
+GStreamer's v4l2codecs element v4l2slh264dec, not v4l2h264dec. Without it
+in the list, Android Auto's video was decoded in software (avdec_h264).
+It comes after v4l2h264dec, so the Raspberry Pi's decoder is still picked
+there.
+
+The Hantro VPU outputs only NV12. qt-gstreamer's 0003 shows it without a
+copy, so it goes straight to the sink. The Pi's decoder is pinned to I420,
+the format it used before the sink took NV12 as well.
+---
+ include/openauto/Projection/GSTVideoOutput.hpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/include/openauto/Projection/GSTVideoOutput.hpp b/include/openauto/Projection/GSTVideoOutput.hpp
+index 60a4c0f..e4c0a4a 100644
+--- a/include/openauto/Projection/GSTVideoOutput.hpp
++++ b/include/openauto/Projection/GSTVideoOutput.hpp
+@@ -55,6 +55,7 @@ namespace projection
+ enum H264_Decoder { 
+     nvcodec,
+     v4l2,
++    v4l2sl,
+     omx,
+     vaapi,
+     libav,
+@@ -63,7 +64,9 @@ enum H264_Decoder {
+ 
+ // order of priority for decoders - dash will use the first decoder it can find in this list
+ // for sake of the code, don't include "unknown" as a decoder to search for - this is the default case.
+-const H264_Decoder H264_Decoder_Priority_List[] = { nvcodec, v4l2, omx, libav };
++// v4l2sl: stateless V4L2 decoders (gst-plugins-bad v4l2codecs), e.g. the
++// Hantro VPU in Rockchip SoCs; the Pi's decoder is a stateful one (v4l2)
++const H264_Decoder H264_Decoder_Priority_List[] = { nvcodec, v4l2, v4l2sl, omx, libav };
+ 
+ // A map of enum to actual pad name we want to use
+ inline const char* ToString(H264_Decoder v)
+@@ -72,6 +75,7 @@ inline const char* ToString(H264_Decoder v)
+     {
+         case nvcodec: return "nvh264dec";
+         case v4l2: return "v4l2h264dec";
++        case v4l2sl: return "v4l2slh264dec";
+         case omx: return "omxh264dec";
+         case libav: return "avdec_h264";
+         default: return "unknown";
+@@ -85,6 +89,7 @@ inline const char* ToPipeline(H264_Decoder v)
+         // we're going to assume that any machine with an nvidia card has a cpu powerful enough for video convert.
+         case nvcodec: return "nvh264dec ! videoconvert";
+-        case v4l2: return "v4l2h264dec";
++        case v4l2: return "v4l2h264dec ! video/x-raw,format=I420";
++        case v4l2sl: return "v4l2slh264dec";
+         case omx: return "omxh264dec";
+         case libav: return "avdec_h264";
+         default: return "unknown";
+-- 
+2.43.0
+

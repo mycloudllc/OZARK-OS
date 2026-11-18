@@ -16,11 +16,13 @@
 #   --rpi7     Official 7" DSI touchscreen instead of the Waveshare 8" panel
 #   --mirrors  Use the Yocto Project public sstate mirror to speed up the first build
 #   --qemu     Build for QEMU (qemuarm64) instead of the Pi; boot it with scripts/run-qemu.sh
+#   --opi3b    Build for the Orange Pi 3B (v2.1) instead of the Pi (kas/ozark-opi3b.yml)
 #   -h|--help  Show this help
 #
 # Environment:
-#   OZARK_DL_DIR      Download cache        (default: <repo>/cache/downloads)
-#   OZARK_SSTATE_DIR  Shared-state cache    (default: <repo>/cache/sstate)
+#   OZARK_DL_DIR      Download cache        (default: <repo>/cache/downloads, or the
+#                     Pi tree's next to this one: ../ozark-os/ozark-os/cache/downloads)
+#   OZARK_SSTATE_DIR  Shared-state cache    (default: <repo>/cache/sstate, or the Pi tree's)
 #   KAS_CONTAINER_ENGINE  docker or podman  (default: auto-detect)
 
 set -euo pipefail
@@ -37,6 +39,7 @@ target=""
 dev=1
 fragments=()
 machine="raspberrypi4-64"
+base="kas/ozark-rpi4.yml"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -46,6 +49,7 @@ while [ $# -gt 0 ]; do
         --rpi7)    fragments+=("kas/display-rpi7.yml") ;;
         --mirrors) fragments+=("kas/mirrors.yml") ;;
         --qemu)    fragments+=("kas/qemu.yml"); machine="qemuarm64" ;;
+        --opi3b)   base="kas/ozark-opi3b.yml"; machine="orangepi-3b" ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -54,7 +58,7 @@ done
 
 [ "$dev" -eq 1 ] && fragments=("kas/dev.yml" "${fragments[@]}")
 
-config="kas/ozark-rpi4.yml"
+config="$base"
 for f in "${fragments[@]}"; do
     config="${config}:${f}"
 done
@@ -114,8 +118,24 @@ fi
 
 # --- Caches (kept outside the build dir so 'rm -rf build' is cheap) -----------
 
-export DL_DIR="${OZARK_DL_DIR:-$ROOT/cache/downloads}"
-export SSTATE_DIR="${OZARK_SSTATE_DIR:-$ROOT/cache/sstate}"
+# A second tree (e.g. a board port next to ../ozark-os/ozark-os) shares that
+# tree's caches: packages that aren't board-specific aren't built twice
+cache="$ROOT/cache"
+shared="$ROOT/../ozark-os/ozark-os/cache"
+[ ! -d "$cache" ] && [ -d "$shared" ] && cache="$(cd "$shared" && pwd)"
+export DL_DIR="${OZARK_DL_DIR:-$cache/downloads}"
+export SSTATE_DIR="${OZARK_SSTATE_DIR:-$cache/sstate}"
+# Sharing the cache also needs the other tree's hash equivalence database
+# (BitBake's unihashes): without it, identical tasks get other IDs and
+# nothing matches. Copied once, when this tree has none yet.
+if [ "$cache" != "$ROOT/cache" ] && [ ! -f "$ROOT/build/build/cache/hashserv.db" ] &&
+   [ -f "$shared/../build/build/cache/hashserv.db" ]; then
+    mkdir -p "$ROOT/build/build/cache"
+    python3 -c 'import sqlite3, sys
+src = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst)' "$shared/../build/build/cache/hashserv.db" "$ROOT/build/build/cache/hashserv.db"
+fi
 export KAS_WORK_DIR="$ROOT/build"
 mkdir -p "$DL_DIR" "$SSTATE_DIR" "$KAS_WORK_DIR"
 

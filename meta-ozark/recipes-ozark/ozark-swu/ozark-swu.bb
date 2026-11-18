@@ -1,15 +1,16 @@
 SUMMARY = "Ozark OS software update (.swu)"
 DESCRIPTION = "ozark-image as a signed SWUpdate file, for Settings > Update \
 (ozark-update): the root filesystem, written raw into the system slot that \
-isn't running, and that system's boot files (kernel, dtbs, overlays, \
-config.txt, cmdline.txt) for the slot's folder on the boot partition. \
+isn't running, and that system's boot files (kernel, device trees, and on \
+the Pi its overlays and config.txt; cmdline.txt) for the slot's folder on \
+the boot partition. \
 Deployed as ozark-swu-${MACHINE}.rootfs.swu; scripts/make-release.sh makes the \
 update feed for it."
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
 
-# Only the Raspberry Pi has the A/B layout
-COMPATIBLE_MACHINE = "^rpi$"
+# Boards with the A/B layout (OZARK_AB_MACHINES in the distro conf)
+COMPATIBLE_MACHINE = "^ozarkab$"
 
 SRC_URI = "file://sw-description file://ozark-install.sh"
 
@@ -26,6 +27,8 @@ SWUPDATE_PRIVATE_KEY ?= "${OZARK_KEYS_DIR}/swupdate-private.pem"
 
 # The image's build stamp (ozark-image-base.bb), for sw-description
 OZARK_BUILD = ""
+# Slot partitions in sw-description: ${OZARK_SLOT_DISK}p2 and p3
+do_swuimage[vardeps] += "OZARK_SLOT_DISK"
 
 python do_swuimage:prepend() {
     import os, tarfile

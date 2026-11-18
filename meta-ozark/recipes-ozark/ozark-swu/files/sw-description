@@ -11,7 +11,7 @@ software =
 				{
 					filename = "@@OZARK_SWU_ROOTFS@@";
 					type = "raw";
-					device = "/dev/mmcblk0p2";
+					device = "@@OZARK_SLOT_DISK@@p2";
 					compressed = "zstd";
 					installed-directly = true;
 					sha256 = "$swupdate_get_sha256(@@OZARK_SWU_ROOTFS@@)";
@@ -39,7 +39,7 @@ software =
 				{
 					filename = "@@OZARK_SWU_ROOTFS@@";
 					type = "raw";
-					device = "/dev/mmcblk0p3";
+					device = "@@OZARK_SLOT_DISK@@p3";
 					compressed = "zstd";
 					installed-directly = true;
 					sha256 = "$swupdate_get_sha256(@@OZARK_SWU_ROOTFS@@)";

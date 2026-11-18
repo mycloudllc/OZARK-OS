@@ -15,6 +15,7 @@ SRC_URI = " \
     file://0005-Ozark-default-right-hand-drive.patch \
     file://0006-Microphone-open-only-a-sound-card-s-microphone.patch \
     file://0007-Wireless-AA-phones-no-longer-get-stuck-on-Connecting.patch \
+    file://0008-Video-use-stateless-V4L2-hardware-decoders-v4l2slh26.patch \
     file://0009-Wireless-AA-start-the-Bluetooth-service-once-the-ada.patch \
     file://0010-Wireless-AA-leave-reconnecting-the-last-phone-to-Das.patch \
     file://0011-Wireless-AA-when-the-phone-stops-answering-pings-hav.patch \

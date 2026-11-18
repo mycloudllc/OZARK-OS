@@ -20,6 +20,7 @@ class PixelRenderer {
 public:
     struct Look {
         QColor color{255, 0, 80}, color2{0, 120, 255};
+        QColor background{0, 0, 0};  // where a pattern leaves LEDs dark
         int pattern = 1, speed = 128, brightness = 255;
     };
 
@@ -35,8 +36,10 @@ private:
     void set(quint8* rgb, int i, int r, int g, int b, int scale) const;
     quint16 phase(qint64 now, int speed, quint32 slowest_ms, quint32 fastest_ms) const;
 
-    std::vector<quint8> m_twinkle;  // per-LED twinkle level
+    std::vector<quint8> m_level;    // per-LED state: twinkle / sparkle / trail level, fire heat
     int m_pulse = 0;                // beat pulse level
+    int m_lastPos = -1;             // scanner: where the dot was last frame
+    int m_lastPattern = -1;
     qint64 m_testStart = 0;         // 0: not testing
     qint64 m_lastMs = -1;           // last render: fades keep the firmware's speed at any frame rate
 };

@@ -1,0 +1,15 @@
+[Unit]
+Description=Log temperature, clocks and Wi-Fi link health every few seconds
+# Only useful with the boot logs, which is where anyone reads it
+After=ozark-logs.service
+
+[Service]
+ExecStart=/usr/sbin/ozark-health
+# Lowest priority: it must never be the reason something else stutters
+Nice=19
+IOSchedulingClass=idle
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

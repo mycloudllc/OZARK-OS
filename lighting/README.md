@@ -31,8 +31,10 @@ pio run -t upload        # build and flash over USB (ESP32 dev module)
 pio device monitor       # 460800 baud; type PING, INFO, CFGGET…
 ```
 
-Targets a classic ESP32 (WROOM). The data pins a zone may use are GPIO 4, 5, 13, 14,
+Targets a classic ESP32 (WROOM). The data pins a zone may use are GPIO 2, 4, 5, 13, 14,
 16–19, 21–23, 25–27, 32, 33 (on a WROVER module, avoid 16 and 17: they're its PSRAM).
+GPIO 2 also drives the blue LED on most dev boards (it flickers with the strip), and is
+read at reset: if an upload over USB fails to start, unplug the strip from it.
 Pins, LED counts, colour order, RGBW, data speed and direction are set in Dash's
 **Settings > Lighting** and stored on the board. The daemon finds the board by itself
 (USB serial: CP210x, CH340/CH9102, FTDI, ESP32 native USB); Settings > Lighting can pin
@@ -69,12 +71,20 @@ Over the network and USB (JSON), the tabs' patterns map to WLED effects:
 
 | Pattern | WLED effect | Pattern | WLED effect |
 |---|---|---|---|
-| Off | segment off | Twinkle | Twinkle |
-| Solid | Solid | Comet | Lighthouse |
-| Rainbow | Rainbow | VU Meter | Gravimeter |
-| Chase | Chase | Spectrum | Freqmatrix |
-| Breathe | Breathe | Beat Pulse | Puddlepeak |
-| Gradient | Gradient | | |
+| Off | segment off | Fire | Fire 2012 (WLED's own palette) |
+| Solid | Solid | Sparkle | Sparkle |
+| Rainbow | Rainbow | Scanner | Scanner |
+| Chase | Chase | Wipe | Wipe |
+| Breathe | Breathe | Wave | Running |
+| Gradient | Gradient | Fade | Fade |
+| Twinkle | Twinkle | Strobe | Strobe |
+| Comet | Lighthouse | Theater | Theater |
+| VU Meter | Gravimeter | Rainbow Runner | Rainbow Runner |
+| Spectrum | Freqmatrix | | |
+| Beat Pulse | Puddlepeak | | |
+
+The background colour goes in whichever of the effect's colour slots it uses as its
+background (often the second); WLED's effects only approximate ours.
 
 Music: ozark-lightd's analysis of what's playing goes to WLED as **audio sync** packets
 (UDP port 11988), which WLED's sound-reactive effects follow. That needs the
@@ -103,7 +113,7 @@ its sync mode to *receive* by itself. Settings > Lighting says so if the usermod
 
 | Method / signal | |
 |---|---|
-| `GetLook() → a{sv}` | `color`, `color2` (`#rrggbb`), `pattern` (0–10, see PROTOCOL.md), `speed`, `brightness` (0–255) |
+| `GetLook() → a{sv}` | `color`, `color2`, `background` (`#rrggbb`), `pattern` (0–19, see PROTOCOL.md), `speed`, `brightness` (0–255) |
 | `SetLook(a{sv})` | Any subset; applied immediately, saved on the board 2 s after the last change |
 | `LookChanged(a{sv})` | Whoever changed it: every tab stays in sync |
 

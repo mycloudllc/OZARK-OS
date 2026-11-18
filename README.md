@@ -3,9 +3,27 @@
 A touchscreen car head unit built on a Raspberry Pi 4. It runs **Ozark OS**, a custom
 Yocto (Scarthgap) Linux distribution. Ozark OS boots straight into a customised
 [OpenDash (Dash)](https://github.com/openDsh/dash) with Android Auto, FM/AM radio,
-Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB lighting.
+Bluetooth and local music, OBD-II vehicle data, vehicle controls for the TrailCommand hub,
+and RGB lighting, and can be controlled from a phone with the **Ozark Remote** app.
+
+An **Orange Pi 3B** version is in development on the
+[`orange-pi-3b`](https://github.com/mycloudllc/OZARK-OS/tree/orange-pi-3b) branch (see its
+`ORANGE-PI.md`).
 
 ![Android Auto](docs/screenshots/android-auto.png)
+
+## Download
+
+Ready-made images are on the [Releases](https://github.com/mycloudllc/OZARK-OS/releases) page:
+
+| File | |
+|---|---|
+| `ozark-os-trailcommand-<version>.img.xz` | Raspberry Pi 4: unpack and write to an SD card (8 GB or larger), e.g. with Raspberry Pi Imager or balenaEtcher, which unpack `.xz` themselves |
+| `ozark-os-orangepi3b-<version>.img.xz` | Orange Pi 3B v2.1 (development) |
+| `*.swu` | The same version as a software update: copy to a USB drive and install from Settings > Update, keeping your settings |
+| `ozark-remote-<version>.apk` | The Ozark Remote phone app for Android ([remote/](remote/)) |
+
+Release images have no SSH or serial login. To debug, build a dev image yourself (below).
 
 ## Features
 
@@ -20,7 +38,15 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
 - **Lighting**: interior front, interior rear and exterior RGBIC zones, with patterns and music
   sync. Drives the Ozark ESP32 firmware or a [WLED](https://kno.wled.ge) controller over Wi-Fi,
   USB (JSON) or USB (Adalight).
-- **Phone**: pair, connect and forget phones, all from the touchscreen.
+- **Vehicle**: speed, rpm, temperatures, battery, fuel and more from the OBD-II port (ELM327
+  adapter on USB or Bluetooth, or CAN), trouble codes (read and clear), tire pressures from
+  Bluetooth LE sensors or the TrailCommand hub, and dark mode with the headlights
+  ([vehicle/](vehicle/)).
+- **Bluetooth**: pair, connect and forget phones, and add OBD adapters and tire sensors, all from
+  the touchscreen.
+- **Phone app**: the Ozark Remote app (Android and iOS) controls media, radio, volume, lights,
+  vehicle data and settings over the radio's Wi-Fi or Bluetooth LE, paired once with a code on
+  the radio's screen ([remote/](remote/)).
 - **Network**: Wi-Fi hotspot (used by wireless Android Auto) on 5 GHz, plus 2.4 GHz with a USB
   Wi-Fi adapter; Ethernet, LTE modem and internet sharing.
 - **Equalizer**: 10-band, system-wide.
@@ -29,7 +55,8 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
   if the new version doesn't start.
 - **On-screen keyboard**: works for every text box, plugin settings included.
 - **Boot**: a branded splash from power-on until Dash is drawn, then quiet.
-- **Light and dark mode**, plus any accent colour from a colour wheel.
+- **Material 3 look**, light and dark mode, with the colour scheme made from any accent colour on
+  a colour wheel.
 
 ## Screenshots
 
@@ -80,6 +107,8 @@ Bluetooth and local music, vehicle controls for the TrailCommand hub, and RGB li
 | LTE modem (optional) | Any ModemManager-supported USB modem, such as Quectel or Sierra |
 | USB microphone (optional) | For Android Auto voice. Without one, the mic is skipped. |
 | TrailCommand hub | Vehicle data and controls, over the network |
+| OBD-II adapter (optional) | ELM327 on USB or Bluetooth, or a CAN transceiver (SocketCAN) |
+| Bluetooth LE tire sensors (optional) | The common "BLE TPMS" valve-cap or internal sensors |
 
 ## Repository layout
 
@@ -94,6 +123,8 @@ meta-ozark/             The Yocto layer: distro, image, Dash/OpenAuto recipes an
   classes/              ozark-slots: the A/B system slot layout
   recipes-graphics/     ozark-display (Qt/EGLFS environment), Barlow Condensed font
 opendash-trailcommand/  TrailCommand vehicle plugin for Dash
+vehicle/                ozark-vehicled: OBD-II, trouble codes, tire sensors, headlight input
+remote/                 ozark-remoted (the radio's side), the Ozark Remote app (Flutter), PROTOCOL.md
 lighting/               Lighting plugins, ozark-lightd daemon, ESP32 firmware
 branding/               Logo, badge and splash sources
 scripts/                build.sh, flash.sh, run-qemu.sh, make-splash.sh, make-keys.sh, make-release.sh
@@ -198,6 +229,12 @@ Beyond Dash, the layer adds:
 - **ozark-logs**: keeps logs on an `OZARKLOGS` partition on the SD card, so you can read them on a PC.
 - **TrailCommand plugin**: a Dash vehicle plugin for the TrailCommand hub
   ([opendash-trailcommand/](opendash-trailcommand/)).
+- **ozark-vehicled**: OBD-II over an ELM327 or CAN, trouble codes, Bluetooth LE tire sensors and
+  the headlight input, on D-Bus for Dash's Vehicle page, forwarded to the TrailCommand hub
+  ([vehicle/](vehicle/)).
+- **ozark-remoted**: the phone app's way in, over a WebSocket on the hotspot or a Bluetooth LE
+  GATT service, with pairing by on-screen code; it drives Dash, the lights, the vehicle service
+  and the network and update tools ([remote/](remote/)).
 
 ## Credits and licenses
 
